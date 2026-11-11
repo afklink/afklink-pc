@@ -6,7 +6,9 @@ targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
 # Every advisory is an error. An exception goes here with the advisory id and the reason.
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 is pulled in by str0m's DTLS crate (dimpl 0.7), but DTLS runs on its aws-lc-rs backend, so the affected RustCrypto P-256/P-384 code never executes. Remove when upgrading to str0m 0.25." },
+]
 
 [licenses]
 # Licenses that can be combined with AGPL-3.0-only in one program. A dependency under anything

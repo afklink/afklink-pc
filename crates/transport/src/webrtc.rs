@@ -1711,8 +1711,8 @@ async fn spawn_peer_task(
          the retransmission trace only at debug (trace_rtx)"
     );
 
-    // Build the Rtc as an answerer that only speaks H.264. Use the pure-Rust
-    // crypto backend so no C toolchain (aws-lc-rs / nasm / cmake) is required.
+    // Build the Rtc as an answerer that only speaks H.264. The provider is str0m's RustCrypto one,
+    // but its DTLS layer (dimpl) is built with aws-lc-rs and runs on it, so aws-lc ships too.
     let mut config = Rtc::builder()
         .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
         .clear_codecs()

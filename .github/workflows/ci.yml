@@ -91,6 +91,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml names the exact compiler and components.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: DTLS runs on aws-lc-rs
+        # deny.toml ignores an advisory in the RustCrypto P-256/P-384 code that dimpl also compiles;
+        # that holds only while dimpl is built with aws-lc-rs, which it then picks over RustCrypto.
+        run: |
+          cargo tree -e features -i dimpl --target x86_64-pc-windows-msvc --locked > "$RUNNER_TEMP/dimpl.txt"
+          if ! grep -qF 'dimpl feature "aws-lc-rs"' "$RUNNER_TEMP/dimpl.txt"; then
+            cat "$RUNNER_TEMP/dimpl.txt"
+            echo "::error::dimpl is built without aws-lc-rs; revisit the ignored advisory in deny.toml"
+            exit 1
+          fi
+
       - name: Licenses, advisories, bans and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
