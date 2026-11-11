@@ -11,8 +11,8 @@ ignore-dev-dependencies = true
 ignore-build-dependencies = false
 
 # License texts come from the crates' own files (or the SPDX text when a crate ships none), never
-# from a web service, so the same lockfile gives the same file.
-no-clearly-defined = true
+# from a web service, so the same lockfile gives the same file. (cargo-about 0.9 has no web lookup
+# left, so there is nothing to switch off.)
 
 # The licenses cargo-deny allows (deny.toml at the root), in order of preference: for a crate
 # offered under several, the first one here is the one listed.

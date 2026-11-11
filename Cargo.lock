@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-agent"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-capture",
  "afklink-clipboard",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-app"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-capture",
  "afklink-clipboard",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-capture"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-core",
  "anyhow",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-clipboard"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-core",
  "afklink-protocol",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-protocol",
  "afklink-transport",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-corpus"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-capture",
  "afklink-core",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-encode"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-core",
  "anyhow",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-game-helper"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-hw"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-protocol",
  "base64 0.22.1",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-i18n"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "tracing",
  "windows 0.62.2",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-input"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-core",
  "afklink-protocol",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-netem"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "tracing",
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-protocol"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-sim"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-core",
  "afklink-encode",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "afklink-transport"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "afklink-netem",
  "afklink-protocol",
