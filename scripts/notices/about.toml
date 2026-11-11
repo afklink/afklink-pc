@@ -1,0 +1,32 @@
+# cargo-about: https://embarkstudios.github.io/cargo-about/
+# Read by scripts/notices.ts, which runs `cargo about generate --format json` for afklink-app and
+# writes THIRD-PARTY-NOTICES.txt from it.
+
+# The exe is built for 64-bit Windows only: crates behind other targets' cfg() are left out.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Tests and benches never ship. Build dependencies stay listed: build scripts compile C and
+# assembly into the exe (OpenH264, aws-lc), so listing them errs on the side of completeness.
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+
+# License texts come from the crates' own files (or the SPDX text when a crate ships none), never
+# from a web service, so the same lockfile gives the same file.
+no-clearly-defined = true
+
+# The licenses cargo-deny allows (deny.toml at the root), in order of preference: for a crate
+# offered under several, the first one here is the one listed.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unlicense",
+  "CC0-1.0",
+  "MPL-2.0",
+  "BSL-1.0",
+  "AGPL-3.0-only",
+]

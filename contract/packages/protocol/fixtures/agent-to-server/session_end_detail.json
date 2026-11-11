@@ -1,0 +1,14 @@
+{
+  "type": "session_end",
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "reason": "peer_closed",
+  "detail": {
+    "ended_detail": "rtc",
+    "stage": "dtls",
+    "verdict": "nothing_from_viewer",
+    "dtls_after_ice_ms": 9800,
+    "pair_local_kind": "host",
+    "pair_remote_kind": "relay",
+    "relay_transport": "tls"
+  }
+}

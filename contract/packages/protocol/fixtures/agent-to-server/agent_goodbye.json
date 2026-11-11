@@ -1,0 +1,4 @@
+{
+  "type": "agent_goodbye",
+  "reason": "shutdown"
+}

@@ -1,0 +1,13 @@
+{
+  "version": "0.7.1",
+  "notes": "### Исправлено\n\n- Приложение больше не зависает в фоновом режиме.",
+  "pub_date": "2026-10-15T18:07:10Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaHFHd2MxREtRak9ZSlpndHlrU3FWZU9peXFZWWVldjcrT1pJb0NxMjhaSnRFdms3Sm5QTE9KajM3UnZWZ21BZzdQY29XakxoNGpFVUJaNEoxd0JHR3lFU1c0c1EwaXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDg4MTQ5CWZpbGU6QUZLTGluay0wLjcuMS5leGUJdmVyc2lvbjowLjcuMQoyM2dNb3B6QVVUaldxZWhJNzBGanlFdGdDNVJrQXAzSkkvd2tuOE1KTVp2MjJ2dzZydFVoUVJ6eld6TUlDTTNjMnJueS9qL0Q3S0FFOWxCald2dzhBUT09Cg==",
+      "url": "https://api.afklink.app/download/AFKLink-0.7.1.exe",
+      "sha256": "74bf874fdc5e5a9ec6156cdb828477b0bcfd7589abd7a4ad2ab3199dcaca1a16",
+      "size": 35435008
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "type": "error",
+  "code": "pubkey_mismatch",
+  "message": "device is pinned to another key"
+}

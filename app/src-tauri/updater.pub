@@ -1,0 +1,9 @@
+# AFKLink's update public key (minisign, `cargo tauri signer generate`), ID 8C9032D41C6CA821.
+#
+# One line: the contents of the key's .pub file (a base64 string). Lines starting with "#" are
+# comments. This key is public and holds no secret. The private key is held by the release
+# signing environment only and is never in the repository.
+#
+# Who reads it: the release build checks the exe's signature with it, and the built-in updater
+# trusts only updates signed by the matching private key.
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDOTAzMkQ0MUM2Q0E4MjEKUldRaHFHd2MxREtRakNEVFhzbXBQU3Q1ckNQQ1o5S1o1b01aZUR2S09uVW4wK2RUczEvQ2xVNDEK

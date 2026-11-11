@@ -1,0 +1,159 @@
+[package]
+name = "afklink-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AFKLink agent desktop app (Tauri v2)"
+
+[lib]
+name = "afklink_app_lib"
+# An rlib only: the exe and the tests link it. Tauri's template adds cdylib and staticlib for mobile
+# targets this app does not build; they cost a DLL and a LIB link on every change. Not "lib":
+# after a core edit that one fails to link `tests/updater_http.rs`.
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "afklink-app"
+path = "src/main.rs"
+# main.rs only calls `afklink_app_lib::run()`: no tests, so no test harness to link.
+test = false
+
+[features]
+# A TEST build for the update rollback tests: embeds `updater-test.pub` INSTEAD of
+# `updater.pub`, so it installs only updates signed with the test key, and no production copy ever
+# installs one of its broken builds. Off by default, never in a published release: only
+# `bun scripts/release-build.ts --test-key` turns it on (it refuses under GitHub Actions and
+# beside the production signing key), and build.rs refuses a release-channel build with it unless
+# that script marked it (`build_test_key.rs`), and under GitHub Actions always. `updater::pubkey`,
+# «The test key»; a test holds this off in `default`.
+updater-test-key = []
+# A development build's orchestrator fault on demand (`src/dev_fault.rs`), to try the supervision by
+# hand: `bun run portable --dev-fault`. Off by default and never in a release build, which has no such
+# code at all; even when compiled in, only a dev-channel build arms it. Its unit tests run in every
+# `cargo test` (the module is compiled for tests too).
+dev-fault = []
+
+[build-dependencies]
+# Floors, not caps: the Tauri set (this, `tauri`, its plugins below) is moved together — tauri 2.12
+# locks its own crates to one minor — and never below what was checked against the advisories.
+tauri-build = { version = "2.7.1", features = [] }
+# build.rs refuses to build unless the embedded FakerInput MSI matches its pinned SHA-256.
+sha2 = { workspace = true }
+
+[dependencies]
+afklink-core = { path = "../../crates/core" }
+afklink-clipboard = { path = "../../crates/clipboard" }
+afklink-game-helper = { path = "../../crates/game-helper" }
+afklink-capture = { path = "../../crates/capture" }
+# The PC's hardware fingerprint for `agent_hello.hw` (the invite-only beta).
+afklink-hw = { path = "../../crates/hw" }
+afklink-encode = { path = "../../crates/encode" }
+afklink-i18n = { path = "../../crates/i18n" }
+afklink-input = { path = "../../crates/input" }
+afklink-protocol = { path = "../../crates/protocol" }
+afklink-transport = { path = "../../crates/transport" }
+
+# `image-png`: the tray's per-theme, per-size icons are PNGs decoded at runtime (`tray_theme`).
+# At least 2.12.2: up to 2.11.5 any script in any of our webviews could read another webview's
+# channel data (GHSA-w28w-mhc8-qvjv, fixed in 2.11.6 / 2.12.0). The window's `@tauri-apps/api`
+# (app/ui/package.json) must be on the same minor: `cargo tauri build` refuses a mismatch.
+tauri = { version = "2.12.2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.5.1"
+tauri-plugin-single-instance = "2.5.2"
+# Self-update (`updater`) is the app's own code: the manifest check and the download over reqwest
+# (below), the minisign signature check over `minisign-verify`. No tauri-plugin-updater: its
+# config would be a second place for a key; a test keeps it out of here and of
+# `tauri.conf.json`.
+# Swaps the running exe for the downloaded one in place (`updater::apply`).
+self-replace = "1.5"
+# Versions compared as tauri-plugin-updater compared them; `updater.pub` and the signature's trusted
+# comment decoded as it decoded them.
+semver = "1"
+base64 = { workspace = true }
+minisign-verify = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The release build has no console (`windows_subsystem = "windows"`), so stdout goes nowhere and
+# without a file there is no record of a real session at all.
+tracing-appender = "0.2"
+# The embedded FakerInput installer: re-hashed through the handle that keeps the unpacked copy
+# read-only, in a directory named with a fresh v4 UUID.
+sha2 = { workspace = true }
+uuid = { workspace = true }
+# The HTTP client of the update's check and download (`updater::fetch`), of «Отправить логи»
+# (`diagnostics`: the signed upload) and of the start failure beacon (`start_failure`): reqwest
+# 0.13, TLS through SChannel like the signaling connection (tokio-tungstenite's `native-tls`). The
+# report's zip deflated with flate2, its nonce from the OS generator the identity key comes from.
+# `stream`: a body handed over or read chunk by chunk, so an upload the connection stops taking is
+# seen (`diagnostics::upload`, the RU entry) and a download is held to its byte limit as it streams.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "stream"] }
+# The chunked body's stream (already in the tree through the transport).
+futures-util = { workspace = true }
+bytes = "1"
+flate2 = "1"
+getrandom = { workspace = true }
+
+# The autostart entry (`autostart`): HKCU `...\Run` «AFKLink» and Task Manager's on/off record for it,
+# plus removing the «Remoter» entry a build from before the rename wrote.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+# SystemInformation: msiexec's path (GetSystemDirectoryW). ApplicationInstallationAndServicing:
+# the MSI API (is FakerInput registered with Windows Installer, which version). FileSystem: the
+# FILE_SHARE_READ share mode the unpacked installer and a staged update are held with.
+# WindowsAndMessaging and Shell: the message box and the download page when the WebView2 Runtime is
+# missing (`webview_runtime`). Threading and Security: the update's process waits and ends, and the
+# watchdog's named lock (`updater::process`). Globalization: Windows' display language, for the
+# button names the driver dialog quotes (`fakerinput_setup::WindowsLanguage`). Dwm and Gdi: whether
+# the main window is on screen — cloaked, on a monitor, covered (`driver_hint`). The game helper's
+# setup and signal (`game_helper::system`): Security_Authorization (the SID as text, the owner's
+# `user\` directory's ACL), Com/Ole/TaskScheduler/Variant (its task), LibraryLoader (the launch
+# exe's manifest, read as data), Shell and Shell_Common (the elevation prompt, the Open dialog),
+# Diagnostics_ToolHelp and RemoteDesktop (the process list and sessions the game's launcher is
+# learned from). Power: the suspend and resume notifications the goodbye to the backend follows
+# (`system_events`, with WindowsAndMessaging for its hidden window). Wdk_System_SystemServices:
+# `RtlGetVersion`, the Windows build the start failure beacon names (`start_failure`; afklink-capture
+# enables the same feature, so nothing more is compiled). WindowsProgramming:
+# `QueryUnbiasedInterruptTime`, which with `GetTickCount64` tells an outage slept through from one
+# the PC was awake for (`diagnostics::auto`).
+windows = { workspace = true, features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+    "Win32_System_SystemInformation",
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
+[dev-dependencies]
+# Throwaway signing keys and signatures made the way `cargo tauri signer` makes them: for the
+# update's check and download end to end against a local server (`tests/updater_http.rs`), and for
+# the unit tests of reading `updater.pub` and verifying a signature (`updater::pubkey`,
+# `updater::manifest`).
+minisign = "0.7"
+# The report's signature checked with the public key, as the server checks it (`diagnostics::upload`).
+ed25519-dalek = { workspace = true }
+
+[lints]
+workspace = true

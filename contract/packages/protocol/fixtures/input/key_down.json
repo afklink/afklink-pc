@@ -1,0 +1,12 @@
+{
+  "t": "k",
+  "d": 1,
+  "code": "KeyA",
+  "key": "a",
+  "mods": {
+    "ctrl": false,
+    "alt": false,
+    "shift": false,
+    "meta": false
+  }
+}

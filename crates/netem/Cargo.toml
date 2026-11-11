@@ -1,0 +1,20 @@
+[package]
+name = "afklink-netem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure network-path model (bottleneck, drop-tail queue, loss, delay, jitter) driven by any clock: virtual time in the simulator, real time in the agent's bench link shaper"
+
+[lib]
+name = "afklink_netem"
+path = "src/lib.rs"
+
+# No dependencies beyond logging, on purpose: the model is a function of its arrivals, its clock
+# and its seed, and both the simulator and the transport crate link it.
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

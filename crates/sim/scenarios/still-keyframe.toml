@@ -1,0 +1,40 @@
+# Defect 1, the keyframe half: a still screen whose estimate our silence has pulled down, and a
+# keyframe burst behind it. In the recorded VPN session each rung change's own keyframe did this
+# — 900p's 63 kB queued 1258 ms behind a ~110 kbps pacer, and 720p's 48 kB after it —
+# and each fed the next descent. Here the keyframes are the viewer's (`[viewer] keyframe_at_s`: the
+# Mini App's `kf`, which its render watchdog sends), on a thin path with a deep buffer that queues
+# rather than drops, so the only queue that forms is our own pacer's.
+#
+# Without the fix the startup queue jump reads the first keyframe's 1010 ms as "the link
+# refuses the rung" and takes 1080p60 to 360p@15 at 16.9 s, then `queue_late` takes 360p@8 — on
+# a screen producing 2 kbps, the round trip on its baseline. The ladder should hold:
+# 300 kbps carries a still screen and a keyframe every ten seconds, and the viewer can see the
+# difference between 1080p and 360p@8. See `QualityController::pacer_only` and
+# `watch_startup_queue`.
+name = "still-keyframe"
+duration_s = 90
+seed = 3
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 30.0
+cps = 0.3
+
+[link]
+rtt_ms = 200
+
+[link.up]
+kbps = 300
+queue_ms = 3000
+jitter_ms = 60
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 60
+
+[viewer]
+keyframe_at_s = [15, 25, 35, 45, 55, 65, 75]

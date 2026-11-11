@@ -1,0 +1,65 @@
+[package]
+name = "afklink-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "afklink_input"
+path = "src/lib.rs"
+
+[dependencies]
+afklink-core = { path = "../core" }
+afklink-protocol = { path = "../protocol" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Storage_FileSystem",
+    # Required for the SECURITY_ATTRIBUTES parameter of CreateFileW / CreateEventW, even though the
+    # agent passes it as null.
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    # Typing game text: the layout's code page for the layout-switch request, and the user's
+    # language hotkey (`HKCU\Keyboard Layout\Toggle`).
+    "Win32_Globalization",
+    "Win32_System_Registry",
+    # Cursor sync: the primary monitor's DPI (the display scale Windows applies to relative
+    # moves) and the injecting thread's DPI awareness.
+    "Win32_UI_HiDpi",
+] }
+
+[dev-dependencies]
+# The log-capture test: typed text must never reach the log.
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The mouse probe (`src/fakerinput/mouse_probe.rs`, an ignored test run by hand): the 1 ms timer
+# period, a raw-input sink, local time for its file name and a process's exe name without opening
+# the process (per-monitor DPI awareness comes with the main dependency's `Win32_UI_HiDpi`). Test
+# builds only; the agent does not link any of it.
+windows = { workspace = true, features = [
+    "Win32_Media",
+    "Win32_UI_Input",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
+[lints]
+workspace = true

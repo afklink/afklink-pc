@@ -1,0 +1,1070 @@
+{
+  "$id": "https://afklink.dev/schema/agent-to-server.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "agent_hello"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "device_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "pubkey": {
+          "type": "string",
+          "minLength": 44,
+          "maxLength": 44
+        },
+        "build": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^\\d{1,5}\\.\\d{1,5}\\.\\d{1,5}(-[0-9A-Za-z.-]{1,24})?$"
+            },
+            "commit": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{7,40}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "channel": {
+              "type": "string",
+              "enum": [
+                "dev",
+                "release"
+              ]
+            },
+            "dirty": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "version",
+            "channel"
+          ]
+        },
+        "boot_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "last_exit": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "app_exit",
+                "update_exit",
+                "panic",
+                "crash",
+                "os_shutdown",
+                "unknown"
+              ]
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "hw": {
+          "type": "object",
+          "properties": {
+            "hash": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "vm": {
+              "type": "boolean"
+            },
+            "parts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3
+            }
+          },
+          "required": [
+            "hash",
+            "vm",
+            "parts"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "protocol_version",
+        "device_id",
+        "pubkey"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "agent_auth"
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 88,
+          "maxLength": 88
+        }
+      },
+      "required": [
+        "type",
+        "signature"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request_pairing"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pairing_cancel"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pair_response"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "accept": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "guest"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "accept"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "device_name"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "unbind"
+        },
+        "telegram_user_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "type",
+        "telegram_user_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "owner_request"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "make_owner",
+            "unbind_owner"
+          ]
+        },
+        "telegram_user_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "type",
+        "kind",
+        "telegram_user_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "owner_request_cancel"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "type",
+        "request_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "sdp"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "sdp_type": {
+          "type": "string",
+          "enum": [
+            "offer",
+            "answer"
+          ]
+        },
+        "sdp": {
+          "type": "string",
+          "maxLength": 49152
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "sdp_type",
+        "sdp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ice"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "candidate": {
+          "type": "object",
+          "properties": {
+            "candidate": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "sdpMid": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sdpMLineIndex": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "usernameFragment": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "candidate"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "candidate"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_end"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "detail": {
+          "type": "object",
+          "properties": {
+            "ended_detail": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            },
+            "stage": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            },
+            "verdict": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            },
+            "dtls_after_ice_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2592000000
+            },
+            "pair_local_kind": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            },
+            "pair_remote_kind": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            },
+            "relay_transport": {
+              "type": "string",
+              "pattern": "^[a-z0-9_:]{1,32}$"
+            }
+          }
+        }
+      },
+      "required": [
+        "type",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session_stats"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "duration_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_w": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_h": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frames_captured": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frames_encoded": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frames_dropped_stale": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frames_dropped_paced": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frames_skipped_encoder": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "encode_ms_avg": {
+              "type": "number",
+              "minimum": 0
+            },
+            "encode_ms_max": {
+              "type": "number",
+              "minimum": 0
+            },
+            "bytes_sent": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "lowest_height": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "quality_changes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "estimate_kbps": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "encode_errors": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bg_hold_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bg_holds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "summary": {
+              "type": "object",
+              "properties": {
+                "rung_s": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "pattern": "^\\d{2,5}$"
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2592000
+                  }
+                },
+                "freeze_s": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2592000
+                },
+                "episodes": {
+                  "maxItems": 100,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "freeze",
+                          "brake",
+                          "drain",
+                          "path_change",
+                          "ice_restart",
+                          "capture_restart",
+                          "rung_change"
+                        ]
+                      },
+                      "at_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2592000000
+                      },
+                      "dur_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2592000000
+                      },
+                      "code": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9_]{1,32}$"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "at_ms"
+                    ]
+                  }
+                },
+                "episodes_dropped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "encode_ms_p95": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 60000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "abs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "rel": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "buttons": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "keys": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "text": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "abs",
+                    "rel",
+                    "buttons",
+                    "keys",
+                    "text"
+                  ]
+                },
+                "input_path": {
+                  "type": "string",
+                  "enum": [
+                    "sendinput",
+                    "hid"
+                  ]
+                },
+                "input_blocked_n": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capture_mode": {
+                  "type": "string",
+                  "enum": [
+                    "screen",
+                    "game_only"
+                  ]
+                },
+                "driver": {
+                  "type": "string",
+                  "enum": [
+                    "installed",
+                    "absent",
+                    "unknown"
+                  ]
+                },
+                "dropped_rate": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes_socket": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes_relay": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "quality_profile": {
+                  "type": "string",
+                  "maxLength": 48
+                },
+                "quality_profile_source": {
+                  "type": "string",
+                  "enum": [
+                    "server",
+                    "fallback"
+                  ]
+                }
+              }
+            }
+          },
+          "required": [
+            "duration_ms",
+            "source_w",
+            "source_h",
+            "frames_captured",
+            "frames_encoded",
+            "frames_dropped_stale",
+            "frames_dropped_paced",
+            "frames_skipped_encoder",
+            "encode_ms_avg",
+            "encode_ms_max",
+            "bytes_sent",
+            "lowest_height",
+            "quality_changes",
+            "estimate_kbps",
+            "encode_errors"
+          ]
+        },
+        "final": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "stats"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "pong"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "agent_goodbye"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "quit",
+            "shutdown",
+            "sleep",
+            "update"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "reason"
+      ]
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_event"
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_started"
+            },
+            "boot_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "first_run": {
+              "type": "boolean"
+            },
+            "build": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "string",
+                  "maxLength": 32,
+                  "pattern": "^\\d{1,5}\\.\\d{1,5}\\.\\d{1,5}(-[0-9A-Za-z.-]{1,24})?$"
+                },
+                "commit": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{7,40}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "channel": {
+                  "type": "string",
+                  "enum": [
+                    "dev",
+                    "release"
+                  ]
+                },
+                "dirty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "version",
+                "channel"
+              ]
+            },
+            "last_exit": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "app_exit",
+                    "update_exit",
+                    "panic",
+                    "crash",
+                    "os_shutdown",
+                    "unknown"
+                  ]
+                },
+                "at": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4102444800000
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "autostart": {
+              "type": "boolean"
+            },
+            "previous_record": {
+              "type": "string",
+              "enum": [
+                "found",
+                "missing",
+                "unreadable"
+              ]
+            },
+            "pc_restarted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "kind",
+            "boot_id",
+            "first_run",
+            "build",
+            "last_exit",
+            "autostart"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_event"
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_crashed"
+            },
+            "version": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^\\d{1,5}\\.\\d{1,5}\\.\\d{1,5}(-[0-9A-Za-z.-]{1,24})?$"
+            },
+            "place_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8,64}$"
+            },
+            "thread": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,32}$"
+            },
+            "uptime_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 31536000
+            },
+            "boot_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "kind",
+            "version",
+            "place_hash",
+            "thread",
+            "uptime_s"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_event"
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            },
+            "kind": {
+              "type": "string",
+              "const": "update_finished"
+            },
+            "from": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^\\d{1,5}\\.\\d{1,5}\\.\\d{1,5}(-[0-9A-Za-z.-]{1,24})?$"
+            },
+            "to": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^\\d{1,5}\\.\\d{1,5}\\.\\d{1,5}(-[0-9A-Za-z.-]{1,24})?$"
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "rolled_back"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,32}$"
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "kind",
+            "from",
+            "to",
+            "outcome"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_event"
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            },
+            "kind": {
+              "type": "string",
+              "const": "driver_install_finished"
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,32}$"
+            },
+            "code": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 4294967295
+            },
+            "ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2592000000
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "kind",
+            "outcome",
+            "step",
+            "ms"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_event"
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4102444800000
+            },
+            "kind": {
+              "type": "string",
+              "const": "pc_setting_changed"
+            },
+            "key": {
+              "type": "string",
+              "enum": [
+                "game_only",
+                "game_only_for_guests",
+                "game_helper",
+                "autostart",
+                "auto_update",
+                "log_level"
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_]{1,32}$"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "at",
+            "kind",
+            "key",
+            "value"
+          ]
+        }
+      ]
+    }
+  ]
+}

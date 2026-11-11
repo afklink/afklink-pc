@@ -1,0 +1,1049 @@
+{
+  "protocol_version": 1,
+  "groups": [
+    {
+      "name": "agent-to-server",
+      "schema": "agent-to-server.json",
+      "tag": "type",
+      "fixtures": [
+        {
+          "file": "agent-to-server/agent_hello.json",
+          "variant": "agent_hello"
+        },
+        {
+          "file": "agent-to-server/agent_hello_build.json",
+          "variant": "agent_hello"
+        },
+        {
+          "file": "agent-to-server/agent_hello_hw.json",
+          "variant": "agent_hello"
+        },
+        {
+          "file": "agent-to-server/agent_auth.json",
+          "variant": "agent_auth"
+        },
+        {
+          "file": "agent-to-server/request_pairing.json",
+          "variant": "request_pairing"
+        },
+        {
+          "file": "agent-to-server/pairing_cancel.json",
+          "variant": "pairing_cancel"
+        },
+        {
+          "file": "agent-to-server/pair_response.json",
+          "variant": "pair_response"
+        },
+        {
+          "file": "agent-to-server/device_name.json",
+          "variant": "device_name"
+        },
+        {
+          "file": "agent-to-server/unbind.json",
+          "variant": "unbind"
+        },
+        {
+          "file": "agent-to-server/owner_request.json",
+          "variant": "owner_request"
+        },
+        {
+          "file": "agent-to-server/owner_request_cancel.json",
+          "variant": "owner_request_cancel"
+        },
+        {
+          "file": "agent-to-server/sdp.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "agent-to-server/ice.json",
+          "variant": "ice"
+        },
+        {
+          "file": "agent-to-server/session_end.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "agent-to-server/session_end_detail.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "agent-to-server/session_stats.json",
+          "variant": "session_stats"
+        },
+        {
+          "file": "agent-to-server/session_stats_final.json",
+          "variant": "session_stats"
+        },
+        {
+          "file": "agent-to-server/pong.json",
+          "variant": "pong"
+        },
+        {
+          "file": "agent-to-server/agent_goodbye.json",
+          "variant": "agent_goodbye"
+        },
+        {
+          "file": "agent-to-server/agent_event_started.json",
+          "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/agent_event_crashed.json",
+          "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/agent_event_update.json",
+          "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/agent_event_driver.json",
+          "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/agent_event_setting.json",
+          "variant": "agent_event"
+        }
+      ]
+    },
+    {
+      "name": "server-to-agent",
+      "schema": "server-to-agent.json",
+      "tag": "type",
+      "fixtures": [
+        {
+          "file": "server-to-agent/challenge.json",
+          "variant": "challenge"
+        },
+        {
+          "file": "server-to-agent/agent_ready.json",
+          "variant": "agent_ready"
+        },
+        {
+          "file": "server-to-agent/pairing_code.json",
+          "variant": "pairing_code"
+        },
+        {
+          "file": "server-to-agent/pair_request.json",
+          "variant": "pair_request"
+        },
+        {
+          "file": "server-to-agent/pair_cancelled.json",
+          "variant": "pair_cancelled"
+        },
+        {
+          "file": "server-to-agent/binding_added.json",
+          "variant": "binding_added"
+        },
+        {
+          "file": "server-to-agent/binding_added_invite.json",
+          "variant": "binding_added"
+        },
+        {
+          "file": "server-to-agent/binding_removed.json",
+          "variant": "binding_removed"
+        },
+        {
+          "file": "server-to-agent/owner_changed.json",
+          "variant": "owner_changed"
+        },
+        {
+          "file": "server-to-agent/owner_changed_none.json",
+          "variant": "owner_changed"
+        },
+        {
+          "file": "server-to-agent/owner_request_state.json",
+          "variant": "owner_request_state"
+        },
+        {
+          "file": "server-to-agent/owner_request_state_cancelled.json",
+          "variant": "owner_request_state"
+        },
+        {
+          "file": "server-to-agent/owner_request_state_refused.json",
+          "variant": "owner_request_state"
+        },
+        {
+          "file": "server-to-agent/owner_request_state_pc_allow.json",
+          "variant": "owner_request_state"
+        },
+        {
+          "file": "server-to-agent/owner_request_state_by_requester.json",
+          "variant": "owner_request_state"
+        },
+        {
+          "file": "server-to-agent/session_request.json",
+          "variant": "session_request"
+        },
+        {
+          "file": "server-to-agent/session_request_profile.json",
+          "variant": "session_request"
+        },
+        {
+          "file": "server-to-agent/sdp.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "server-to-agent/ice.json",
+          "variant": "ice"
+        },
+        {
+          "file": "server-to-agent/session_end.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "server-to-agent/ping.json",
+          "variant": "ping"
+        },
+        {
+          "file": "server-to-agent/error.json",
+          "variant": "error"
+        },
+        {
+          "file": "server-to-agent/error_pairing_codes.json",
+          "variant": "error"
+        }
+      ]
+    },
+    {
+      "name": "viewer-to-server",
+      "schema": "viewer-to-server.json",
+      "tag": "type",
+      "fixtures": [
+        {
+          "file": "viewer-to-server/viewer_hello.json",
+          "variant": "viewer_hello"
+        },
+        {
+          "file": "viewer-to-server/viewer_hello_ticket.json",
+          "variant": "viewer_hello"
+        },
+        {
+          "file": "viewer-to-server/viewer_hello_client.json",
+          "variant": "viewer_hello"
+        },
+        {
+          "file": "viewer-to-server/connect.json",
+          "variant": "connect"
+        },
+        {
+          "file": "viewer-to-server/sdp.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "viewer-to-server/ice.json",
+          "variant": "ice"
+        },
+        {
+          "file": "viewer-to-server/session_end.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "viewer-to-server/session_end_detail.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "viewer-to-server/connect_attempt.json",
+          "variant": "connect_attempt"
+        },
+        {
+          "file": "viewer-to-server/connect_attempt_fail.json",
+          "variant": "connect_attempt"
+        },
+        {
+          "file": "viewer-to-server/connect_attempt_race.json",
+          "variant": "connect_attempt"
+        },
+        {
+          "file": "viewer-to-server/client_error.json",
+          "variant": "client_error"
+        },
+        {
+          "file": "viewer-to-server/pair_cancel.json",
+          "variant": "pair_cancel"
+        },
+        {
+          "file": "viewer-to-server/session_stats.json",
+          "variant": "session_stats"
+        },
+        {
+          "file": "viewer-to-server/session_stats_final.json",
+          "variant": "session_stats"
+        },
+        {
+          "file": "viewer-to-server/session_stats_older.json",
+          "variant": "session_stats"
+        },
+        {
+          "file": "viewer-to-server/pong.json",
+          "variant": "pong"
+        }
+      ]
+    },
+    {
+      "name": "server-to-viewer",
+      "schema": "server-to-viewer.json",
+      "tag": "type",
+      "fixtures": [
+        {
+          "file": "server-to-viewer/viewer_ready.json",
+          "variant": "viewer_ready"
+        },
+        {
+          "file": "server-to-viewer/session_created.json",
+          "variant": "session_created"
+        },
+        {
+          "file": "server-to-viewer/session_created_turn_only.json",
+          "variant": "session_created"
+        },
+        {
+          "file": "server-to-viewer/sdp.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "server-to-viewer/ice.json",
+          "variant": "ice"
+        },
+        {
+          "file": "server-to-viewer/session_end.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "server-to-viewer/pair_accepted.json",
+          "variant": "pair_accepted"
+        },
+        {
+          "file": "server-to-viewer/pair_declined.json",
+          "variant": "pair_declined"
+        },
+        {
+          "file": "server-to-viewer/pair_declined_gate.json",
+          "variant": "pair_declined"
+        },
+        {
+          "file": "server-to-viewer/pair_owner_asked.json",
+          "variant": "pair_owner_asked"
+        },
+        {
+          "file": "server-to-viewer/devices_changed.json",
+          "variant": "devices_changed"
+        },
+        {
+          "file": "server-to-viewer/features_changed.json",
+          "variant": "features_changed"
+        },
+        {
+          "file": "server-to-viewer/beta_changed.json",
+          "variant": "beta_changed"
+        },
+        {
+          "file": "server-to-viewer/settings_changed.json",
+          "variant": "settings_changed"
+        },
+        {
+          "file": "server-to-viewer/owner_requests_changed.json",
+          "variant": "owner_requests_changed"
+        },
+        {
+          "file": "server-to-viewer/ping.json",
+          "variant": "ping"
+        },
+        {
+          "file": "server-to-viewer/error.json",
+          "variant": "error"
+        }
+      ]
+    },
+    {
+      "name": "input",
+      "schema": "input.json",
+      "tag": "t",
+      "fixtures": [
+        {
+          "file": "input/move.json",
+          "variant": "m"
+        },
+        {
+          "file": "input/rel.json",
+          "variant": "r"
+        },
+        {
+          "file": "input/rel_numbered.json",
+          "variant": "r"
+        },
+        {
+          "file": "input/rel_target.json",
+          "variant": "r"
+        },
+        {
+          "file": "input/wheel_pixel.json",
+          "variant": "w"
+        },
+        {
+          "file": "input/wheel_line.json",
+          "variant": "w"
+        },
+        {
+          "file": "input/wheel_game.json",
+          "variant": "w"
+        },
+        {
+          "file": "input/down.json",
+          "variant": "d"
+        },
+        {
+          "file": "input/up.json",
+          "variant": "u"
+        },
+        {
+          "file": "input/key_down.json",
+          "variant": "k"
+        },
+        {
+          "file": "input/key_up.json",
+          "variant": "k"
+        },
+        {
+          "file": "input/key_down_cell.json",
+          "variant": "k"
+        },
+        {
+          "file": "input/key_down_sheet.json",
+          "variant": "k"
+        },
+        {
+          "file": "input/combo.json",
+          "variant": "combo"
+        },
+        {
+          "file": "input/text.json",
+          "variant": "text"
+        },
+        {
+          "file": "input/text_game.json",
+          "variant": "text"
+        },
+        {
+          "file": "input/release_all.json",
+          "variant": "ra"
+        },
+        {
+          "file": "input/quality.json",
+          "variant": "q"
+        },
+        {
+          "file": "input/viewer_latency.json",
+          "variant": "vl"
+        },
+        {
+          "file": "input/viewer_video.json",
+          "variant": "vv"
+        },
+        {
+          "file": "input/keyframe_request.json",
+          "variant": "kf"
+        },
+        {
+          "file": "input/visibility_hidden.json",
+          "variant": "vis"
+        },
+        {
+          "file": "input/visibility_visible.json",
+          "variant": "vis"
+        },
+        {
+          "file": "input/clipboard_sync.json",
+          "variant": "cb_sync"
+        },
+        {
+          "file": "input/clipboard_set.json",
+          "variant": "cb_set"
+        }
+      ]
+    },
+    {
+      "name": "agent-to-viewer",
+      "schema": "agent-to-viewer.json",
+      "tag": "t",
+      "fixtures": [
+        {
+          "file": "agent-to-viewer/heartbeat_ok.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_rel_exact.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_game.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_game_absent.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_game_launching.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_restarting.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_no_driver.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_input_blocked.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_vis_ok.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/heartbeat_bg_hold.json",
+          "variant": "hb"
+        },
+        {
+          "file": "agent-to-viewer/cursor.json",
+          "variant": "cp"
+        },
+        {
+          "file": "agent-to-viewer/cursor_hidden.json",
+          "variant": "cp"
+        },
+        {
+          "file": "agent-to-viewer/clipboard_state.json",
+          "variant": "cb_state"
+        },
+        {
+          "file": "agent-to-viewer/clipboard_state_to_pc_only.json",
+          "variant": "cb_state"
+        },
+        {
+          "file": "agent-to-viewer/clipboard_pc.json",
+          "variant": "cb_pc"
+        },
+        {
+          "file": "agent-to-viewer/clipboard_ack.json",
+          "variant": "cb_ack"
+        },
+        {
+          "file": "agent-to-viewer/clipboard_ack_refused.json",
+          "variant": "cb_ack"
+        }
+      ]
+    },
+    {
+      "name": "product-events",
+      "schema": "product-events.json",
+      "tag": "name",
+      "fixtures": [
+        {
+          "file": "product-events/pairing_code_shown.json",
+          "variant": "pairing_code_shown"
+        },
+        {
+          "file": "product-events/pairing_requested.json",
+          "variant": "pairing_requested"
+        },
+        {
+          "file": "product-events/pairing_confirmed.json",
+          "variant": "pairing_confirmed"
+        },
+        {
+          "file": "product-events/pairing_declined.json",
+          "variant": "pairing_declined"
+        },
+        {
+          "file": "product-events/pairing_expired.json",
+          "variant": "pairing_expired"
+        },
+        {
+          "file": "product-events/device_unbound.json",
+          "variant": "device_unbound"
+        },
+        {
+          "file": "product-events/feature_granted.json",
+          "variant": "feature_granted"
+        },
+        {
+          "file": "product-events/feature_revoked.json",
+          "variant": "feature_revoked"
+        },
+        {
+          "file": "product-events/agent_start_failed.json",
+          "variant": "agent_start_failed"
+        },
+        {
+          "file": "product-events/bot_started.json",
+          "variant": "bot_started"
+        },
+        {
+          "file": "product-events/download_sent.json",
+          "variant": "download_sent"
+        },
+        {
+          "file": "product-events/app_opened.json",
+          "variant": "app_opened"
+        },
+        {
+          "file": "product-events/connect_attempted.json",
+          "variant": "connect_attempted"
+        },
+        {
+          "file": "product-events/agent_started.json",
+          "variant": "agent_started"
+        },
+        {
+          "file": "product-events/agent_crashed.json",
+          "variant": "agent_crashed"
+        },
+        {
+          "file": "product-events/update_finished.json",
+          "variant": "update_finished"
+        },
+        {
+          "file": "product-events/driver_install_finished.json",
+          "variant": "driver_install_finished"
+        },
+        {
+          "file": "product-events/pc_setting_changed.json",
+          "variant": "pc_setting_changed"
+        },
+        {
+          "file": "product-events/client_error.json",
+          "variant": "client_error"
+        },
+        {
+          "file": "product-events/help_opened.json",
+          "variant": "help_opened"
+        },
+        {
+          "file": "product-events/feedback_received.json",
+          "variant": "feedback_received"
+        },
+        {
+          "file": "product-events/server_started.json",
+          "variant": "server_started"
+        },
+        {
+          "file": "product-events/beta_link_opened.json",
+          "variant": "beta_link_opened"
+        },
+        {
+          "file": "product-events/beta_member_added.json",
+          "variant": "beta_member_added"
+        },
+        {
+          "file": "product-events/beta_waitlisted.json",
+          "variant": "beta_waitlisted"
+        },
+        {
+          "file": "product-events/beta_waitlist_decided.json",
+          "variant": "beta_waitlist_decided"
+        },
+        {
+          "file": "product-events/beta_gate_refused.json",
+          "variant": "beta_gate_refused"
+        },
+        {
+          "file": "product-events/own_pc_added.json",
+          "variant": "own_pc_added"
+        },
+        {
+          "file": "product-events/pass_granted.json",
+          "variant": "pass_granted"
+        },
+        {
+          "file": "product-events/pass_revoked.json",
+          "variant": "pass_revoked"
+        },
+        {
+          "file": "product-events/admin_acted.json",
+          "variant": "admin_acted"
+        },
+        {
+          "file": "product-events/web_login_started.json",
+          "variant": "web_login_started"
+        },
+        {
+          "file": "product-events/web_login_opened.json",
+          "variant": "web_login_opened"
+        },
+        {
+          "file": "product-events/web_login_done.json",
+          "variant": "web_login_done"
+        },
+        {
+          "file": "product-events/web_login_failed.json",
+          "variant": "web_login_failed"
+        },
+        {
+          "file": "product-events/connect_nudge_decided.json",
+          "variant": "connect_nudge_decided"
+        }
+      ]
+    },
+    {
+      "name": "rest",
+      "schema": "rest-*.json",
+      "tag": null,
+      "fixtures": [
+        {
+          "file": "rest/pair_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/pair_pending_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/pair_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/patch_device_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/devices_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/ok_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/error_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/health_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/diagnostics_agent_meta.json",
+          "variant": null
+        },
+        {
+          "file": "rest/diagnostics_agent_meta_auto.json",
+          "variant": null
+        },
+        {
+          "file": "rest/diagnostics_agent_headers.json",
+          "variant": null
+        },
+        {
+          "file": "rest/diagnostics_viewer_report.json",
+          "variant": null
+        },
+        {
+          "file": "rest/diagnostics_receipt.json",
+          "variant": null
+        },
+        {
+          "file": "rest/agent_start_failure.json",
+          "variant": null
+        },
+        {
+          "file": "rest/viewer_attempt.json",
+          "variant": null
+        },
+        {
+          "file": "rest/viewer_client_error.json",
+          "variant": null
+        },
+        {
+          "file": "rest/viewer_download.json",
+          "variant": null
+        },
+        {
+          "file": "rest/settings_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/settings_patch_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/settings_patch_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/auth_me_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/web_sessions_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/revoke_sessions_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/ws_ticket_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dev_login_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/bot_login_start_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/bot_login_start_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/bot_login_status_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/bot_login_status_response_burned.json",
+          "variant": null
+        },
+        {
+          "file": "rest/bot_login_finish_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/owner_requests_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/owner_request_answer_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/owner_request_answer_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_create_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_token_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_peek_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_peek_response_granted.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_peek_response_not_found.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_claim_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/device_guests_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/guest_remove_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_status_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_status_response_waitlisted.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_status_response_gate_off.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_code_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_peek_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_join_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_join_response_not_found.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_share_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/beta_gate_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_overview_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_people_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_person_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_decision_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_person_patch_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_person_patch_request_unlimited.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_person_patch_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_reason_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_link_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_link_alias_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_link_alias_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_settings.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_settings_patch_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_blocks_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_block_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_block_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_changed_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_passes_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_pass_grant_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_pass_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_activity_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_hw_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_hw_review_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_hw_review_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_audit_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_me_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_sessions_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_session_view.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_fails_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_features_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_feature_mode_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/admin_feature_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_login_open_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_login_open_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_login_status_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_login_status_response_burned.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_login_finish_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/dash_logout_response.json",
+          "variant": null
+        }
+      ]
+    }
+  ]
+}

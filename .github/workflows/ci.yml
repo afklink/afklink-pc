@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Actions are pinned by full commit SHA; the comment names the release it points at.
+jobs:
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml names the exact compiler and components.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        # Tests that move the real cursor or type are #[ignore]d and stay that way here.
+        run: cargo test --workspace --tests
+
+      - name: Test the vendored str0m
+        # vendor/str0m is outside the workspace (vendor/VENDORED.md), so the step above skips it.
+        run: >-
+          cargo test --manifest-path vendor/str0m/Cargo.toml --target-dir target/vendor-str0m
+          --locked --no-default-features
+          --features rust-crypto,_internal_test_exports --lib --test dtls-security
+          --test srtp-replay-attack --test malformed-packet-injection --test twcc
+          --test network-conditions
+
+  typescript:
+    name: TypeScript (typecheck, lint, scripts, window build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint and format
+        run: bunx @biomejs/biome check . --error-on-warnings --reporter=github
+
+      - name: Generated Rust dictionary is current
+        run: bun run i18n:check
+
+      - name: Script tests
+        run: bun run test:scripts
+
+      - name: Build the window
+        run: bun run --filter afklink-agent-ui build
+
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Licenses, advisories, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  gitleaks:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan the history
+        # .gitleaks.toml at the root allowlists the vendored str0m example certificate and key.
+        run: |
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --exit-code 1

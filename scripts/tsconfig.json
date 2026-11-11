@@ -1,0 +1,9 @@
+{
+  "extends": "../contract/tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "lib": ["ES2023"],
+    "noEmit": true
+  },
+  "include": ["*.ts", "lib/*.ts"]
+}

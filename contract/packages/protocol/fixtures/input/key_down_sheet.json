@@ -1,0 +1,13 @@
+{
+  "t": "k",
+  "d": 1,
+  "code": "F4",
+  "key": "F4",
+  "mods": {
+    "ctrl": false,
+    "alt": false,
+    "shift": false,
+    "meta": false
+  },
+  "src": "sheet"
+}

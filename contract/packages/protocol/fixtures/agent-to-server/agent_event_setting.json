@@ -1,0 +1,7 @@
+{
+  "type": "agent_event",
+  "kind": "pc_setting_changed",
+  "at": 1789600300000,
+  "key": "game_only",
+  "value": true
+}

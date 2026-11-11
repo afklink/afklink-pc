@@ -1,0 +1,3 @@
+# Vendored crates are kept byte for byte as published (vendor/VENDORED.md): no end-of-line
+# conversion either way, whatever the repository's `* text=auto eol=lf` says.
+str0m/** -text

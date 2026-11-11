@@ -1,0 +1,38 @@
+[package]
+name = "afklink-game-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Launches the approved game and brings it back to the front during a session"
+
+# Named only for `test = false`: main.rs has no tests (they are in the library), so no harness to
+# link. The name is the one the app's build.rs builds (`--bin afklink-game-helper`).
+[[bin]]
+name = "afklink-game-helper"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The exe's version resource (`build.rs`): «AFKLink Game Helper» in Task Manager. The app's own
+# resource goes through the same crate (tauri-build), so nothing new enters the tree.
+[build-dependencies]
+tauri-winres = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

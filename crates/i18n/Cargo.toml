@@ -1,0 +1,19 @@
+[package]
+name = "afklink-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "afklink_i18n"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization"] }
+
+[lints]
+workspace = true

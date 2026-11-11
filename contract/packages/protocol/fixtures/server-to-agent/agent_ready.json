@@ -1,0 +1,19 @@
+{
+  "type": "agent_ready",
+  "protocol_version": 1,
+  "min_supported_protocol": 1,
+  "bindings": [
+    {
+      "telegram_user_id": 12345,
+      "username": "owner",
+      "first_name": "Owner",
+      "role": "owner"
+    },
+    {
+      "telegram_user_id": 67890,
+      "username": null,
+      "first_name": "Гость",
+      "role": "guest"
+    }
+  ]
+}

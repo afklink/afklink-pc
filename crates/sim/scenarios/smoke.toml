@@ -1,0 +1,31 @@
+# A short, healthy session: typing and a smooth scroll on a clean 5 Mbps / 60 ms path.
+# The end-to-end test runs a trimmed copy of this; keep it cheap.
+duration_s = 10
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 2.0
+cps = 8.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 1.0
+px_per_frame = 6
+
+[[content.phases]]
+kind = "idle"
+secs = 1.0
+
+[link]
+rtt_ms = 60
+
+[link.up]
+kbps = 5000
+queue_ms = 300
+
+[link.down]
+kbps = 5000

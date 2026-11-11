@@ -1,0 +1,592 @@
+{
+  "$id": "https://afklink.dev/schema/quality-profile.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "v": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "values": {
+      "type": "object",
+      "properties": {
+        "fps_factor_exp": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "quality_ratio_best": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 8
+        },
+        "quality_ratio_balanced": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 8
+        },
+        "quality_ratio_low": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 8
+        },
+        "ladder": {
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "max_h": {
+                "type": "integer",
+                "minimum": 144,
+                "maximum": 2160
+              },
+              "fps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120
+              }
+            },
+            "required": [
+              "max_h",
+              "fps"
+            ]
+          }
+        },
+        "pinned_fps": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 120
+          }
+        },
+        "start_rung_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "absorb_ratio": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "up_headroom": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "spend_pct": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "pushback_depth": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.9
+        },
+        "explore_margin_kbps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12000
+        },
+        "explore_growth_pct": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000
+        },
+        "loaded_share_pct": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "leading_share_pct": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "loaded_confirm_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "loaded_floor_kbps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12000
+        },
+        "informative_half_life_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 120000
+        },
+        "app_limited_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "settle_after_move_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "down_after_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "up_after_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "probe_capacity_multiple": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "probe_target_change_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "probe_target_every_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "probe_opening_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "probe_opening_latest_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "reanchor_after_pause_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "reanchor_resume_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "reanchor_divergence_pct": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000
+        },
+        "real_loss_memory_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "clean_rtt_margin_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 75
+        },
+        "clean_rtt_margin_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "clean_rtt_for_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "clean_collapse_hold_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "reanchor_backoff_max": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "media_egress_kbps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12000
+        },
+        "reanchor_resume_spend": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reanchor_every_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        },
+        "path_judge_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "path_reprobe_every_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        },
+        "path_reprobe_rtt_factor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "brake_loss": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1
+        },
+        "brake_clear_loss": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "brake_backoff": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1
+        },
+        "rtt_inflation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "rtt_margin_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "brake_rtt_reports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "rtt_base_min_reports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "path_step_flat_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "path_step_flat_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "path_step_max_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "path_step_drift_div": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "brake_stale_reports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "hold_wake_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "hold_wake_loss": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "silence_media_floor_kbps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12000
+        },
+        "silence_media_share_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "brake_stale_backoff": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1
+        },
+        "outage_divergence_pct": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000
+        },
+        "brake_release_per_sec": {
+          "type": "number",
+          "exclusiveMinimum": 1,
+          "maximum": 10
+        },
+        "drain_enter_rtt_ms": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 120000
+        },
+        "drain_evidence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "drain_drained_stale": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "drain_max_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "drain_max_proven_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "drain_resume_share_pct": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "delivery_fresh_late_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "delivery_report_age_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "delivery_floor_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64000
+        },
+        "drain_veto_within_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "drain_leave_within_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "delivery_rate_window_ms": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 64000
+        },
+        "drain_leave_one_report": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "startup_decide_after_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "startup_trying_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "startup_thin_below_h": {
+          "type": "integer",
+          "minimum": 144,
+          "maximum": 2160
+        },
+        "startup_queue_standing_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "startup_queue_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "qp_down": {
+          "type": "number",
+          "exclusiveMinimum": 16,
+          "maximum": 42
+        },
+        "qp_up": {
+          "type": "number",
+          "exclusiveMinimum": 16,
+          "maximum": 42
+        },
+        "qp_min_samples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "spending_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "trying_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "drop_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "encode_budget_share": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1
+        },
+        "encode_climb_share": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1
+        },
+        "cpu_climb_dwell_max_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "cpu_streak_forget_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "roomy_late_factor": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10
+        }
+      },
+      "required": [
+        "fps_factor_exp",
+        "quality_ratio_best",
+        "quality_ratio_balanced",
+        "quality_ratio_low",
+        "ladder",
+        "pinned_fps",
+        "start_rung_index",
+        "absorb_ratio",
+        "up_headroom",
+        "spend_pct",
+        "pushback_depth",
+        "explore_margin_kbps",
+        "explore_growth_pct",
+        "loaded_share_pct",
+        "leading_share_pct",
+        "loaded_confirm_ms",
+        "loaded_floor_kbps",
+        "informative_half_life_ms",
+        "app_limited_pct",
+        "settle_after_move_ms",
+        "down_after_ms",
+        "up_after_ms",
+        "probe_capacity_multiple",
+        "probe_target_change_pct",
+        "probe_target_every_ms",
+        "probe_opening_ms",
+        "probe_opening_latest_ms",
+        "reanchor_after_pause_ms",
+        "reanchor_resume_window_ms",
+        "reanchor_divergence_pct",
+        "real_loss_memory_ms",
+        "clean_rtt_margin_ms",
+        "clean_rtt_margin_pct",
+        "clean_rtt_for_ms",
+        "clean_collapse_hold_ms",
+        "reanchor_backoff_max",
+        "media_egress_kbps",
+        "reanchor_resume_spend",
+        "reanchor_every_ms",
+        "path_judge_window_ms",
+        "path_reprobe_every_ms",
+        "path_reprobe_rtt_factor",
+        "brake_loss",
+        "brake_clear_loss",
+        "brake_backoff",
+        "rtt_inflation",
+        "rtt_margin_ms",
+        "brake_rtt_reports",
+        "rtt_base_min_reports",
+        "path_step_flat_ms",
+        "path_step_flat_pct",
+        "path_step_max_ms",
+        "path_step_drift_div",
+        "brake_stale_reports",
+        "hold_wake_window_ms",
+        "hold_wake_loss",
+        "silence_media_floor_kbps",
+        "silence_media_share_pct",
+        "brake_stale_backoff",
+        "outage_divergence_pct",
+        "brake_release_per_sec",
+        "drain_enter_rtt_ms",
+        "drain_evidence",
+        "drain_drained_stale",
+        "drain_max_ms",
+        "drain_max_proven_ms",
+        "drain_resume_share_pct",
+        "delivery_fresh_late_ms",
+        "delivery_report_age_ms",
+        "delivery_floor_window_ms",
+        "drain_veto_within_ms",
+        "drain_leave_within_ms",
+        "delivery_rate_window_ms",
+        "drain_leave_one_report",
+        "startup_decide_after_ms",
+        "startup_trying_ms",
+        "startup_thin_below_h",
+        "startup_queue_standing_ms",
+        "startup_queue_window_ms",
+        "qp_down",
+        "qp_up",
+        "qp_min_samples",
+        "spending_share",
+        "trying_share",
+        "drop_share",
+        "encode_budget_share",
+        "encode_climb_share",
+        "cpu_climb_dwell_max_ms",
+        "cpu_streak_forget_ms",
+        "roomy_late_factor"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "v",
+    "values"
+  ]
+}

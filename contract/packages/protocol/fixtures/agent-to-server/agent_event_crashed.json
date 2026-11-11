@@ -1,0 +1,10 @@
+{
+  "type": "agent_event",
+  "kind": "agent_crashed",
+  "at": 1789599960000,
+  "version": "0.6.0",
+  "place_hash": "9f86d081884c7d65",
+  "thread": "tokio-runtime-worker",
+  "uptime_s": 5400,
+  "boot_id": "0d9c8b7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d"
+}

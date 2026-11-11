@@ -1,0 +1,62 @@
+# The viewer's repeated keyframe requests on a long round trip: a recorded session
+# (Telegram Desktop over two VPNs on Wi-Fi). Chrome asks for a keyframe again
+# every 200 ms while it waits for one, and on a 290 ms round trip the repeat leaves before the
+# first keyframe can arrive: of the session's 380 recoveries 294 cost two keyframes, 67 three, 13
+# four to nine; 464 of its 971 keyframes went out less than 0.5 s after the one before (median gap
+# 214 ms), 50.5 of its 108 MB of keyframes. The agent holds a viewer's request that arrives
+# within a round trip and the keyframe's send time of the last keyframe
+# (`afklink_core::keyframe_window`); `[sender] keyframe_window = false` is the agent without it.
+#
+# The path is the session's as its analysis measured it (base round trip 290 ms, ~15 Mbps
+# behind a 150 ms queue, a little jitter), with burst loss more often than it had (a burst every
+# ~3 s rather than every ~34 s), so a short run has a dozen recoveries. NACK is off on the viewer: every burst
+# is then a hole the viewer must ask a keyframe for, which is what this scenario is about — not how
+# many holes NACK fills (the session's viewer re-NACKed 2.4x per lost packet; the simulated one's
+# NACK cadence is str0m's, not Chrome's). Content: the 1080p60 game-like pan of vpn-wifi-1011.
+name = "pli-repeat-290ms"
+duration_s = 40
+seed = 1011
+
+[content]
+kind = "desktop"
+width = 1920
+height = 1080
+refresh_hz = 60
+
+# A camera that keeps panning ...
+[[content.phases]]
+kind = "scroll"
+secs = 1.5
+px_per_frame = 24
+
+# ... with effects moving in a part of the picture.
+[[content.phases]]
+kind = "noise"
+secs = 1.0
+fraction = 0.06
+fps = 60.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 1.0
+px_per_frame = 8
+
+[link]
+rtt_ms = 290
+
+[link.up]
+kbps = 15000
+queue_ms = 150
+jitter_ms = 15
+gilbert = { p_good_to_bad = 0.0003, p_bad_to_good = 0.05, loss_good = 0.0, loss_bad = 0.7 }
+
+[link.down]
+kbps = 10000
+queue_ms = 300
+jitter_ms = 10
+
+[viewer]
+rr_interval_ms = 1000
+# Chrome's `max_wait_for_keyframe`.
+pli_repeat_ms = 200
+nack = false

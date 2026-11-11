@@ -1,0 +1,14 @@
+{
+  "t": "hb",
+  "seq": 48,
+  "state": "ok",
+  "since_capture_ms": 20,
+  "since_encode_ms": 21,
+  "still": false,
+  "h": 1080,
+  "fps": 60,
+  "restarts": 0,
+  "rel_exact": true,
+  "no_driver": true,
+  "input_blocked": true
+}

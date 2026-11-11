@@ -1,0 +1,20 @@
+{
+  "type": "agent_event",
+  "kind": "agent_started",
+  "at": 1789600000000,
+  "boot_id": "6b1e0c2a-9f3d-4e57-8a21-c4d5e6f70812",
+  "first_run": false,
+  "build": {
+    "version": "0.6.0",
+    "commit": "3a3bc46e0f1d",
+    "channel": "release",
+    "dirty": false
+  },
+  "last_exit": {
+    "kind": "panic",
+    "at": 1789599960000
+  },
+  "autostart": true,
+  "previous_record": "found",
+  "pc_restarted": false
+}

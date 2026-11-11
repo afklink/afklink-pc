@@ -1,0 +1,44 @@
+[package]
+name = "afklink-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "afklink_transport"
+path = "src/lib.rs"
+
+[dependencies]
+afklink-protocol = { path = "../protocol" }
+# The link model behind the bench link shaper (`shaper.rs`), shared with the simulator.
+afklink-netem = { path = "../netem" }
+
+tokio = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+str0m = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# `timer.rs`: the timer resolution a live peer asks for, and the Windows 11 opt-out that keeps it.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media",
+    "Win32_System_Threading",
+    "Wdk_System_SystemInformation",
+] }
+
+[dev-dependencies]
+# The loopback tests read what the run loop logs, formatted as the app's file formats it.
+tracing-subscriber = { workspace = true }
+# `tests/vendored_str0m.rs`: the vendored str0m against its pinned SHA-256 manifest.
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

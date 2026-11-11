@@ -1,0 +1,22 @@
+{
+  "build": {
+    "version": "0.1.0",
+    "commit": "3a3bc46e0f1d2c3b4a5968778695a4b3c2d1e0f9",
+    "dirty": false,
+    "channel": "dev",
+    "built_at": "2026-09-28T20:15:07Z",
+    "label": "0.1.0 · 3a3bc46 · dev"
+  },
+  "client_time": 1790590529980,
+  "comment": "Картинка замёрзла после сворачивания",
+  "files": [
+    {
+      "name": "flight-recorder.log",
+      "bytes": 81
+    }
+  ],
+  "session_ids": [
+    "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  ],
+  "os": "Windows 11 Pro 24H2 (26100)"
+}

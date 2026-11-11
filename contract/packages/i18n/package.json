@@ -1,0 +1,22 @@
+{
+  "name": "@afklink/i18n",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AFKLink — user-facing text in Russian and English, one source for every surface.",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./pc": "./src/pc/index.ts"
+  },
+  "//emit": "Here emit only renders the Rust dictionary (--check) and writes nothing: the file lives in afklink-agent, which runs `bun contract/packages/i18n/scripts/emit.ts --out crates/i18n/src/generated.rs` from its root. With --cut it first re-cuts src/pc/{ru,en}.ts (the desktop client's share, `@afklink/i18n/pc`) from src/{ru,en}.ts with scripts/pc.ts, and skips the cut where that script is absent (the published desktop client).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "emit": "bun scripts/emit.ts --cut --check",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^5.9.3"
+  }
+}

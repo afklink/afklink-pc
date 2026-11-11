@@ -1,0 +1,5 @@
+{
+  "type": "owner_request",
+  "kind": "make_owner",
+  "telegram_user_id": 67890
+}

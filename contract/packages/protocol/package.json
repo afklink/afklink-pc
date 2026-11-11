@@ -1,0 +1,26 @@
+{
+  "name": "@afklink/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Single source of truth for the AFKLink wire protocol: zod schemas, generated JSON Schema, and golden fixtures shared by server, Mini App and the Rust agent.",
+  "//sideEffects": "Nothing here runs on import - it only declares schemas and constants. Saying so lets a bundler drop the zod runtime from the Mini App, which needs types and a few constants but never validates: without it the viewer bundle doubled, on a WebView app that people open over mobile data.",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./quality-profile": "./src/quality-profile.ts",
+    "./schema/*": "./schema/*"
+  },
+  "scripts": {
+    "emit": "bun run scripts/emit.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,9 @@
+# Stable-channel options only. Anything nightly-only here would make
+# `cargo fmt --check` fail in CI on the pinned stable toolchain, which turns a
+# formatting gate into a mystery.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

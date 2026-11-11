@@ -1,0 +1,17 @@
+{
+  "t": "hb",
+  "seq": 46,
+  "state": "ok",
+  "since_capture_ms": 21,
+  "since_encode_ms": 22,
+  "still": false,
+  "h": 1080,
+  "fps": 60,
+  "restarts": 0,
+  "rel_exact": true,
+  "game": {
+    "state": "shown",
+    "w": 3576,
+    "h": 2268
+  }
+}

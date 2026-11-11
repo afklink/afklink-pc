@@ -1,0 +1,9 @@
+# Tests are allowed to unwrap and expect: a panic in a test is a failed test, which
+# is exactly the intent, and forcing error handling there buries the assertion.
+# Production code is held to the workspace lint table in Cargo.toml.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# Keep clippy's suggestions compatible with the pinned toolchain.
+msrv = "1.98.0"

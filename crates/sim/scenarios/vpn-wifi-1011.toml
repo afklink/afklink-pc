@@ -1,0 +1,183 @@
+# A recorded 3.7 h session (the agent on str0m 0.23.1): a game
+# (game-only mode) at 1080p60 from an AMD Z1 Extreme handheld to Telegram Desktop (Chromium)
+# on Windows, both ends on a VPN over Wi-Fi. The media left the PC through the VPN's TUN to the
+# viewer's VPN exit: srflx, UDP, no TURN, no path change. The video bench has a
+# twin scenario of the same name (same timeline, same seconds).
+#
+# The link, from the session's 13 409 `pipeline` seconds:
+#   - round trip: base 290 ms (rtt_base_ms p50 291); fresh reports' excess over the base p50 +4,
+#     p90 +30, p95 +81, p99 +226 ms; >= +30 in 10.2 % of reports, >= +100 in 4.0 %, >= +200 in 1.3 %,
+#     >= +300 in 0.4 %; spikes >= +100 come 7 / 17 / 41 s apart (p25/p50/p75), no periodicity;
+#   - room: egress p50 11.3 / p99 13.2 / max 15.5 Mbps; reports with >= 2 % loss jump from ~2 % of
+#     seconds at 8-14 Mbps of egress to 61 % at 14-16 Mbps -> a bottleneck near 15 Mbps;
+#   - loss in bursts: 0.12 % of packets; NACKs in 509 seconds (one every ~26 s), ~58 sequence numbers
+#     NACKed per such second (23 233 NACKed in 398 playout-line seconds); 416 of 11 724 reports > 0 %,
+#     95 >= 5 %, 21 >= 10 % (max 24.5 %);
+#   - three rarer stretches, each once in the 3.7 h and all three here:
+#     stretch A (23 s), 19 reports at +10..+475 ms (388, 398, 385, 764, 297, 655, 461, 452, ...),
+#       jitter 15-22 ms, no loss: the controller's one `path step` (290 -> 385) and back to 297 three
+#       seconds later — a spiky stretch, not a longer path;
+#     stretch B (45 s), two clusters of spikes (385, 364, 789, 726, 446 ms with 1.6-2.0 % loss: the
+#       RTT brake 5 s in; then 380, 342, 595, 580 ms), 3 s without a receiver report (the
+#       no-feedback brake 2 s into it), 1226 ms with 0.95 % loss after it, the outage-resume
+#       re-anchor 4 s after the silence;
+#     stretch C, a 2.3 s stall: the viewer received 28, 0, 8 frames, then 61, 74, 116 a second;
+#       fresh reports at 2564 and 2661 ms (packets kept arriving, 2.3 s late), and drain mode entered
+#       4 s in, after the backlog had come through.
+#
+# Here, 300 s:
+#   - one-way 145 ms each way; 15 Mbps up behind a 150 ms queue; uniform jitter 8 ms up / 5 ms down
+#     (packets are never reordered, so on a dense stream this is mostly a constant few ms; the
+#     session's receiver jitter, p50 7 / p99 26 ms, is the spikes' to make, and the simulator does
+#     not report one);
+#   - burst loss: a Gilbert-Elliott chain, stepped per packet, sized for ~750 packets/s (this
+#     simulator sends 450-950 a second at 1080p on this path, the session ~1450): a burst every
+#     1 / (0.00004 x 750) = ~34 s, ~57 ms long (1 / 0.023 packets), 70 % lost in it — ~30 packets,
+#     ~4 % of a second, as the session's ~58 of ~1450;
+#   - the delay schedule below, on `up` (the media direction, where str0m's delay-based estimate and
+#     the viewer's frames feel it): a 30 s block of 12 spikes of +15..+210 ms, 0.2-0.6 s each, at
+#     4-64, 94-154, 198-228 and 250-280 s (sized so that with the stretches the excess over the base
+#     comes out at the session's p90/p95); 64-86 s stretch A (its readings of +30 and more,
+#     one spike every 1.2 s); 154-198 s stretch B (its two clusters; the 3 s without feedback
+#     at 189.2 s is a staircase on `down` from +3000 ms to 0 in 0.2 s steps: everything the viewer
+#     sends in those 3 s arrives together at their end, and the last report's round trip is ~0.3-0.5
+#     s, where the session read 1226 ms); 240-242 s stretch C's stall: +2300 ms held for 2 s, then
+#     back, so fresh reports read ~2.6 s and the 2 s sent behind the stall arrive in one burst at its
+#     end; 280-300 s quiet.
+#   Every delay step lands on the simulator's 200 ms control tick (`Simulation::delay_steps`), so
+#   the lengths here are multiples of 0.2 s.
+#
+# Calibrated on this simulator (the agent on str0m 0.24, the viewer on str0m 0.23.1, seeds
+# 1011, 1 and 2). The link lands on the session: the
+# excess over the base p50 +5..+6, p90 +33..+35, p95 +77..+81 ms; >= +30 in 11-12 % of reports,
+# >= +100 in 4.2-4.5 % (the session's 10.2 and 4.0 %; its p99 +226 against +443 here, the three
+# stretches being 6 % of this run and well under 1 % of the session); 0.11-0.19 % of packets lost,
+# NACKs in 1.6-2.4 seconds a minute (the session's 2.3); brakes by loss, by RTT, by no feedback (at
+# stretch B's silence and at the stall) and by drain; drain mode once, at the stall; one
+# outage-resume re-anchor, after the silence — all as in the session. The controller does not land:
+# the estimate's p50 is 2.3-2.9 Mbps (the session's 13.7), egress 2.0-2.7 (11.3), 1080p60 23-27 % of
+# the time (98.4 %), 2-3 re-anchors (the session's one per ~64 s would be 4.7). With the block's
+# spikes at half their height the estimate's p50 is 6.1 Mbps and 1080p60 80 % (the excess's p90 is
+# then +17); with every spike split half on each direction, 7.4 Mbps and 93 % (p90 +22): the
+# agent's estimate gives way under the session's spikes on the media direction here — the bench
+# run on vpn-wifi-1011.json says whether it does on the wire. And on this content
+# the simulator holds the budget at ~0.65x the estimate even on a clean path, at any round trip
+# (40, 150 and 290 ms alike: its queue age reads 23-57 ms, in frame-interval steps, where the bench
+# reads 0), so ~9.4 Mbps of estimate and ~6.4 of egress are its ceiling on this path.
+#
+# Not modelled: the viewer has no jitter buffer or decoder, so the session's main symptom — Chromium
+# freezing and asking for keyframes on the (0, 50) playout pair without any loss (7.6 freezes and
+# 1.6 PLIs a minute in loss-free seconds, against 1.15 and 0.13 under the 250 ms hold) — is the
+# bench's to reproduce, not this one's; the viewer's NACK cadence is str0m's (33 ms, 5x), not
+# Chrome's (2.4 NACKs per lost packet in the session); the loss inside stretch B (the
+# simulator has no loss schedule; the bench adds it); a 5 s PC-side stall (the game and
+# the agent's egress stalled together: a sender, not a link); encode time is flat (~8.4 ms a 1080p
+# frame, the session's median 8.3; its p95 10.6 / p99 11.7 drove the nine cpu_bound 60 <-> 30 moves,
+# which cannot appear here — raise base_ms to ~6.5 to probe the climb's margin at ~10.8 ms).
+#
+# What to read: the summary's re-anchors (session: 208 clean-collapse in 3.7 h, one per ~64 s) and
+# estimate collapses, the brakes (session: 21 by loss, 4 by RTT, 1 by silence, 1 drain), whether the
+# stall at 240 s enters drain mode and for how long frames stop after it, keyframes and the
+# viewer's PLIs, NACKs and the frames never arrived. Compare over seeds, not one run.
+name = "vpn-wifi-1011"
+duration_s = 300
+seed = 1011
+
+# A game's steady load: a pane of noise repainted every refresh (1.5 % of the screen). At 1080p60
+# its demand is above the 1080p60 ceiling (11 726 kbps at QP ~25), at 1080p30 it fits its 7 905
+# kbps at QP ~19, so the ladder can climb back to 60 after a down (a fast scroll cannot: at 30 fps
+# its motion per frame doubles past the encoder's search and costs QP 36+).
+[content]
+kind = "desktop"
+width = 1920
+height = 1080
+refresh_hz = 60
+
+[[content.phases]]
+kind = "noise"
+secs = 60.0
+fraction = 0.015
+fps = 60.0
+
+[link]
+rtt_ms = 290
+
+[link.up]
+kbps = 15000
+queue_ms = 150
+jitter_ms = 8
+gilbert = { p_good_to_bad = 0.00004, p_bad_to_good = 0.023, loss_good = 0.0, loss_bad = 0.7 }
+# One-way delay (ms) from the given second of the session.
+delay_schedule = [
+  # background block from 4 s
+  [4, 165], [4.4, 145], [6.4, 190], [6.8, 145], [8.8, 160], [9.4, 145],
+  [11, 265], [11.2, 145], [13.6, 170], [14, 145], [16, 205], [16.2, 145],
+  [18.6, 160], [19.2, 145], [21, 175], [21.4, 145], [23.6, 355], [23.8, 145],
+  [26.4, 165], [27, 145], [29, 225], [29.2, 145], [31.6, 180], [32, 145],
+  # background block from 34 s
+  [34, 165], [34.4, 145], [36.4, 190], [36.8, 145], [38.8, 160], [39.4, 145],
+  [41, 265], [41.2, 145], [43.6, 170], [44, 145], [46, 205], [46.2, 145],
+  [48.6, 160], [49.2, 145], [51, 175], [51.4, 145], [53.6, 355], [53.8, 145],
+  [56.4, 165], [57, 145], [59, 225], [59.2, 145], [61.6, 180], [62, 145],
+  # stretch A
+  [64, 245], [64.6, 145], [65.2, 255], [65.8, 145], [66.4, 240], [67, 145],
+  [67.6, 620], [68, 145], [70, 510], [70.4, 145], [71.2, 315], [71.8, 145],
+  [72.4, 305], [73, 145], [74.8, 255], [75.4, 145], [76, 200], [76.6, 145],
+  [77.2, 175], [77.8, 145], [78.4, 205], [79, 145], [79.6, 235], [80.2, 145],
+  [80.8, 205], [81.4, 145], [82, 430], [82.4, 145], [83.2, 180], [83.8, 145],
+  [84.4, 245], [85, 145], [85.6, 245], [86.2, 145],
+  # background block from 94 s
+  [94, 165], [94.4, 145], [96.4, 190], [96.8, 145], [98.8, 160], [99.4, 145],
+  [101, 265], [101.2, 145], [103.6, 170], [104, 145], [106, 205], [106.2, 145],
+  [108.6, 160], [109.2, 145], [111, 175], [111.4, 145], [113.6, 355], [113.8, 145],
+  [116.4, 165], [117, 145], [119, 225], [119.2, 145], [121.6, 180], [122, 145],
+  # background block from 124 s
+  [124, 165], [124.4, 145], [126.4, 190], [126.8, 145], [128.8, 160], [129.4, 145],
+  [131, 265], [131.2, 145], [133.6, 170], [134, 145], [136, 205], [136.2, 145],
+  [138.6, 160], [139.2, 145], [141, 175], [141.4, 145], [143.6, 355], [143.8, 145],
+  [146.4, 165], [147, 145], [149, 225], [149.2, 145], [151.6, 180], [152, 145],
+  # stretch B
+  [155, 240], [155.4, 145], [157, 220], [157.4, 145], [158, 645], [158.6, 145],
+  [159, 585], [159.6, 145], [160.2, 305], [160.6, 145], [164, 165], [164.4, 145],
+  [166.4, 190], [166.8, 145], [168.8, 160], [169.4, 145], [171, 265], [171.2, 145],
+  [182, 235], [182.4, 145], [186.4, 195], [186.8, 145], [187.4, 445], [188, 145],
+  [188.6, 435], [189, 145], [193.6, 345], [194, 145], [195.4, 285], [195.8, 145],
+  [196.8, 225], [197.2, 145],
+  # background block from 198 s
+  [198, 165], [198.4, 145], [200.4, 190], [200.8, 145], [202.8, 160], [203.4, 145],
+  [205, 265], [205.2, 145], [207.6, 170], [208, 145], [210, 205], [210.2, 145],
+  [212.6, 160], [213.2, 145], [215, 175], [215.4, 145], [217.6, 355], [217.8, 145],
+  [220.4, 165], [221, 145], [223, 225], [223.2, 145], [225.6, 180], [226, 145],
+  # stretch C: the stall
+  [240, 2445], [242, 145],
+  # background block from 250 s
+  [250, 165], [250.4, 145], [252.4, 190], [252.8, 145], [254.8, 160], [255.4, 145],
+  [257, 265], [257.2, 145], [259.6, 170], [260, 145], [262, 205], [262.2, 145],
+  [264.6, 160], [265.2, 145], [267, 175], [267.4, 145], [269.6, 355], [269.8, 145],
+  [272.4, 165], [273, 145], [275, 225], [275.2, 145], [277.6, 180], [278, 145],
+]
+
+[link.down]
+kbps = 10000
+queue_ms = 300
+jitter_ms = 5
+# The 3 s without a receiver report inside stretch B.
+delay_schedule = [
+  # stretch B: the silence
+  [189.2, 3145], [189.4, 2945], [189.6, 2745], [189.8, 2545], [190, 2345], [190.2, 2145],
+  [190.4, 1945], [190.6, 1745], [190.8, 1545], [191, 1345], [191.2, 1145], [191.4, 945],
+  [191.6, 745], [191.8, 545], [192, 345], [192.2, 145],
+]
+
+[viewer]
+rr_interval_ms = 1000
+# Chrome's repeat of a PLI while it still waits for a keyframe (max_wait_for_keyframe 200 ms): on a
+# 290 ms round trip every recovery asks again before the first keyframe can arrive.
+pli_repeat_ms = 200
+
+[encoder]
+threads = 0
+# ~8.4 ms a 1080p frame, the session's median under the game's load.
+base_ms = 4.0
+per_mpx_ms = 2.1
+keyframe_factor = 1.8

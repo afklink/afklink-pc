@@ -1,0 +1,28 @@
+[package]
+name = "afklink-encode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "afklink_encode"
+path = "src/lib.rs"
+
+[dependencies]
+afklink-core = { path = "../core" }
+
+openh264 = { workspace = true }
+openh264-sys2 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The bench times BGRA->I420 on its own, which means calling the converter directly rather
+# than through `encode()`.
+openh264 = { workspace = true }
+openh264-sys2 = { workspace = true }
+
+[lints]
+workspace = true

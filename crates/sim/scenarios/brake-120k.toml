@@ -1,0 +1,38 @@
+# Defect 2 of the recorded relayed VPN session (a 12 s stretch): the round-trip brake cut the budget
+# to 120-130 kbps while a nearly still game fitted in it (106 kbps at QP 16, 900p), and the ladder
+# then stepped down one resolution per dwell — 900p -> 720p -> 540p -> 360p — each step a keyframe
+# of 57, 37 and 21 kB on that budget: the bit bucket withheld 96% of frames and the phone showed 1-4
+# fps for five seconds. The round trip there was a path changing under a VPN, jittering too much to
+# be recognised as one for twelve seconds; 0% loss throughout.
+#
+# Here the path's round trip ramps for 30 s from 190 ms to ~940 (a queue building elsewhere on the
+# path: the brake must answer it, and does, with the budget) and then comes back; typing, which
+# costs ~50 kbps at 1080p, fits the braked budget. The ladder may take the free cadence step from
+# 1080p60 but should not pay a keyframe per dwell on 120 kbps for a picture that fits. See
+# `QualityController::descent_target`; `brake-120k-video.toml` is the same path with a picture that
+# does not fit, and `brake-120k-pinned.toml` the same with cadence alone.
+name = "brake-120k"
+duration_s = 80
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 30.0
+cps = 4.0
+
+[link]
+rtt_ms = 190
+
+[link.up]
+kbps = 2000
+queue_ms = 1500
+jitter_ms = 20
+delay_schedule = [[30, 145], [32, 195], [34, 245], [36, 295], [38, 345], [40, 395], [42, 445], [44, 495], [46, 545], [48, 595], [50, 645], [52, 695], [54, 745], [60, 95]]
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 20

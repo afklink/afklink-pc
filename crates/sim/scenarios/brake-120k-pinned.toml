@@ -1,0 +1,33 @@
+# `brake-120k.toml` with the viewer's 1080p pin: the ladder is then 1080p at 60/30/15/8 fps, so it
+# can only give way on cadence — the "lower fps first, no keyframe" answer to a braked budget. Kept
+# beside the other two as the evidence the choice in `QualityController::descent_target` was made
+# on: for a picture that fits the braked budget, cadence alone still takes frames the budget could
+# carry, the recorded walk pays a keyframe per rung, and holding pays nothing.
+name = "brake-120k-pinned"
+duration_s = 80
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 30.0
+cps = 4.0
+
+[link]
+rtt_ms = 190
+
+[link.up]
+kbps = 2000
+queue_ms = 1500
+jitter_ms = 20
+delay_schedule = [[30, 145], [32, 195], [34, 245], [36, 295], [38, 345], [40, 395], [42, 445], [44, 495], [46, 545], [48, 595], [50, 645], [52, 695], [54, 745], [60, 95]]
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 20
+
+[viewer]
+pin_height = 1080

@@ -1,0 +1,8 @@
+{
+  "x-afklink-device": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+  "x-afklink-timestamp": "1790590530123",
+  "x-afklink-nonce": "000102030405060708090a0b0c0d0e0f",
+  "x-afklink-content-sha256": "801d2d5900dc23246858718cc518420129f30acb8ff52b369b2eac6c57aa4b1d",
+  "x-afklink-meta": "eyJidWlsZCI6eyJ2ZXJzaW9uIjoiMC4xLjAiLCJjb21taXQiOiIzYTNiYzQ2ZTBmMWQyYzNiNGE1OTY4Nzc4Njk1YTRiM2MyZDFlMGY5IiwiZGlydHkiOmZhbHNlLCJjaGFubmVsIjoiZGV2IiwiYnVpbHRfYXQiOiIyMDI2LTA5LTI4VDIwOjE1OjA3WiIsImxhYmVsIjoiMC4xLjAgwrcgM2EzYmM0NiDCtyBkZXYifSwiY2xpZW50X3RpbWUiOjE3OTA1OTA1Mjk5ODAsImNvbW1lbnQiOiLQmtCw0YDRgtC40L3QutCwINC30LDQvNGR0YDQt9C70LAg0L_QvtGB0LvQtSDRgdCy0L7RgNCw0YfQuNCy0LDQvdC40Y8iLCJmaWxlcyI6W3sibmFtZSI6ImZsaWdodC1yZWNvcmRlci5sb2ciLCJieXRlcyI6ODF9XSwic2Vzc2lvbl9pZHMiOlsiM2ZhODVmNjQtNTcxNy00NTYyLWIzZmMtMmM5NjNmNjZhZmE2Il0sIm9zIjoiV2luZG93cyAxMSBQcm8gMjRIMiAoMjYxMDApIn0",
+  "x-afklink-signature": "HSqnpsnhimCy5Z9gC7tz/977jMHVGWTm47pTLyanR45oUmkGj3WhqIlBaIfTKqo4KpDx0qgdklwu9TEpwx7JCA=="
+}

@@ -1,0 +1,42 @@
+# Defect 3 of the recorded relayed VPN session (its last 115 s, and a minute earlier on): a
+# nearly still game at 360p on a path that probes showed could carry 1-2 Mbps (1082 and 1909
+# kbps). Each probe opened the climb gate for one tick, the estimate was back at 55-95
+# within two seconds, and the re-anchor that would have held it up was refused — the round trip was
+# a little over its clean margin (294 on 220, 276 on 182), and a still screen has no demand. It
+# never climbed.
+#
+# Here: 25 s of scrolling on a 250 kbps uplink takes the ladder to the bottom, then the uplink opens
+# to 3 Mbps and the screen goes nearly still, with 90 ms of jitter each way — reports over the clean
+# margin, under the brake's line. Without the fix the controller stays at 360p@30 to the end of
+# the run. The ladder should climb on what str0m's probes measure. See
+# `QualityController::idle_evidence`.
+name = "still-probes-rtt-jitter"
+duration_s = 100
+seed = 1
+
+[content]
+kind = "desktop"
+repeat = false
+
+[[content.phases]]
+kind = "scroll"
+secs = 25.0
+px_per_frame = 1
+
+[[content.phases]]
+kind = "typing"
+secs = 100.0
+cps = 0.3
+
+[link]
+rtt_ms = 200
+
+[link.up]
+schedule = [[0, 250], [25, 3000]]
+queue_ms = 1500
+jitter_ms = 90
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 90

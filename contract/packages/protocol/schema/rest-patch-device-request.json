@@ -1,0 +1,23 @@
+{
+  "$id": "https://afklink.dev/schema/rest-patch-device-request.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "name": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 0
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      ]
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

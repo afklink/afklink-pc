@@ -1,0 +1,54 @@
+{
+  "//": "Signed agent requests (protocol.md §1a, diagnostics-wire.ts): the same bytes on both ends. The key is RFC 8032 §7.1 TEST 1 — public, never a device's. secret_key is the 32-byte seed in identity.json's encoding (standard base64). Per case: meta_header = base64url(meta_json as UTF-8), no padding; meta_sha256 = sha256 of the meta_header text; body_sha256 = sha256 of the body bytes; canonical = the eight lines joined by \\n; signature = Ed25519(secret_key, canonical), standard base64. The backend (server/src/diagnostics) and the agent test against these; src/diagnostics.test.ts re-derives every value, so an edit that breaks one fails there. Written by hand, not by emit: emit rewrites fixtures/ and schema/ from scratch.",
+  "scheme": "AFKLINK-AGENT-REQUEST-V1",
+  "secret_key": "nWGxne/9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A=",
+  "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+  "cases": [
+    {
+      "why": "a dev build's report with a comment in Russian and a session",
+      "method": "POST",
+      "path": "/api/diagnostics/agent",
+      "device_id": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+      "timestamp": "1790590530123",
+      "nonce": "000102030405060708090a0b0c0d0e0f",
+      "body_base64": "UEsDBBQAAAAAAO9RPV3dguJ5UQAAAFEAAAATAAAAZmxpZ2h0LXJlY29yZGVyLmxvZzIwMjYtMDktMjlUMTA6MTU6MjkuOTEyWiBERUJVRyBhZmtsaW5rX2NvcmU6OmFnZW50OiBmbGlnaHQgcmVjb3JkZXI6IDEgbGluZSBrZXB0ClBLAQIUABQAAAAAAO9RPV3dguJ5UQAAAFEAAAATAAAAAAAAAAAAAAAAAAAAAABmbGlnaHQtcmVjb3JkZXIubG9nUEsFBgAAAAABAAEAQQAAAIIAAAAAAA==",
+      "body_sha256": "801d2d5900dc23246858718cc518420129f30acb8ff52b369b2eac6c57aa4b1d",
+      "meta_json": "{\"build\":{\"version\":\"0.1.0\",\"commit\":\"3a3bc46e0f1d2c3b4a5968778695a4b3c2d1e0f9\",\"dirty\":false,\"channel\":\"dev\",\"built_at\":\"2026-09-28T20:15:07Z\",\"label\":\"0.1.0 · 3a3bc46 · dev\"},\"client_time\":1790590529980,\"comment\":\"Картинка замёрзла после сворачивания\",\"files\":[{\"name\":\"flight-recorder.log\",\"bytes\":81}],\"session_ids\":[\"3fa85f64-5717-4562-b3fc-2c963f66afa6\"],\"os\":\"Windows 11 Pro 24H2 (26100)\"}",
+      "meta_header": "eyJidWlsZCI6eyJ2ZXJzaW9uIjoiMC4xLjAiLCJjb21taXQiOiIzYTNiYzQ2ZTBmMWQyYzNiNGE1OTY4Nzc4Njk1YTRiM2MyZDFlMGY5IiwiZGlydHkiOmZhbHNlLCJjaGFubmVsIjoiZGV2IiwiYnVpbHRfYXQiOiIyMDI2LTA5LTI4VDIwOjE1OjA3WiIsImxhYmVsIjoiMC4xLjAgwrcgM2EzYmM0NiDCtyBkZXYifSwiY2xpZW50X3RpbWUiOjE3OTA1OTA1Mjk5ODAsImNvbW1lbnQiOiLQmtCw0YDRgtC40L3QutCwINC30LDQvNGR0YDQt9C70LAg0L_QvtGB0LvQtSDRgdCy0L7RgNCw0YfQuNCy0LDQvdC40Y8iLCJmaWxlcyI6W3sibmFtZSI6ImZsaWdodC1yZWNvcmRlci5sb2ciLCJieXRlcyI6ODF9XSwic2Vzc2lvbl9pZHMiOlsiM2ZhODVmNjQtNTcxNy00NTYyLWIzZmMtMmM5NjNmNjZhZmE2Il0sIm9zIjoiV2luZG93cyAxMSBQcm8gMjRIMiAoMjYxMDApIn0",
+      "meta_sha256": "6e463a3c60be315588efe0c2279ee7a5ab3553668c66e3246aa4d22d471e210f",
+      "canonical": "AFKLINK-AGENT-REQUEST-V1\nPOST\n/api/diagnostics/agent\na3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d\n1790590530123\n000102030405060708090a0b0c0d0e0f\n801d2d5900dc23246858718cc518420129f30acb8ff52b369b2eac6c57aa4b1d\n6e463a3c60be315588efe0c2279ee7a5ab3553668c66e3246aa4d22d471e210f",
+      "signature": "HSqnpsnhimCy5Z9gC7tz/977jMHVGWTm47pTLyanR45oUmkGj3WhqIlBaIfTKqo4KpDx0qgdklwu9TEpwx7JCA==",
+      "headers": {
+        "x-afklink-device": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+        "x-afklink-timestamp": "1790590530123",
+        "x-afklink-nonce": "000102030405060708090a0b0c0d0e0f",
+        "x-afklink-content-sha256": "801d2d5900dc23246858718cc518420129f30acb8ff52b369b2eac6c57aa4b1d",
+        "x-afklink-meta": "eyJidWlsZCI6eyJ2ZXJzaW9uIjoiMC4xLjAiLCJjb21taXQiOiIzYTNiYzQ2ZTBmMWQyYzNiNGE1OTY4Nzc4Njk1YTRiM2MyZDFlMGY5IiwiZGlydHkiOmZhbHNlLCJjaGFubmVsIjoiZGV2IiwiYnVpbHRfYXQiOiIyMDI2LTA5LTI4VDIwOjE1OjA3WiIsImxhYmVsIjoiMC4xLjAgwrcgM2EzYmM0NiDCtyBkZXYifSwiY2xpZW50X3RpbWUiOjE3OTA1OTA1Mjk5ODAsImNvbW1lbnQiOiLQmtCw0YDRgtC40L3QutCwINC30LDQvNGR0YDQt9C70LAg0L_QvtGB0LvQtSDRgdCy0L7RgNCw0YfQuNCy0LDQvdC40Y8iLCJmaWxlcyI6W3sibmFtZSI6ImZsaWdodC1yZWNvcmRlci5sb2ciLCJieXRlcyI6ODF9XSwic2Vzc2lvbl9pZHMiOlsiM2ZhODVmNjQtNTcxNy00NTYyLWIzZmMtMmM5NjNmNjZhZmE2Il0sIm9zIjoiV2luZG93cyAxMSBQcm8gMjRIMiAoMjYxMDApIn0",
+        "x-afklink-signature": "HSqnpsnhimCy5Z9gC7tz/977jMHVGWTm47pTLyanR45oUmkGj3WhqIlBaIfTKqo4KpDx0qgdklwu9TEpwx7JCA=="
+      }
+    },
+    {
+      "why": "a release build's report, no comment, no session",
+      "method": "POST",
+      "path": "/api/diagnostics/agent",
+      "device_id": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+      "timestamp": "1790590601000",
+      "nonce": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+      "body_base64": "UEsDBBQAAAAAAO9RPV0P6TFIKAAAACgAAAAKAAAAYnVpbGQuanNvbnsidmVyc2lvbiI6IjAuMS4yIiwiY2hhbm5lbCI6InJlbGVhc2UifQpQSwECFAAUAAAAAADvUT1dD+kxSCgAAAAoAAAACgAAAAAAAAAAAAAAAAAAAAAAYnVpbGQuanNvblBLBQYAAAAAAQABADgAAABQAAAAAAA=",
+      "body_sha256": "33c6faa1a839724e258d7b10e1f1eb956daa0f2626d6aa4fd76ee01bb7e2ae84",
+      "meta_json": "{\"build\":{\"version\":\"0.1.2\",\"commit\":\"9dd9ab736f4246c42be76d24a1d888103da313c9\",\"dirty\":false,\"channel\":\"release\",\"built_at\":\"2026-09-29T08:00:00Z\",\"label\":\"0.1.2\"},\"client_time\":1790590600950,\"files\":[{\"name\":\"build.json\",\"bytes\":40}]}",
+      "meta_header": "eyJidWlsZCI6eyJ2ZXJzaW9uIjoiMC4xLjIiLCJjb21taXQiOiI5ZGQ5YWI3MzZmNDI0NmM0MmJlNzZkMjRhMWQ4ODgxMDNkYTMxM2M5IiwiZGlydHkiOmZhbHNlLCJjaGFubmVsIjoicmVsZWFzZSIsImJ1aWx0X2F0IjoiMjAyNi0wOS0yOVQwODowMDowMFoiLCJsYWJlbCI6IjAuMS4yIn0sImNsaWVudF90aW1lIjoxNzkwNTkwNjAwOTUwLCJmaWxlcyI6W3sibmFtZSI6ImJ1aWxkLmpzb24iLCJieXRlcyI6NDB9XX0",
+      "meta_sha256": "ec1684d816752d452b16d3aaf9f99599f9f84021358c22f72cc58fb8cbe51280",
+      "canonical": "AFKLINK-AGENT-REQUEST-V1\nPOST\n/api/diagnostics/agent\na3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d\n1790590601000\nf0e1d2c3b4a5968778695a4b3c2d1e0f\n33c6faa1a839724e258d7b10e1f1eb956daa0f2626d6aa4fd76ee01bb7e2ae84\nec1684d816752d452b16d3aaf9f99599f9f84021358c22f72cc58fb8cbe51280",
+      "signature": "QBZ4gKbc4fNGz74XiGzXYY77WfOY3hb5aFaioQoNCTBnYkv5Y4kYepas2mLEbAMm0zoPcqJ5glyOj8ED/+jvBw==",
+      "headers": {
+        "x-afklink-device": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+        "x-afklink-timestamp": "1790590601000",
+        "x-afklink-nonce": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+        "x-afklink-content-sha256": "33c6faa1a839724e258d7b10e1f1eb956daa0f2626d6aa4fd76ee01bb7e2ae84",
+        "x-afklink-meta": "eyJidWlsZCI6eyJ2ZXJzaW9uIjoiMC4xLjIiLCJjb21taXQiOiI5ZGQ5YWI3MzZmNDI0NmM0MmJlNzZkMjRhMWQ4ODgxMDNkYTMxM2M5IiwiZGlydHkiOmZhbHNlLCJjaGFubmVsIjoicmVsZWFzZSIsImJ1aWx0X2F0IjoiMjAyNi0wOS0yOVQwODowMDowMFoiLCJsYWJlbCI6IjAuMS4yIn0sImNsaWVudF90aW1lIjoxNzkwNTkwNjAwOTUwLCJmaWxlcyI6W3sibmFtZSI6ImJ1aWxkLmpzb24iLCJieXRlcyI6NDB9XX0",
+        "x-afklink-signature": "QBZ4gKbc4fNGz74XiGzXYY77WfOY3hb5aFaioQoNCTBnYkv5Y4kYepas2mLEbAMm0zoPcqJ5glyOj8ED/+jvBw=="
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "t": "hb",
+  "seq": 43,
+  "state": "restarting",
+  "cause": "capture_lost",
+  "since_capture_ms": null,
+  "since_encode_ms": null,
+  "still": false,
+  "h": 720,
+  "fps": 30,
+  "restarts": 1
+}

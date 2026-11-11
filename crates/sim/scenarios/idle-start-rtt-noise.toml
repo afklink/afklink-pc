@@ -1,0 +1,42 @@
+# Defect 1 of the recorded relayed VPN session (a minute of it; an iPhone through a Cloudflare
+# relay reached over TCP/TLS, a VPN at both ends). A nearly still game screen from the first second
+# on a path with room to spare (probes later read 1-2 Mbps) whose round trip jitters by 150-250 ms
+# with nothing queued, and now and then a burst of 20-30 kB. On the still screen str0m's estimate
+# sinks to the padding rate (78-121 kbps), each burst waits behind its pacer, and the jitter keeps
+# the clean-collapse re-anchor refused (`rtt`). Recorded: 1080p60 -> 1080p30 -> 900p -> 720p -> 540p
+# in 31 s, every step on `queue_late`, the receiver at its baseline and 0% loss throughout.
+#
+# Here: 1.5 Mbps up, which nothing sent comes near; RTT 200 plus up to 240 of jitter; a caret and a
+# character every two seconds, and a page jump of three frames every ~9.5 s. The question is only
+# whether our own pacer's queue, behind an estimate nothing has measured, is read as the network:
+# the ladder should hold the top rung. See `QualityController::pacer_only`.
+name = "idle-start-rtt-noise"
+duration_s = 70
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 9.0
+cps = 0.5
+
+[[content.phases]]
+kind = "jump"
+secs = 0.45
+px = 500
+every_ms = 150
+
+[link]
+rtt_ms = 200
+
+[link.up]
+kbps = 1500
+queue_ms = 600
+jitter_ms = 120
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 120

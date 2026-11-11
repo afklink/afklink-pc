@@ -1,0 +1,14 @@
+# Pinned toolchain for the agent workspace.
+#
+# An exact version, not "stable": this workspace produces a signed binary that runs on
+# other people's machines, so the compiler that built a release must be reproducible
+# from the tag. Bumping is a deliberate commit, not something that happens because a
+# developer ran `rustup update` on a Tuesday.
+#
+# rustup reads this automatically for any cargo invocation inside this repository, so CI,
+# the release build and a local `cargo test` all use the same compiler.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

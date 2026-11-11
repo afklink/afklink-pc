@@ -1,0 +1,9 @@
+{
+  "type": "agent_event",
+  "kind": "update_finished",
+  "at": 1789600100000,
+  "from": "0.5.0",
+  "to": "0.6.0",
+  "outcome": "rolled_back",
+  "reason": "health_timeout"
+}

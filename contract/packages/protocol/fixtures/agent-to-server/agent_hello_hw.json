@@ -1,0 +1,22 @@
+{
+  "type": "agent_hello",
+  "protocol_version": 1,
+  "device_id": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+  "pubkey": "dRJFRuUNj1EUYUXuh4nFWnmQ/AEJPuEfag6tQX9fEg0=",
+  "build": {
+    "version": "0.6.0",
+    "commit": "3a3bc46e0f1d",
+    "channel": "release",
+    "dirty": false
+  },
+  "boot_id": "6b1e0c2a-9f3d-4e57-8a21-c4d5e6f70812",
+  "last_exit": {
+    "kind": "panic",
+    "at": 1789599960000
+  },
+  "hw": {
+    "hash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "vm": false,
+    "parts": 3
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "type": "owner_request_state",
+  "kind": "unbind_owner",
+  "telegram_user_id": 12345,
+  "state": "refused",
+  "reason": "busy"
+}

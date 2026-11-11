@@ -1,0 +1,9 @@
+{
+  "type": "pair_request",
+  "request_id": "7c4b1e90-2a3d-4f51-9b8e-6d5c4a3b2f10",
+  "telegram_user_id": 12345,
+  "username": "owner",
+  "first_name": "Owner",
+  "expires_at": 1789600120000,
+  "has_owner": false
+}

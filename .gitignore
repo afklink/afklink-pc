@@ -1,0 +1,39 @@
+# Node / TS (app/ui, and the contract workspaces bun links under contract/packages/*)
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Secrets. Deny every .env variant and re-allow only the checked-in templates —
+# a bare `.env` rule matches that exact name and nothing else, so files like
+# .env.production stay tracked and one `git add .` publishes them.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+device_identity.json
+config.local.*
+
+# Rust
+**/target/
+*.pdb
+
+# Tauri: everything it generates except the capability schemas, which are tracked
+# (capabilities/default.json points its $schema at them).
+/app/src-tauri/gen/*
+!/app/src-tauri/gen/schemas/
+
+# Live-session logs of the CLI agent (normally under target/, kept out wherever they land).
+live-session*.log
+
+# Screen-content corpus for the simulator: gigabytes of generated/recorded frames, regenerated with
+# `cargo run -p afklink-corpus --release -- gen all` (see crates/corpus).
+/corpus/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

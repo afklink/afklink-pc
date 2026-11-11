@@ -1,0 +1,48 @@
+[package]
+name = "afklink-hw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# The PC's hardware fingerprint for `agent_hello.hw` (the invite-only beta): what it is made of, how
+# it is encoded and hashed, the virtual machine table — and, on Windows, the readers of the three
+# parts. A sibling of `capture`, `encode` and `input`: `afklink-core` stays free of Windows-only
+# dependencies and is handed a reader (`Agent::with_hw_reader`).
+[lib]
+name = "afklink_hw"
+path = "src/lib.rs"
+
+[dependencies]
+afklink-protocol = { path = "../protocol" }
+
+# Both already in the workspace: the SHA-256 the desktop app pins its embedded installer with, and
+# the base64 every crate here encodes with (`URL_SAFE_NO_PAD`: the contract's 43 characters).
+sha2 = { workspace = true }
+base64 = { workspace = true }
+tracing = { workspace = true }
+
+# The readers (`src/system.rs`). Registry: MachineGuid (`RegGetValueW`). SystemInformation: the raw
+# SMBIOS table (`GetSystemFirmwareTable` 'RSMB') and the Windows directory, whose drive is the system
+# volume. Storage_FileSystem and Security: `CreateFileW` on the volume and on its disk (opened with
+# no access right: neither query reads data, so no elevation is needed), and
+# IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS. IO and Ioctl: `DeviceIoControl` and
+# IOCTL_STORAGE_QUERY_PROPERTY with its query and the descriptor's layout. No WMI: Win32_DiskDrive
+# and Win32_ComputerSystemProduct read these same three sources, behind COM and a service.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+] }
+
+[dev-dependencies]
+# The tests read what the fingerprint logs, to hold it to «no values, no hash».
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

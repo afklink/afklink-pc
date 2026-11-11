@@ -1,0 +1,72 @@
+{
+  "type": "session_stats",
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "final": true,
+  "stats": {
+    "duration_ms": 45000,
+    "source_w": 3600,
+    "source_h": 2400,
+    "frames_captured": 2680,
+    "frames_encoded": 1340,
+    "frames_dropped_stale": 12,
+    "frames_dropped_paced": 1328,
+    "frames_skipped_encoder": 0,
+    "encode_ms_avg": 8.6,
+    "encode_ms_max": 19.2,
+    "bytes_sent": 5400000,
+    "lowest_height": 720,
+    "quality_changes": 2,
+    "estimate_kbps": 940,
+    "encode_errors": 0,
+    "bg_hold_ms": 11800,
+    "bg_holds": 2,
+    "summary": {
+      "rung_s": {
+        "720": 13.5,
+        "1080": 31.5
+      },
+      "freeze_s": 2,
+      "episodes": [
+        {
+          "kind": "brake",
+          "at_ms": 30200,
+          "dur_ms": 1800,
+          "code": "loss"
+        },
+        {
+          "kind": "rung_change",
+          "at_ms": 31500,
+          "code": "brake"
+        },
+        {
+          "kind": "freeze",
+          "at_ms": 33000,
+          "dur_ms": 2400
+        },
+        {
+          "kind": "path_change",
+          "at_ms": 34100,
+          "code": "relay"
+        }
+      ],
+      "episodes_dropped": 0,
+      "encode_ms_p95": 14.2,
+      "input": {
+        "abs": 120,
+        "rel": 3400,
+        "buttons": 48,
+        "keys": 210,
+        "text": 3
+      },
+      "input_path": "hid",
+      "input_blocked_n": 0,
+      "capture_mode": "game_only",
+      "driver": "installed",
+      "dropped_rate": 1328,
+      "bytes_socket": 5650000,
+      "bytes_relay": 2100000,
+      "quality_profile": "default.v1",
+      "quality_profile_source": "server"
+    }
+  }
+}

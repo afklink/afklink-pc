@@ -1,0 +1,36 @@
+[package]
+name = "afklink-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Headless binary that wires the concrete platform backends
+# (WGC capture, OpenH264 encode, SendInput injection) into the core Agent.
+# Also the bench device: `afklink-agent --help` lists the flags that replace capture and input and
+# shape the link.
+[[bin]]
+name = "afklink-agent"
+path = "src/main.rs"
+
+[dependencies]
+afklink-protocol = { path = "../protocol" }
+afklink-core = { path = "../core" }
+afklink-capture = { path = "../capture" }
+afklink-encode = { path = "../encode" }
+afklink-input = { path = "../input" }
+afklink-clipboard = { path = "../clipboard" }
+# The PC's hardware fingerprint for `agent_hello.hw` (the invite-only beta).
+afklink-hw = { path = "../hw" }
+afklink-transport = { path = "../transport" }
+# The reader only (`--capture-corpus`): no generators, no recorder, no second encoder.
+afklink-corpus = { path = "../corpus", default-features = false }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

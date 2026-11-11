@@ -1,0 +1,31 @@
+# `brake-120k.toml`'s path with a picture that does not fit the braked budget: a continuous slow
+# scroll, which costs 1-2 Mbps at 1080p against a brake that cuts to ~700 kbps and tightens as the
+# round trip keeps rising. Here the rung has to give pixels up — and the question is how: one rung
+# per dwell, a keyframe each on the braked budget (the recorded controller), or once, straight to
+# the rung the content fits. Then back up when the path clears. See
+# `QualityController::descent_target`.
+name = "brake-120k-video"
+duration_s = 80
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "scroll"
+secs = 30.0
+px_per_frame = 1
+
+[link]
+rtt_ms = 190
+
+[link.up]
+kbps = 2000
+queue_ms = 1500
+jitter_ms = 20
+delay_schedule = [[30, 145], [32, 195], [34, 245], [36, 295], [38, 345], [40, 395], [42, 445], [44, 495], [46, 545], [48, 595], [50, 645], [52, 695], [54, 745], [60, 95]]
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 20

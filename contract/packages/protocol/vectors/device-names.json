@@ -1,0 +1,45 @@
+{
+  "//": "One rule for a device name on both ends: deviceNameSchema (src/common.ts) and validate_device_name (agent/crates/protocol/src/device_name.rs) are both tested against these cases. Written by hand, not by emit: emit rewrites fixtures/ and schema/ from scratch.",
+  "max": 64,
+  "valid": [
+    { "raw": "HVN2MMZR", "name": "HVN2MMZR", "why": "a Windows computer name" },
+    { "raw": "  Рабочий ПК  ", "name": "Рабочий ПК", "why": "trimmed, not ASCII" },
+    { "raw": "Home  office", "name": "Home  office", "why": "inner spaces are kept" },
+    { "raw": " Office　", "name": "Office", "why": "no-break and ideographic spaces trim" },
+    { "raw": "﻿Laptop", "name": "Laptop", "why": "JavaScript trims U+FEFF, Rust's trim does not" },
+    { "raw": "Мой ПК 🖥", "name": "Мой ПК 🖥", "why": "an emoji is one character" },
+    {
+      "raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "why": "64 characters, the limit"
+    },
+    {
+      "raw": "🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥",
+      "name": "🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥",
+      "why": "64 emoji are 64 characters (code points), though 128 UTF-16 units and 256 bytes"
+    }
+  ],
+  "invalid": [
+    { "raw": "", "error": "empty", "why": "nothing" },
+    { "raw": "   ", "error": "empty", "why": "only spaces" },
+    { "raw": "\t\n", "error": "empty", "why": "tab and newline trim away" },
+    {
+      "raw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error": "too_long",
+      "why": "65 characters"
+    },
+    {
+      "raw": "🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥🖥",
+      "error": "too_long",
+      "why": "65 emoji"
+    },
+    { "raw": "Office\tPC", "error": "control_char", "why": "a tab inside" },
+    { "raw": "PC\u0000", "error": "control_char", "why": "NUL does not trim" },
+    {
+      "raw": "\u0085PC",
+      "error": "control_char",
+      "why": "NEL: Rust's trim takes it, JavaScript's does not"
+    },
+    { "raw": "PC\u007f", "error": "control_char", "why": "DEL" }
+  ]
+}

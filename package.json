@@ -1,0 +1,27 @@
+{
+  "name": "afklink-agent-root",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "workspaces": [
+    "app/ui",
+    "contract/packages/*"
+  ],
+  "scripts": {
+    "i18n:emit": "bun contract/packages/i18n/scripts/emit.ts --out crates/i18n/src/generated.rs",
+    "i18n:check": "bun contract/packages/i18n/scripts/emit.ts --out crates/i18n/src/generated.rs --check",
+    "portable": "bun scripts/portable.ts",
+    "release:build": "bun scripts/official-build.ts",
+    "test:scripts": "bun test ./scripts/",
+    "typecheck": "bun run --filter afklink-agent-ui typecheck && tsc -p scripts",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write",
+    "format": "biome format . --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "^1.4.2",
+    "typescript": "^5.9.3"
+  }
+}

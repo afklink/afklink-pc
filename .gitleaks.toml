@@ -1,0 +1,26 @@
+title = "afklink-pc"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Example certificate and key published with the str0m crate, vendored byte for byte"
+paths = [
+  '''(^|/)vendor/str0m/cert\.pem$''',
+  '''(^|/)vendor/str0m/examples/(cer|key)\.pem$''',
+]
+
+[[allowlists]]
+description = "The published test update key: a public key, intentionally public"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)app/src-tauri/updater-test\.pub$''']
+
+[[allowlists]]
+description = "A published test vector for request signatures, not a real key"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)contract/packages/protocol/vectors/agent-request-signature\.json$''']
+
+[[allowlists]]
+description = "A published test vector for the signed signaling challenge, its key made for this file only"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)contract/packages/protocol/vectors/agent-challenge-signature\.json$''']

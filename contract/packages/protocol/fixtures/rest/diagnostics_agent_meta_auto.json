@@ -1,0 +1,27 @@
+{
+  "build": {
+    "version": "0.7.2",
+    "commit": "61132f7a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e",
+    "dirty": false,
+    "channel": "release",
+    "built_at": "2026-10-26T09:30:00Z",
+    "label": "0.7.2"
+  },
+  "client_time": 1793016264500,
+  "files": [
+    {
+      "name": "logs/afklink-app.2026-10-26.log",
+      "bytes": 180224,
+      "truncated": true
+    }
+  ],
+  "session_ids": [
+    "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  ],
+  "os": "Windows 10 Pro 22H2 (19045)",
+  "auto": {
+    "trigger": "session_failed",
+    "at": 1793016260000,
+    "detail": "encoder_error"
+  }
+}

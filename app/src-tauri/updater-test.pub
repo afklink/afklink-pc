@@ -1,0 +1,10 @@
+# ТЕСТОВЫЙ открытый ключ обновлений AFKLink (minisign), ID EE2B0EA7C354D96F, — только для живых проверок отката (L9).
+#
+# Одной строкой — содержимое <ключ>.pub (строка base64). Строки с «#» — комментарии. Ключ
+# открытый, секрета в нём нет. Закрытый — только на тестовом ПК вне репозиториев (по умолчанию
+# %USERPROFILE%\.afklink\updater-test.key); ни в репозитории, ни в секретах GitHub его нет.
+# Сделан `bun scripts/release-test-key.ts` (agent/README.md, «Тестовый ключ подписи»).
+#
+# Встраивается ТОЛЬКО в тестовую сборку (cargo-фича `updater-test-key`, `bun scripts/release-build.ts
+# --test-key`) и в ней заменяет updater.pub. Выпуски этот ключ не знают и подписанное им не ставят.
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMkIwRUE3QzM1NEQ5NkYKUldSdjJWVERwdzRyN21oV1EvMytyY3VBUUU2UjNFWDB1ZmRwTStkNVNXdGcreUpjUTY4VDRGazkK

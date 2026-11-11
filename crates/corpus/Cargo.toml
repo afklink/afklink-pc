@@ -1,0 +1,51 @@
+[package]
+name = "afklink-corpus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Screen-content corpus for the offline simulator: on-disk format, streaming reader, generators and a live WGC recorder"
+
+[lib]
+name = "afklink_corpus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "afklink-corpus"
+path = "src/bin/afklink-corpus.rs"
+required-features = ["tools"]
+# The CLI has no tests of its own (they are in the library): no harness to link.
+test = false
+
+[features]
+# `tools` is the generators, the live recorder, the encode report and the CLI. A consumer that only
+# reads corpus files (the simulator) can take `default-features = false` and skip png, the encoder
+# and the capture crate.
+default = ["tools"]
+tools = [
+    "dep:png",
+    "dep:afklink-encode",
+    "dep:afklink-capture",
+    "dep:tracing-subscriber",
+]
+
+[dependencies]
+afklink-core = { path = "../core" }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+crc32fast = "1.5"
+# zstd rather than lz4 or deflate: the best ratio of the three on screen content and a decoder that
+# runs at memory speed, which is what a simulator pulling 3600x2400 frames needs. `zstdmt` lets the
+# live recorder spread one large frame over several threads.
+zstd = { version = "0.13", features = ["zstdmt"] }
+
+png = { version = "0.17", optional = true }
+afklink-encode = { path = "../encode", optional = true }
+afklink-capture = { path = "../capture", optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[lints]
+workspace = true

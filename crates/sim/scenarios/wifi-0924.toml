@@ -1,0 +1,78 @@
+# A recorded WiFi session's shape: a clean, wide path through the relay (RTT ~136 ms, no loss)
+# and text being read — slow scrolling that costs a few hundred kbps, broken by sharp scrolls and
+# page flips whose frames the encoder cannot predict. In the recording str0m's estimate collapsed
+# on the first burst after each quiet stretch (1299->483, 1503->192, 1228->83, 4308->46,
+# 3341->217) and the ladder walked 1080p60 -> 360p in 70 s; the controller answers it with the
+# clean-collapse re-anchor. This asks whether the collapse happens here and what the controller
+# does with it.
+#
+# On this 12 Mbps bottleneck it does not happen: bursts paced at 1.1x a 4-8 Mbps estimate never
+# queue, so str0m sees no overuse and never cuts. The recording's own probes (3-4 Mbps) say the
+# real bottleneck was narrower; wifi-0924-4m.toml is that path, and there the collapses appear.
+name = "wifi-0924"
+duration_s = 120
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "scroll"
+secs = 5.0
+px_per_frame = 1
+
+[[content.phases]]
+kind = "scroll"
+secs = 0.4
+px_per_frame = 60
+
+[[content.phases]]
+kind = "scroll"
+secs = 3.0
+px_per_frame = 1
+
+[[content.phases]]
+kind = "typing"
+secs = 4.0
+cps = 6.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 0.3
+px_per_frame = 120
+
+[[content.phases]]
+kind = "scroll"
+secs = 6.0
+px_per_frame = 2
+
+[[content.phases]]
+kind = "scroll"
+secs = 0.5
+px_per_frame = 80
+
+[[content.phases]]
+kind = "idle"
+secs = 2.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 4.0
+px_per_frame = 1
+
+[[content.phases]]
+kind = "jump"
+secs = 1.2
+px = 1200
+every_ms = 400
+
+[link]
+rtt_ms = 136
+
+[link.up]
+kbps = 12000
+queue_ms = 400
+
+[link.down]
+kbps = 20000
+queue_ms = 400

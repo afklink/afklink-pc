@@ -1,0 +1,56 @@
+# A recorded 3G shape: a thin uplink (~700 kbps) with a shallow buffer and a long path (RTT
+# ~210 ms). Work with pauses in it — typing, a scroll, reading — so the controller's pause-resume
+# re-anchor has occasions to fire. `Rtc::bwe().reset` restarts str0m's estimator, whose first act
+# is the initial probe pair at 3x and 6x the reset value; on a 700 kbps link with a 60 ms buffer
+# those clusters cannot fit, and the question is whether they show up as loss.
+name = "3g-0919"
+duration_s = 120
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "typing"
+secs = 6.0
+cps = 5.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 2.0
+px_per_frame = 3
+
+[[content.phases]]
+kind = "idle"
+secs = 8.0
+
+[[content.phases]]
+kind = "scroll"
+secs = 3.0
+px_per_frame = 3
+
+[[content.phases]]
+kind = "typing"
+secs = 5.0
+cps = 5.0
+
+[[content.phases]]
+kind = "jump"
+secs = 3.0
+px = 900
+every_ms = 1000
+
+[[content.phases]]
+kind = "idle"
+secs = 6.0
+
+[link]
+rtt_ms = 210
+
+[link.up]
+kbps = 700
+queue_ms = 60
+
+[link.down]
+kbps = 1500
+queue_ms = 200

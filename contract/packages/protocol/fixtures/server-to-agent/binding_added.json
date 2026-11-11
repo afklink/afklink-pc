@@ -1,0 +1,7 @@
+{
+  "type": "binding_added",
+  "telegram_user_id": 12345,
+  "username": "owner",
+  "first_name": "Owner",
+  "role": "owner"
+}

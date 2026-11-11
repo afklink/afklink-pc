@@ -1,0 +1,23 @@
+{
+  "//": "Signed signaling challenge (protocol.md §2, agent-ws.ts AGENT_CHALLENGE_PREFIX): the same bytes on both ends. The key was generated for this file — a test key with no other use, never a device's, used nowhere else in the contract. secret_key is the 32-byte seed in identity.json's encoding (standard base64); public_key is its 32-byte public key, standard base64. Per case: nonce = the challenge's 32 random bytes (nonce_base64 is how `challenge.nonce` carries them); message = prefix bytes (ASCII, 30 bytes with the trailing NUL) || nonce bytes, 62 bytes; signature = Ed25519(secret_key, message), standard base64 — what `agent_auth.signature` carries; legacy_signature = Ed25519(secret_key, nonce bytes alone), the form the server still accepts from older agents. src/agent-challenge.test.ts re-derives every value. Written by hand, not by emit: emit rewrites fixtures/ and schema/ from scratch.",
+  "prefix": "AFKLINK-AGENT-WS-CHALLENGE-V1\u0000",
+  "prefix_hex": "41464b4c494e4b2d4147454e542d57532d4348414c4c454e47452d563100",
+  "secret_key": "5F3rr7qqramDp1yVv9Tue+89JXLXZ1jEDOiFuRY0w+M=",
+  "public_key": "8415cIWCek0/rXn+xXs8hEVk+wWkbgtNmv06hn5fPvA=",
+  "cases": [
+    {
+      "nonce_hex": "d24bc36d940412c932417615ab52b1e8f760525c95ca9b10d63715842f6a9d98",
+      "nonce_base64": "0kvDbZQEEskyQXYVq1Kx6PdgUlyVypsQ1jcVhC9qnZg=",
+      "message_hex": "41464b4c494e4b2d4147454e542d57532d4348414c4c454e47452d563100d24bc36d940412c932417615ab52b1e8f760525c95ca9b10d63715842f6a9d98",
+      "signature": "iM6gH5bW6+m6v0z7i4ZTwhn+Xvoy224b0PudhtPMecq+skgh4hHX28oZfqNGuSA0wAEOc7HJP6zUDjeDw7WBAw==",
+      "legacy_signature": "3Y6/MWKGFSTyJswS+asTijHUZQ/QpZ8OvvvaOt9C38Ka3H5hGgOi+iZyMhe+YCoPJkRMcsL5Z2d9FVZSThcmBg=="
+    },
+    {
+      "nonce_hex": "f62706783b1ed29e75b6b33b6208d66bbbe31f5aee0b88800dbea16de7f68850",
+      "nonce_base64": "9icGeDse0p51trM7YgjWa7vjH1ruC4iADb6hbef2iFA=",
+      "message_hex": "41464b4c494e4b2d4147454e542d57532d4348414c4c454e47452d563100f62706783b1ed29e75b6b33b6208d66bbbe31f5aee0b88800dbea16de7f68850",
+      "signature": "vCEYRfNy3V6FuJbJuC7k+iPS1+jPErIXmRxmOmb05MEb2WafmKPHUK/D7Wm3dpKh/1awfzfe3zV70I+FV/wXCw==",
+      "legacy_signature": "3BWMP4dgQoC7I9cdja4REMbyo6s860RvzVdH7tRBzET2wtZdbNU6vdg8/y1akBePvYSS9BtzOCnXdn4NbjkKAg=="
+    }
+  ]
+}

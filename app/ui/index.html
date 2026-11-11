@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Dark-only window: the canvas and WebView2's own parts are dark before any CSS loads. -->
+    <meta name="color-scheme" content="dark" />
+    <!--
+      No remote origins at all: this window runs on the owner's machine and talks only to the
+      Rust side over Tauri's IPC. A CSP that admits nothing external means a compromised
+      dependency has nowhere to send what it finds. connect-src admits Tauri's IPC endpoint
+      (http://ipc.localhost on Windows) so calls go over its fetch path.
+      The built app also sends this policy as a header (`app.security.csp` in
+      src-tauri/tauri.conf.json); keep the two identical — src-tauri/tests/window_csp.rs fails
+      when they differ. Under `vite dev` only this tag applies.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
+    <title>AFKLink</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

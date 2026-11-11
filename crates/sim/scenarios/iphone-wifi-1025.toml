@@ -1,0 +1,45 @@
+# A recorded iPhone viewer (two sessions, one relayed and one on a LAN host pair):
+# WebKit on an iPhone on Wi-Fi, a game at 1620x1080@48 from the PC. No loss at all, but the
+# round trip jumped from its base (30 ms on the relay, 5 ms on the LAN) to 80-139 ms every 3-8 s and
+# fell back within the second. str0m 0.24.1 read each jump as overuse and cut to 0.85x of what was
+# acked; it crept back at ~40 kbps/s and never probed again, so the estimate sat at 2-4 Mbps and the
+# encoder at its QP ceiling (46) on every camera turn. The same viewer on a quiet day got
+# 17.6 Mbps.
+#
+# Here, 90 s: the relay path — 15 ms each way, 25 Mbps up behind a 200 ms queue (room to spare) —
+# with 16 spikes of +80..+130 ms on `up` (the media direction, the one str0m's delay-based estimate
+# reads), 3-8 s apart, 100-150 ms long, in two shapes taking turns: a step (what is sent in the
+# spike takes the extra delay at once) and a ramp (the extra delay grows in four steps over the
+# spike). Packets are never reordered, so each spike ends in a burst. The content is the game-like
+# pan of `lan-wifi-spikes`. What to read, over seeds: seconds at QP >= 44, the estimate and what was
+# sent (mean, median), the estimate's collapses, latency p95, the queue guard's drops; loss must
+# stay zero.
+name = "iphone-wifi-1025"
+duration_s = 90
+seed = 1
+
+[content]
+kind = "desktop"
+
+[[content.phases]]
+kind = "scroll"
+secs = 1.0
+px_per_frame = 16
+
+[[content.phases]]
+kind = "noise"
+secs = 1.0
+fraction = 0.02
+fps = 60.0
+
+[link]
+rtt_ms = 30
+
+[link.up]
+kbps = 25000
+queue_ms = 200
+delay_schedule = [[0, 15], [3, 115], [3.12, 15], [7, 35], [7.025, 55], [7.05, 75], [7.075, 95], [7.1, 15], [13.5, 145], [13.65, 15], [16.5, 37], [16.533, 60], [16.565, 83], [16.598, 105], [16.63, 15], [24, 135], [24.11, 15], [29, 43], [29.03, 70], [29.06, 97], [29.09, 125], [29.12, 15], [32.5, 100], [32.6, 15], [40.5, 46], [40.538, 77], [40.575, 109], [40.613, 140], [40.65, 15], [45, 115], [45.13, 15], [51, 35], [51.028, 55], [51.055, 75], [51.083, 95], [51.11, 15], [55, 145], [55.12, 15], [61.5, 37], [61.525, 60], [61.55, 83], [61.575, 105], [61.6, 15], [64.5, 135], [64.65, 15], [72, 43], [72.033, 70], [72.065, 97], [72.098, 125], [72.13, 15], [77, 100], [77.11, 15], [80.5, 46], [80.53, 77], [80.56, 109], [80.59, 140], [80.62, 15]]
+
+[link.down]
+kbps = 10000
+queue_ms = 200

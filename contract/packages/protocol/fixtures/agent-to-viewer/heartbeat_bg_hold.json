@@ -1,0 +1,14 @@
+{
+  "t": "hb",
+  "seq": 78,
+  "state": "ok",
+  "since_capture_ms": 25210,
+  "since_encode_ms": 25212,
+  "still": true,
+  "h": 1080,
+  "fps": 60,
+  "restarts": 0,
+  "rel_exact": true,
+  "vis_ok": true,
+  "bg_hold": true
+}

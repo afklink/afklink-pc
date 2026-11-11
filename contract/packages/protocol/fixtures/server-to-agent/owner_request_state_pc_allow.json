@@ -1,0 +1,10 @@
+{
+  "type": "owner_request_state",
+  "request_id": "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9",
+  "kind": "pc_allow",
+  "telegram_user_id": 35791,
+  "state": "pending",
+  "expires_at": 1789600900000,
+  "username": "vasya",
+  "first_name": "Вася"
+}

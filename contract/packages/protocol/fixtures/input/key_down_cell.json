@@ -1,0 +1,13 @@
+{
+  "t": "k",
+  "d": 1,
+  "code": "KeyB",
+  "key": "b",
+  "mods": {
+    "ctrl": false,
+    "alt": true,
+    "shift": false,
+    "meta": false
+  },
+  "src": "cell"
+}

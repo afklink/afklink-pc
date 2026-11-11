@@ -1,0 +1,8 @@
+{
+  "type": "owner_request_state",
+  "request_id": "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b",
+  "kind": "make_owner",
+  "telegram_user_id": 67890,
+  "state": "cancelled",
+  "reason": "target_left"
+}

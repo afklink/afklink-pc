@@ -1,0 +1,7 @@
+{
+  "type": "pairing_code",
+  "code": "123456",
+  "expires_at": 1789600000000,
+  "bot_username": "example_bot",
+  "miniapp_short_name": "app"
+}

@@ -1,0 +1,9 @@
+{
+  "type": "agent_event",
+  "kind": "driver_install_finished",
+  "at": 1789600200000,
+  "outcome": "failed",
+  "step": "msiexec",
+  "code": 1603,
+  "ms": 41250
+}

@@ -1,0 +1,51 @@
+[package]
+name = "afklink-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Offline, virtual-time simulator: real encoder, real controller, real str0m at both ends, a link model between them"
+
+[lib]
+name = "afklink_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "afklink-sim"
+path = "src/main.rs"
+# The CLI has no tests of its own (they are in the library and `tests/`): no harness to link.
+test = false
+
+[dependencies]
+# Read-only dependencies on the production pipeline. Nothing here is re-exported or patched: the
+# point of the simulator is that the controller, the encoder and str0m are the ones that ship.
+afklink-core = { path = "../core" }
+afklink-encode = { path = "../encode" }
+# `webrtc::reanchor_bwe`, called as it is so the simulated re-anchor is the production one.
+afklink-transport = { path = "../transport" }
+# The link model, shared with the agent's real-time bench link shaper so both shape alike.
+afklink-netem = { path = "../netem" }
+str0m = { workspace = true }
+# The viewer's str0m, pinned apart from the agent's: the viewer stands in for Chrome and WebKit,
+# neither of which is str0m, and its receive side (frame release behind a hole, receive state
+# across a pause) changed between 0.23.1 and 0.24.1. 0.23.1 is the default viewer — the one every
+# threshold in `tests/` was set against, and the one that, like Chrome, lets a keyframe through
+# after a hole; `[viewer] str0m` in a scenario, or `AFKLINK_SIM_VIEWER_STR0M`, picks 0.24.1 per
+# run. See `src/viewer.rs`. Same companions as the workspace's str0m (`is`,
+# `dimpl`, `str0m-proto`, `str0m-rust-crypto`, `sctp-proto` resolve to the same versions), so this
+# adds the one crate and nothing else to the lock file. Never a dependency of anything that ships.
+str0m_023 = { package = "str0m", version = "=0.23.1", default-features = false, features = ["rust-crypto"] }
+# str0m draws every non-cryptographic random value (SSRCs, RTP sequence starts, ICE credentials,
+# STUN transaction ids) from fastrand's thread-local generator (`str0m-proto/src/rng.rs`). Seeding
+# that generator on the simulation thread is what makes two runs of one scenario identical. Same
+# major version as str0m-proto's, so it is the same crate and the same thread-local.
+fastrand = "2"
+
+serde = { workspace = true }
+toml = "0.9"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,55 @@
+# The background hold: the viewer's page hidden for
+# ten minutes in the middle of a session, on a path with room whose round trip jitters by up to
+# 120 ms each way (a recorded relayed VPN path). A video pane loads the link for
+# three seconds in five before and after.
+#
+# What to read in the summary's `background holds`: the hold begins 10 s after the page is hidden
+# (the grace); while held nothing but str0m's padding is on the wire (~100 kbps of small padding
+# packets with their headers — what a still screen sends too) and no media frame; the jitter under
+# padding walks str0m's estimate down to ~70 kbps, and the resume re-anchors it up to the evidence
+# from before the hold (`hold-resume`), with no brake; the first frame of the screen as it is reaches
+# the viewer within a second of the page coming back.
+#
+# Not a showcase for the rung: this path does not let the ladder hold one at all. Never hidden, the
+# same session walks from 1080p60 to 360p@8 and oscillates there (35 moves in 640 s); held, it sits
+# at 720p through the hold and gives one rung 5 s after the resume, on the first motion's queue
+# behind an estimate str0m collapses again on the jitter — the arm that walks the unhidden one down.
+name = "hold-10min-jittery"
+duration_s = 640
+seed = 7
+
+[content]
+kind = "desktop"
+width = 640
+height = 360
+refresh_hz = 30
+
+[[content.phases]]
+kind = "noise"
+secs = 3.0
+fraction = 0.4
+fps = 30
+
+[[content.phases]]
+kind = "typing"
+secs = 2.0
+cps = 8.0
+
+[link]
+rtt_ms = 200
+
+[link.up]
+kbps = 4000
+queue_ms = 600
+jitter_ms = 120
+
+[link.down]
+kbps = 5000
+queue_ms = 300
+jitter_ms = 120
+
+[viewer]
+hidden = [[20, 620]]
+
+[encoder]
+threads = 1

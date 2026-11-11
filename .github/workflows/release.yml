@@ -1,0 +1,926 @@
+# The official release of AFKLink for Windows: built, signed and attested here, in public, so the
+# exe on GitHub Releases, the one the app updates to and the one anyone can hash are the same file.
+# RELEASING.md says how a release is cut, which repository settings it relies on, and how to check
+# one.
+#
+#   build    (Windows, no secrets)  the unsigned exe of the tag: scripts/official-build.ts, which
+#                                   needs the tag's commit on main, stamps the release channel and
+#                                   this commit, never enables the test update key and refuses an
+#                                   exe that does not carry the update key of
+#                                   app/src-tauri/updater.pub or that carries the test key. Its
+#                                   debug symbols are encrypted to the maintainers' age key before
+#                                   they become an artifact, or not kept at all.
+#   notices  (Linux, no secrets)    THIRD-PARTY-NOTICES.txt (scripts/notices.ts) and the SBOM
+#                                   (cargo-cyclonedx, CycloneDX JSON) of the same commit.
+#   sign     (Linux, environment `release`)  the Tauri signer signs the exe with the update key,
+#                                   writing the version and the file name into the signature's
+#                                   trusted comment. The key reaches this job only, and the job
+#                                   runs nothing from the repository: it does not check it out.
+#   verify   (Linux, read only)     checks everything as the app will (scripts/official-check.ts)
+#                                   and writes SHA256SUMS and the release text.
+#   publish  (Linux)                no checkout and no repository code: hashes the files again
+#                                   against verify's SHA256SUMS, attests every file's provenance,
+#                                   creates a draft release, checks what the draft holds, then
+#                                   publishes it.
+#
+# Run by hand (Actions -> Release -> Run workflow) it is a dry run on any branch: build and notices
+# only, under a name no updater accepts; nothing is signed or published.
+#
+# Nothing here uses an Actions cache: every tool is downloaded from its own release and checked
+# against the SHA-256 pinned below, so no cache another run could have written reaches the exe.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref at a time, never cancelled halfway through a publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Tauri CLI: it builds the app (Windows) and signs it (Linux). 2.12 or later writes the version
+  # into the signature (`signer sign --app-version`), which the app's updater requires. Each archive
+  # is Tauri's own build from the release tauri-cli-v<version> of tauri-apps/tauri, pinned by its
+  # SHA-256 (the asset's `digest` on that release): nothing from it runs unless it matches.
+  TAURI_CLI_VERSION: "2.12.1"
+  TAURI_CLI_SHA256: "d3919ebe0bf7013dd98293862784dd37b8f76db2d650e13a3ec11c5dd799c519"
+  TAURI_CLI_LINUX_SHA256: "04ef3a9a2ed7b7dc479bef08ab40deee80065c99fc778f79ebce775eb72bbeff"
+  # The NASM that assembles OpenH264 and aws-lc: nasm-<version>-win64.zip from
+  # www.nasm.us/pub/nasm/releasebuilds/<version>/win64/, pinned by its SHA-256.
+  NASM_VERSION: "3.02"
+  NASM_SHA256: "161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7"
+  # Bun (the window's build and the release scripts): bun-<os>-x64.zip of the release
+  # bun-v<version> of oven-sh/bun, pinned by SHA-256 (the assets' `digest`), never from a cache.
+  BUN_VERSION: "1.4.2"
+  BUN_WINDOWS_SHA256: "ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405"
+  BUN_LINUX_SHA256: "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913"
+  # age, which encrypts the debug symbols: age-v<version>-windows-amd64.zip of FiloSottile/age,
+  # pinned by SHA-256 (the asset's `digest`).
+  AGE_VERSION: "1.3.2"
+  AGE_WINDOWS_SHA256: "f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7"
+  # cargo-about (the Rust part of the notices) and cargo-cyclonedx (the SBOM): their own release
+  # builds for x86_64 Linux, pinned by SHA-256 (the assets' `digest` on their GitHub releases).
+  CARGO_ABOUT_VERSION: "0.9.3"
+  CARGO_ABOUT_SHA256: "3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4"
+  CARGO_CYCLONEDX_VERSION: "0.5.9"
+  CARGO_CYCLONEDX_SHA256: "fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8"
+
+# Every action by its full commit SHA, the release it points at beside it.
+jobs:
+  build:
+    name: Build (unsigned)
+    # A fixed image: windows-latest moves to the next Windows Server on its own.
+    runs-on: windows-2025
+    # No cargo cache: the official exe is built from a clean runner.
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      exe: ${{ steps.build.outputs.exe }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+      commit: ${{ steps.build.outputs.commit }}
+      release: ${{ steps.build.outputs.release }}
+    steps:
+      - name: Which run
+        # A push of a tag must be a release tag vX.Y.Z; official-build.ts then checks it is the
+        # tag of Cargo.toml's version, this very commit, and on main.
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" != push ]; then
+            echo "run by hand on $REF: a dry run, nothing is signed or published"
+            exit 0
+          fi
+          if ! [[ "$REF" == refs/tags/* && "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::$REF is not a release tag vX.Y.Z"
+            exit 1
+          fi
+          echo "release tag $REF_NAME"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The whole history: official-build.ts checks that the tag's commit is on main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml names the exact compiler and components.
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Install the Tauri CLI
+        # Tauri's own build of the pinned version instead of `cargo install` (14.6 minutes of
+        # compiling on every release). Nothing from the archive runs until its SHA-256 is the pinned
+        # one. pwsh: $ErrorActionPreference is Stop, so a failing cmdlet ends the step; a native
+        # command's exit code is read here, never turned into a stop (so curl can be retried).
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $version = $env:TAURI_CLI_VERSION
+          $want = $env:TAURI_CLI_SHA256.ToLowerInvariant()
+          $url = "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$version/cargo-tauri-x86_64-pc-windows-msvc.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "cargo-tauri-$version.zip"
+          $attempts = 4
+          for ($i = 1; ; $i++) {
+            Write-Output "download ${i}/${attempts}: $url"
+            curl.exe --proto =https --proto-redir =https --fail --location --silent --show-error --output $zip $url
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { break }
+            Write-Output "::warning::download ${i}/${attempts} failed: curl exit code $code"
+            if ($i -ge $attempts) {
+              Write-Output "::error::the Tauri CLI $version was not downloaded in $attempts attempts: $url"
+              exit 1
+            }
+            Start-Sleep -Seconds (10 * $i)
+          }
+
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          Write-Output "archive: $((Get-Item -LiteralPath $zip).Length) bytes, SHA-256 $got (pinned $want)"
+          if ($got -ne $want) {
+            Write-Output "::error::cargo-tauri-x86_64-pc-windows-msvc.zip of tauri-cli $version has SHA-256 ${got}, pinned ${want}: not used. It builds the release, so a changed archive stops it; a new CLI version changes TAURI_CLI_VERSION and TAURI_CLI_SHA256 together"
+            exit 1
+          }
+          Write-Output "the archive is the pinned one"
+
+          $unpacked = Join-Path $env:RUNNER_TEMP "cargo-tauri-$version"
+          Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
+          Write-Output "in the archive: $((Get-ChildItem -LiteralPath $unpacked -Name) -join ', ')"
+          $exe = Join-Path $unpacked 'cargo-tauri.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            Write-Output "::error::no cargo-tauri.exe at the top of the archive"
+            exit 1
+          }
+          if ($env:CARGO_HOME) {
+            $cargoHome = $env:CARGO_HOME
+            Write-Output "CARGO_HOME is $cargoHome"
+          } else {
+            $cargoHome = Join-Path $env:USERPROFILE '.cargo'
+            Write-Output "CARGO_HOME is not set: $cargoHome"
+          }
+          $bin = Join-Path $cargoHome 'bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $bin 'cargo-tauri.exe') -Force
+          Write-Output "cargo-tauri.exe put into $bin"
+          $onPath = @(Get-Command cargo-tauri -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source)
+          if ($onPath.Count -eq 0) {
+            Write-Output "cargo-tauri on PATH: none (cargo also looks in $bin)"
+          } else {
+            Write-Output "cargo-tauri on PATH: $($onPath -join '; ')"
+          }
+          if ($onPath.Count -gt 1) {
+            Write-Output "::warning::more than one cargo-tauri on PATH; the version check below says which one cargo runs"
+          }
+
+          $said = ((& cargo tauri --version) -join "`n").Trim()
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -or $said -ne "tauri-cli $version") {
+            Write-Output "::error::cargo tauri --version says '$said' (exit code $code), pinned tauri-cli $version"
+            exit 1
+          }
+          Write-Output "cargo tauri --version: $said, the pinned one"
+
+      - name: Install NASM
+        # The pinned NASM (NASM_VERSION, NASM_SHA256 above) instead of the runner image's: nothing
+        # from the archive runs until its SHA-256 is the pinned one. It goes first on PATH (aws-lc
+        # looks there) and into NASM (nasm-rs, for OpenH264, runs exactly that; toolchain.ts names it).
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $version = $env:NASM_VERSION
+          $want = $env:NASM_SHA256.ToLowerInvariant()
+          $url = "https://www.nasm.us/pub/nasm/releasebuilds/$version/win64/nasm-$version-win64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "nasm-$version-win64.zip"
+          $attempts = 4
+          for ($i = 1; ; $i++) {
+            Write-Output "download ${i}/${attempts}: $url"
+            curl.exe --proto =https --proto-redir =https --fail --location --silent --show-error --output $zip $url
+            $code = $LASTEXITCODE
+            if ($code -eq 0) { break }
+            Write-Output "::warning::download ${i}/${attempts} failed: curl exit code $code"
+            if ($i -ge $attempts) {
+              Write-Output "::error::NASM $version was not downloaded in $attempts attempts: $url"
+              exit 1
+            }
+            Start-Sleep -Seconds (10 * $i)
+          }
+
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          Write-Output "archive: $((Get-Item -LiteralPath $zip).Length) bytes, SHA-256 $got (pinned $want)"
+          if ($got -ne $want) {
+            Write-Output "::error::nasm-$version-win64.zip has SHA-256 ${got}, pinned ${want}: not used. A new NASM changes NASM_VERSION and NASM_SHA256 together"
+            exit 1
+          }
+          Write-Output "the archive is the pinned one"
+
+          $unpacked = Join-Path $env:RUNNER_TEMP "nasm-$version-unpacked"
+          Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
+          $unpackedExe = Join-Path (Join-Path $unpacked "nasm-$version") 'nasm.exe'
+          if (-not (Test-Path -LiteralPath $unpackedExe -PathType Leaf)) {
+            Write-Output "::error::no nasm-$version\nasm.exe in the archive: $((Get-ChildItem -LiteralPath $unpacked -Recurse -Name) -join ', ')"
+            exit 1
+          }
+          # Only nasm.exe goes on PATH, from a folder of its own: nothing else from the archive.
+          $dir = Join-Path $env:RUNNER_TEMP 'nasm-bin'
+          if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $exe = Join-Path $dir 'nasm.exe'
+          Copy-Item -LiteralPath $unpackedExe -Destination $exe
+          Write-Output "nasm.exe copied to ${dir}: $((Get-ChildItem -LiteralPath $dir -Name) -join ', ')"
+          $said = ((& $exe -v) -join "`n").Trim()
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -or -not $said.StartsWith("NASM version $version ")) {
+            Write-Output "::error::$exe -v says '$said' (exit code $code), pinned NASM $version"
+            exit 1
+          }
+          Write-Output "nasm -v: $said, the pinned one"
+          $before = @(Get-Command nasm -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source)
+          Write-Output "nasm on the image's PATH: $(if ($before.Count -eq 0) { 'none' } else { $before -join '; ' }) — the pinned one goes before it"
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $dir
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "NASM=$exe"
+          Write-Output "PATH starts with $dir from the next step on; NASM=$exe"
+
+
+      - name: Install Bun
+        # Bun's own release zip, pinned by SHA-256, never from a cache: only bun.exe goes on PATH.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $url = "https://github.com/oven-sh/bun/releases/download/bun-v$env:BUN_VERSION/bun-windows-x64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'bun-windows-x64.zip'
+          curl.exe --proto =https --proto-redir =https --fail --location --silent --show-error --retry 4 --retry-delay 10 --retry-all-errors --output $zip $url
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Bun $env:BUN_VERSION was not downloaded: curl exit code $LASTEXITCODE"
+            exit 1
+          }
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          Write-Output "bun-windows-x64.zip: SHA-256 $got (pinned $env:BUN_WINDOWS_SHA256)"
+          if ($got -ne $env:BUN_WINDOWS_SHA256) {
+            Write-Output "::error::bun-windows-x64.zip is not the pinned archive: not used"
+            exit 1
+          }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'bun-unpacked'
+          Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
+          $found = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter 'bun.exe')
+          if ($found.Count -ne 1) {
+            Write-Output "::error::bun.exe found $($found.Count) times in the archive"
+            exit 1
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'bun-bin'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item -LiteralPath $found[0].FullName -Destination (Join-Path $dir 'bun.exe') -Force
+          $said = ((& (Join-Path $dir 'bun.exe') --version) -join '').Trim()
+          if ($said -ne $env:BUN_VERSION) {
+            Write-Output "::error::bun --version says '$said', pinned $env:BUN_VERSION"
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $dir
+          Write-Output "bun $said from $dir, first on PATH from the next step on"
+
+      - name: Install age
+        # The encryption of the debug symbols: age's own release zip, pinned by SHA-256.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $url = "https://github.com/FiloSottile/age/releases/download/v$env:AGE_VERSION/age-v$env:AGE_VERSION-windows-amd64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'age-windows-amd64.zip'
+          curl.exe --proto =https --proto-redir =https --fail --location --silent --show-error --retry 4 --retry-delay 10 --retry-all-errors --output $zip $url
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::age $env:AGE_VERSION was not downloaded: curl exit code $LASTEXITCODE"
+            exit 1
+          }
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          Write-Output "age-v$env:AGE_VERSION-windows-amd64.zip: SHA-256 $got (pinned $env:AGE_WINDOWS_SHA256)"
+          if ($got -ne $env:AGE_WINDOWS_SHA256) {
+            Write-Output "::error::the age archive is not the pinned one: not used"
+            exit 1
+          }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'age-unpacked'
+          Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force
+          $found = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter 'age.exe')
+          if ($found.Count -ne 1) {
+            Write-Output "::error::age.exe found $($found.Count) times in the archive"
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "AGE=$($found[0].FullName)"
+          Write-Output "age: $($found[0].FullName), $((& $found[0].FullName --version) -join '')"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the unsigned exe
+        # Writes dist/official/<version>/ (the exe alone) and dist/symbols/<version>/, and the step
+        # outputs. A push builds the release (refused unless HEAD is the clean tag of Cargo.toml's
+        # version, on main); a run by hand a dry run.
+        id: build
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          # aws-lc-sys: with no NASM found, fail rather than link AWS's prebuilt assembly objects.
+          AWS_LC_SYS_PREBUILT_NASM: "0"
+        run: |
+          if [ "$EVENT" = push ]; then
+            bun scripts/official-build.ts
+          else
+            bun scripts/official-build.ts --dry-run
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Encrypt the debug symbols
+        # The PDBs of exactly these bytes (matched by GUID and age) read crash addresses; they stay
+        # with the maintainers. Encrypted to the age recipient in the repository variable
+        # SYMBOLS_AGE_RECIPIENT; a release without it fails here (a dry run only warns). Only plain
+        # files and folders are archived. Never part of the release.
+        id: symbols
+        env:
+          EVENT: ${{ github.event_name }}
+          RECIPIENT: ${{ vars.SYMBOLS_AGE_RECIPIENT }}
+          SYMBOLS: ${{ steps.build.outputs.symbols }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $recipient = "$env:RECIPIENT".Trim()
+          if ($recipient -eq '') {
+            if ($env:EVENT -eq 'push') {
+              Write-Output "::error::SYMBOLS_AGE_RECIPIENT is not set: a release is not finished without its debug symbols (RELEASING.md)"
+              exit 1
+            }
+            Write-Output "::warning::SYMBOLS_AGE_RECIPIENT is not set: the debug symbols of this dry run ($env:VERSION) are not kept"
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'upload=false'
+            exit 0
+          }
+          if ($recipient -cnotmatch '^age1[02-9ac-hj-np-z]{58}$') {
+            Write-Output "::error::SYMBOLS_AGE_RECIPIENT is not an age X25519 recipient (age1...)"
+            exit 1
+          }
+          # Plain files and folders only: no link, junction or other reparse point goes into the archive.
+          $odd = @(Get-ChildItem -LiteralPath $env:SYMBOLS -Recurse -Force | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not ($_ -is [IO.FileInfo] -or $_ -is [IO.DirectoryInfo])
+          })
+          if ($odd.Count -gt 0) {
+            Write-Output "::error::the symbols folder holds links or special files: $(($odd | ForEach-Object FullName) -join ', ')"
+            exit 1
+          }
+          $tar = Join-Path $env:RUNNER_TEMP 'symbols.tar'
+          $out = Join-Path $env:RUNNER_TEMP "AFKLink-symbols-$env:VERSION.tar.age"
+          & "$env:SystemRoot\System32\tar.exe" -C $env:SYMBOLS -cf $tar .
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::tar of the symbols failed ($LASTEXITCODE)"; exit 1 }
+          & $env:AGE -r $recipient -o $out $tar
+          $code = $LASTEXITCODE
+          Remove-Item -LiteralPath $tar -Force
+          if ($code -ne 0) { Write-Output "::error::age failed ($code)"; exit 1 }
+          Write-Output "symbols encrypted to $recipient`: $out, $((Get-Item -LiteralPath $out).Length) bytes"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'upload=true'
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "file=$out"
+
+      - name: Keep the encrypted debug symbols
+        if: steps.symbols.outputs.upload == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AFKLink-symbols-${{ steps.build.outputs.version }}
+          path: ${{ steps.symbols.outputs.file }}
+          retention-days: 90
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Keep the unsigned exe for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AFKLink-unsigned-${{ steps.build.outputs.version }}
+          path: ${{ steps.build.outputs.dir }}
+          retention-days: 30
+          if-no-files-found: error
+          overwrite: true
+
+  notices:
+    name: Notices and SBOM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Install cargo-about and cargo-cyclonedx
+        # Nothing from an archive runs until its SHA-256 is the pinned one; only the one program
+        # goes into ~/.cargo/bin.
+        run: |
+          set -euo pipefail
+          fetch() {
+            /usr/bin/curl --proto =https --proto-redir =https --fail --location --silent --show-error \
+              --retry 4 --retry-delay 10 --retry-all-errors --output "$2" "$1"
+            got=$(/usr/bin/sha256sum "$2" | cut -d' ' -f1)
+            echo "$(basename "$2"): SHA-256 $got (pinned $3)"
+            if [ "$got" != "$3" ]; then
+              echo "::error::$(basename "$2") is not the pinned archive: not used"
+              exit 1
+            fi
+          }
+          install_one() {
+            local dir="$RUNNER_TEMP/$1-unpacked"
+            rm -rf "$dir"
+            mkdir -p "$dir"
+            /usr/bin/tar -xf "$2" -C "$dir"
+            mapfile -t found < <(/usr/bin/find "$dir" -type f -name "$1")
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::$1 found ${#found[@]} times in its archive: ${found[*]:-none}"
+              exit 1
+            fi
+            /usr/bin/install -m 755 "${found[0]}" "$HOME/.cargo/bin/$1"
+            echo "$1 installed from ${found[0]#"$dir"/}"
+          }
+          base="https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION"
+          name="cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          fetch "$base/$name" "$RUNNER_TEMP/$name" "$CARGO_ABOUT_SHA256"
+          install_one cargo-about "$RUNNER_TEMP/$name"
+          base="https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CARGO_CYCLONEDX_VERSION"
+          name="cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+          fetch "$base/$name" "$RUNNER_TEMP/$name" "$CARGO_CYCLONEDX_SHA256"
+          install_one cargo-cyclonedx "$RUNNER_TEMP/$name"
+          cargo about --version
+          cargo cyclonedx --version
+
+      - name: Install Bun
+        # Bun's own release zip, pinned by SHA-256, never from a cache: only bun goes on PATH.
+        run: |
+          set -euo pipefail
+          name="bun-linux-x64.zip"
+          /usr/bin/curl --proto =https --proto-redir =https --fail --location --silent --show-error \
+            --retry 4 --retry-delay 10 --retry-all-errors --output "$RUNNER_TEMP/$name" \
+            "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$name"
+          got=$(/usr/bin/sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)
+          echo "$name: SHA-256 $got (pinned $BUN_LINUX_SHA256)"
+          if [ "$got" != "$BUN_LINUX_SHA256" ]; then
+            echo "::error::$name is not the pinned archive: not used"
+            exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/bun-unpacked" "$RUNNER_TEMP/bun-bin"
+          /usr/bin/unzip -q "$RUNNER_TEMP/$name" -d "$RUNNER_TEMP/bun-unpacked"
+          mapfile -t found < <(/usr/bin/find "$RUNNER_TEMP/bun-unpacked" -type f -name bun)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::bun found ${#found[@]} times in $name"
+            exit 1
+          fi
+          /usr/bin/install -D -m 755 "${found[0]}" "$RUNNER_TEMP/bun-bin/bun"
+          said=$("$RUNNER_TEMP/bun-bin/bun" --version)
+          if [ "$said" != "$BUN_VERSION" ]; then
+            echo "::error::bun --version says «$said», pinned $BUN_VERSION"
+            exit 1
+          fi
+          echo "$RUNNER_TEMP/bun-bin" >> "$GITHUB_PATH"
+          echo "bun $said"
+
+      - name: Install dependencies
+        # Only their files are read here (license texts): no install scripts run.
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Which version
+        id: version
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --target x86_64-pc-windows-msvc
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "afklink-app") | .version')
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::afklink-app's version «$version» is not X.Y.Z"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version $version"
+
+      - name: Third-party notices
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notices"
+          bun scripts/notices.ts --out "$RUNNER_TEMP/notices/THIRD-PARTY-NOTICES.txt" --version "$VERSION"
+
+      - name: SBOM
+        # afklink-app's whole dependency graph for the one target the exe is built for.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --manifest-path app/src-tauri/Cargo.toml --format json --spec-version 1.5 \
+            --target x86_64-pc-windows-msvc --override-filename afklink-sbom
+          mapfile -t found < <(/usr/bin/find app/src-tauri -maxdepth 1 -type f -name 'afklink-sbom*.json')
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::cargo cyclonedx wrote ${#found[@]} SBOMs for afklink-app: ${found[*]:-none}"
+            exit 1
+          fi
+          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "${found[0]}" > /dev/null
+          mv "${found[0]}" "$RUNNER_TEMP/notices/AFKLink-$VERSION.cdx.json"
+          echo "SBOM: $(jq '.components | length' "$RUNNER_TEMP/notices/AFKLink-$VERSION.cdx.json") components"
+
+      - name: Keep the notices and the SBOM for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AFKLink-notices-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/notices
+          retention-days: 30
+          if-no-files-found: error
+          overwrite: true
+
+  sign:
+    name: Sign
+    needs: build
+    # A release only: never a run by hand, never a dry run's exe.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    # Its secrets live in this environment, whose required reviewer approves each release.
+    environment: release
+    # Nothing to read or write but this run's artifacts.
+    permissions:
+      actions: read
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      EXE: ${{ needs.build.outputs.exe }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - name: The run is this release
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+            || [[ "$GITHUB_REF" != "refs/tags/v$VERSION" ]] || [[ "$GITHUB_REF_NAME" != "v$VERSION" ]] \
+            || [[ "$EXE" != "AFKLink-$VERSION.exe" ]] || ! [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::ref $GITHUB_REF, version «$VERSION», exe «$EXE», SHA-256 «$SHA256»: not the release of this tag"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME: $EXE, SHA-256 $SHA256"
+
+      - name: Install the Tauri signer
+        # The same Tauri CLI as the build, Tauri's own Linux build, checked before it runs; the
+        # binary's own SHA-256 is kept to check it again right before it signs.
+        run: |
+          set -euo pipefail
+          name="cargo-tauri-x86_64-unknown-linux-gnu.tgz"
+          url="https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$TAURI_CLI_VERSION/$name"
+          /usr/bin/curl --proto =https --proto-redir =https --fail --location --silent --show-error \
+            --retry 4 --retry-delay 10 --retry-all-errors --output "$RUNNER_TEMP/$name" "$url"
+          got=$(/usr/bin/sha256sum "$RUNNER_TEMP/$name" | /usr/bin/cut -d' ' -f1)
+          echo "$name: SHA-256 $got (pinned $TAURI_CLI_LINUX_SHA256)"
+          if [ "$got" != "$TAURI_CLI_LINUX_SHA256" ]; then
+            echo "::error::$name is not the pinned archive: it is handed the signing key, so nothing else is used"
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/tauri-cli"
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          /usr/bin/tar -xzf "$RUNNER_TEMP/$name" -C "$dir"
+          mapfile -t found < <(/usr/bin/find "$dir" -type f -name cargo-tauri)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::cargo-tauri found ${#found[@]} times in $name"
+            exit 1
+          fi
+          /usr/bin/chmod 755 "${found[0]}"
+          said=$("${found[0]}" --version)
+          if [ "$said" != "tauri-cli $TAURI_CLI_VERSION" ]; then
+            echo "::error::cargo-tauri --version says «$said», pinned tauri-cli $TAURI_CLI_VERSION"
+            exit 1
+          fi
+          binary=$(/usr/bin/sha256sum "${found[0]}" | /usr/bin/cut -d' ' -f1)
+          {
+            echo "SIGNER=${found[0]}"
+            echo "SIGNER_SHA256=$binary"
+          } >> "$GITHUB_ENV"
+          echo "signer: $said, binary SHA-256 $binary"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-unsigned-${{ needs.build.outputs.version }}
+          path: unsigned
+
+      - name: The exe is the one built
+        run: |
+          set -euo pipefail
+          /usr/bin/ls -l unsigned
+          if [ "$(/usr/bin/ls -A unsigned)" != "$EXE" ]; then
+            echo "::error::the artifact holds «$(/usr/bin/ls -A unsigned | /usr/bin/tr '\n' ' ')», not exactly $EXE"
+            exit 1
+          fi
+          got=$(/usr/bin/sha256sum "unsigned/$EXE" | /usr/bin/cut -d' ' -f1)
+          if [ "$got" != "$SHA256" ]; then
+            echo "::error::$EXE has SHA-256 $got, the build job built $SHA256"
+            exit 1
+          fi
+          echo "$EXE: SHA-256 $got, the build job's"
+
+      - name: Sign
+        # `signer sign --app-version`: the trusted comment carries `file:AFKLink-<version>.exe` and
+        # `version:<version>`, both covered by the signature; the app refuses an update without them.
+        # The key and its password are this step's alone.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "::error::the signing key and its password must be secrets of the environment release"
+            exit 1
+          fi
+          now=$(/usr/bin/sha256sum "$SIGNER" | /usr/bin/cut -d' ' -f1)
+          if [ "$now" != "$SIGNER_SHA256" ]; then
+            echo "::error::the signer changed since it was checked ($now, was $SIGNER_SHA256): not run"
+            exit 1
+          fi
+          "$SIGNER" signer sign --app-version "$VERSION" "unsigned/$EXE" > /dev/null
+          if [ ! -s "unsigned/$EXE.sig" ]; then
+            echo "::error::the signer wrote no unsigned/$EXE.sig"
+            exit 1
+          fi
+
+      - name: The signature names this release
+        # A first look without the key: prehashed (ED), the file and the version in the trusted
+        # comment. The verify job checks it cryptographically against updater.pub.
+        run: |
+          set -euo pipefail
+          /usr/bin/base64 -d "unsigned/$EXE.sig" > "$RUNNER_TEMP/sig.txt"
+          algorithm=$(/usr/bin/sed -n 2p "$RUNNER_TEMP/sig.txt" | /usr/bin/base64 -d | /usr/bin/head -c 2)
+          trusted=$(/usr/bin/sed -n 's/^trusted comment: //p' "$RUNNER_TEMP/sig.txt")
+          echo "algorithm $algorithm; trusted comment: $trusted"
+          if [ "$algorithm" != ED ]; then
+            echo "::error::not a prehashed signature ($algorithm)"
+            exit 1
+          fi
+          if ! printf '%s' "$trusted" | /usr/bin/tr '\t' '\n' | /usr/bin/grep -qx "file:$EXE" \
+            || ! printf '%s' "$trusted" | /usr/bin/tr '\t' '\n' | /usr/bin/grep -qx "version:$VERSION"; then
+            echo "::error::the trusted comment does not name file:$EXE and version:$VERSION"
+            exit 1
+          fi
+
+      - name: Keep the signature for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AFKLink-signature-${{ needs.build.outputs.version }}
+          path: unsigned/${{ needs.build.outputs.exe }}.sig
+          retention-days: 30
+          if-no-files-found: error
+          overwrite: true
+
+  verify:
+    name: Verify
+    needs: [build, notices, sign]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    # Repository code runs here, so this job can write nothing and mint no token.
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      sums: ${{ steps.check.outputs.sums }}
+      notes_sha256: ${{ steps.check.outputs.notes_sha256 }}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: The same commit and version everywhere
+        env:
+          NOTICES_VERSION: ${{ needs.notices.outputs.version }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          if [ "$head" != "$COMMIT" ] || [ "$GITHUB_REF_NAME" != "v$VERSION" ] || [ "$NOTICES_VERSION" != "$VERSION" ]; then
+            echo "::error::build: $COMMIT, version $VERSION; here: $head, tag $GITHUB_REF_NAME; notices: version $NOTICES_VERSION"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME at $head, the commit the exe was built from"
+
+      - name: Install Bun
+        # Bun's own release zip, pinned by SHA-256, never from a cache: only bun goes on PATH.
+        run: |
+          set -euo pipefail
+          name="bun-linux-x64.zip"
+          /usr/bin/curl --proto =https --proto-redir =https --fail --location --silent --show-error \
+            --retry 4 --retry-delay 10 --retry-all-errors --output "$RUNNER_TEMP/$name" \
+            "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$name"
+          got=$(/usr/bin/sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)
+          echo "$name: SHA-256 $got (pinned $BUN_LINUX_SHA256)"
+          if [ "$got" != "$BUN_LINUX_SHA256" ]; then
+            echo "::error::$name is not the pinned archive: not used"
+            exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/bun-unpacked" "$RUNNER_TEMP/bun-bin"
+          /usr/bin/unzip -q "$RUNNER_TEMP/$name" -d "$RUNNER_TEMP/bun-unpacked"
+          mapfile -t found < <(/usr/bin/find "$RUNNER_TEMP/bun-unpacked" -type f -name bun)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::bun found ${#found[@]} times in $name"
+            exit 1
+          fi
+          /usr/bin/install -D -m 755 "${found[0]}" "$RUNNER_TEMP/bun-bin/bun"
+          said=$("$RUNNER_TEMP/bun-bin/bun" --version)
+          if [ "$said" != "$BUN_VERSION" ]; then
+            echo "::error::bun --version says «$said», pinned $BUN_VERSION"
+            exit 1
+          fi
+          echo "$RUNNER_TEMP/bun-bin" >> "$GITHUB_PATH"
+          echo "bun $said"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-unsigned-${{ needs.build.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-signature-${{ needs.build.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-notices-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Check the release, write SHA256SUMS and the release text
+        # No dependencies are installed: the script uses Bun's own modules and scripts/lib only.
+        id: check
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notes"
+          bun scripts/official-check.ts --dir release --version "$VERSION" --sha256 "$SHA256" \
+            --notes-out "$RUNNER_TEMP/notes/notes.md" --repo "$GITHUB_REPOSITORY"
+          {
+            echo "sums=$(/usr/bin/base64 -w0 release/SHA256SUMS)"
+            echo "notes_sha256=$(/usr/bin/sha256sum "$RUNNER_TEMP/notes/notes.md" | /usr/bin/cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Keep the release text for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AFKLink-notes-${{ needs.build.outputs.version }}
+          path: ${{ runner.temp }}/notes/notes.md
+          retention-days: 30
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Attest and publish
+    needs: [build, verify]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    # Releases are written here (contents), and the provenance is signed with this run's identity
+    # (id-token) and stored (attestations). No checkout, no repository code: pinned actions, gh and
+    # coreutils only. The token is handed to the steps that call gh.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+      SUMS: ${{ needs.verify.outputs.sums }}
+      NOTES_SHA256: ${{ needs.verify.outputs.notes_sha256 }}
+    steps:
+      - name: The run is this release
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+            || [[ "$GITHUB_REF" != "refs/tags/v$VERSION" ]] || ! [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::ref $GITHUB_REF, version «$VERSION»: not the release of this tag"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-unsigned-${{ needs.build.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-signature-${{ needs.build.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-notices-${{ needs.build.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AFKLink-notes-${{ needs.build.outputs.version }}
+          path: notes
+
+      - name: The files are the ones verified
+        # Hashed here again: SHA256SUMS is written from these bytes and must equal verify's.
+        run: |
+          set -euo pipefail
+          exe="AFKLink-$VERSION.exe"
+          want="$exe $exe.sig AFKLink-$VERSION.cdx.json THIRD-PARTY-NOTICES.txt"
+          got=$(cd release && LC_ALL=C /usr/bin/ls -A | LC_ALL=C /usr/bin/sort | /usr/bin/tr '\n' ' ')
+          expected=$(printf '%s\n' $want | LC_ALL=C /usr/bin/sort | /usr/bin/tr '\n' ' ')
+          if [ "$got" != "$expected" ]; then
+            echo "::error::the release files are «$got», expected «$expected»"
+            exit 1
+          fi
+          hash=$(/usr/bin/sha256sum "release/$exe" | /usr/bin/cut -d' ' -f1)
+          if [ "$hash" != "$SHA256" ]; then
+            echo "::error::$exe has SHA-256 $hash, the build job built $SHA256"
+            exit 1
+          fi
+          (cd release && LC_ALL=C /usr/bin/ls -A | LC_ALL=C /usr/bin/sort | /usr/bin/xargs /usr/bin/sha256sum) > "$RUNNER_TEMP/SHA256SUMS"
+          printf '%s' "$SUMS" | /usr/bin/base64 -d > "$RUNNER_TEMP/SHA256SUMS.verified"
+          if ! /usr/bin/cmp -s "$RUNNER_TEMP/SHA256SUMS" "$RUNNER_TEMP/SHA256SUMS.verified"; then
+            echo "::error::the files here are not the ones the verify job checked"
+            /usr/bin/diff "$RUNNER_TEMP/SHA256SUMS.verified" "$RUNNER_TEMP/SHA256SUMS" || true
+            exit 1
+          fi
+          /usr/bin/mv "$RUNNER_TEMP/SHA256SUMS" release/SHA256SUMS
+          /usr/bin/cat release/SHA256SUMS
+          # The release text too: the one the verify job wrote, byte for byte.
+          notes=$(/usr/bin/sha256sum notes/notes.md | /usr/bin/cut -d' ' -f1)
+          if ! [[ "$NOTES_SHA256" =~ ^[0-9a-f]{64}$ ]] || [ "$notes" != "$NOTES_SHA256" ]; then
+            echo "::error::notes.md has SHA-256 $notes, the verify job wrote ${NOTES_SHA256:-none}"
+            exit 1
+          fi
+          if [ "$(LC_ALL=C /usr/bin/ls -A notes)" != notes.md ]; then
+            echo "::error::the notes artifact holds more than notes.md"
+            exit 1
+          fi
+
+      - name: Attest the provenance of every file
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Create the draft release
+        # A published release is never replaced. A draft left by an earlier attempt of this tag is
+        # deleted (the tag stays) and made again from these files.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          state=$(gh release view "$tag" --json isDraft --jq '.isDraft' 2> "$RUNNER_TEMP/view.err" || true)
+          case "$state" in
+            true)
+              echo "a draft of $tag exists from an earlier attempt: deleted and made again"
+              gh release delete "$tag" --yes
+              ;;
+            false)
+              echo "::error::$tag is already published: a release is never replaced. Release a new version"
+              exit 1
+              ;;
+            *)
+              if ! /usr/bin/grep -qi 'not found' "$RUNNER_TEMP/view.err"; then
+                echo "::error::could not tell whether $tag has a release: $(/usr/bin/cat "$RUNNER_TEMP/view.err")"
+                exit 1
+              fi
+              echo "no release of $tag yet"
+              ;;
+          esac
+          gh release create "$tag" --draft --verify-tag --title "AFKLink $VERSION" \
+            --notes-file notes/notes.md release/*
+
+      - name: The draft holds exactly these files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/draft"
+          gh release download "v$VERSION" --dir "$RUNNER_TEMP/draft"
+          want=$(cd release && LC_ALL=C /usr/bin/ls -A | LC_ALL=C /usr/bin/sort)
+          got=$(cd "$RUNNER_TEMP/draft" && LC_ALL=C /usr/bin/ls -A | LC_ALL=C /usr/bin/sort)
+          if [ "$want" != "$got" ]; then
+            echo "::error::the draft holds «$(echo $got)», the release is «$(echo $want)»"
+            exit 1
+          fi
+          for f in $want; do
+            if ! /usr/bin/cmp -s "release/$f" "$RUNNER_TEMP/draft/$f"; then
+              echo "::error::$f in the draft is not the file checked here"
+              exit 1
+            fi
+          done
+          (cd "$RUNNER_TEMP/draft" && /usr/bin/sha256sum -c --strict SHA256SUMS)
+          echo "the draft holds the checked files, byte for byte"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "v$VERSION" --draft=false --latest
+          url=$(gh release view "v$VERSION" --json url --jq '.url')
+          {
+            echo "### Published AFKLink $VERSION"
+            echo
+            echo "- $url"
+            echo "- AFKLink-$VERSION.exe: SHA-256 \`$SHA256\`"
+            echo "- check: \`gh attestation verify AFKLink-$VERSION.exe --repo $GH_REPO\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "published: $url"

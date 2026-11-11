@@ -1,0 +1,191 @@
+﻿[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/i18n",
+    "crates/core",
+    "crates/capture",
+    "crates/encode",
+    "crates/input",
+    "crates/clipboard",
+    "crates/hw",
+    "crates/transport",
+    "crates/agent",
+    "crates/netem",
+    "crates/sim",
+    "crates/corpus",
+    "crates/game-helper",
+    "app/src-tauri",
+]
+# Vendored third-party crates are not ours to lint, format or test with the workspace: each keeps
+# the manifest it was published with. Why and how: vendor/VENDORED.md.
+exclude = ["vendor/str0m"]
+
+# Keep the Tauri desktop app out of the default `cargo check`/`build` set so the
+# headless pipeline can be verified without the (heavy / npm-dependent) GUI build.
+default-members = [
+    "crates/protocol",
+    "crates/i18n",
+    "crates/core",
+    "crates/capture",
+    "crates/encode",
+    "crates/input",
+    "crates/clipboard",
+    "crates/hw",
+    "crates/transport",
+    "crates/agent",
+    "crates/netem",
+]
+
+[workspace.package]
+version = "0.8.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["AFKLink"]
+
+[workspace.dependencies]
+# --- async / runtime ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "signal"] }
+futures-util = "0.3"
+
+# --- serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- crypto / identity ---
+ed25519-dalek = "2"
+getrandom = "0.2"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+# The desktop app's pin on the FakerInput installer it embeds: checked at build time (build.rs)
+# and again through the handle that holds the unpacked copy read-only before msiexec runs.
+sha2 = "0.10"
+
+# --- webrtc / signaling ---
+# A floor, not a cap (Cargo.lock holds the exact version): 0.24.1 is what the transport and the
+# simulator were checked against — SCTP polling without recursion (#1062),
+# DTLS guarded before it starts, TWCC probing state in `BweKind::Twcc`. Its companions come with it:
+# `is` 0.11.1, `str0m-proto` 0.7.0, `str0m-rust-crypto` 0.6.0, `dimpl` >= 0.7.4 (0.7.5 locked),
+# `sctp-proto` >= 0.10.5. The 0.24.1 that builds is our patched copy in vendor/str0m
+# (`[patch.crates-io]` below); a str0m bump re-vendors it (vendor/VENDORED.md).
+str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "handshake", "native-tls"] }
+
+# --- windows ---
+windows = "0.62"
+windows-capture = "2"
+
+# --- encode ---
+openh264 = "0.9"
+# The raw OpenH264 bindings, for the two things the safe wrapper does not expose:
+# SetOption(ENCODER_OPTION_BITRATE), which retargets without a rebuild, and iMaxBitrate,
+# which the wrapper pins equal to the target and so arms a second frame-skip path.
+openh264-sys2 = "0.9"
+
+# --- misc ---
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+qrcode = "0.14"
+
+# str0m 0.24.1 from crates.io, byte for byte, plus one patch to its delay-based overuse detector: a
+# short Wi-Fi stall (the delay jumps by ~100 ms and collapses back, no loss) is not called overuse,
+# a queue that keeps growing still is. What, why, the proof that nothing else differs and how to
+# re-vendor: vendor/VENDORED.md. Only 0.24.x requirements resolve to it: the simulator's viewer,
+# `str0m_023` (`=0.23.1`), stays the registry's unpatched crate.
+[patch.crates-io]
+str0m = { path = "vendor/str0m" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+# No debug info in the exe (the default, said here so it stays that way). On MSVC function names are
+# never in the exe: rustc always links with /DEBUG and /PDBALTPATH:%_PDB%, so they go to the PDB
+# beside it, and the exe keeps only the PDB's file name and GUID (enough to match an archived PDB
+# to a crash address). `strip` changes nothing on this target (checked with rustc 1.98.1), so
+# it is not set. Build-machine paths are remapped by the build scripts (scripts/lib/paths.ts).
+debug = false
+
+# What ships: portable and release builds (`buildDesktopApp` in scripts/lib/common.ts, and the game
+# helper the app's build.rs builds alongside) — into target/dist/, so they never evict the plain
+# `--release` builds of the bench, the simulator and ladder_replay, nor pay their price.
+# One codegen unit and whole-program LTO: smaller (afklink-app.exe 35.0 → 31.1 MB) and more
+# inlined, so the exe gives a reader fewer function boundaries to follow; no runtime cost. The price
+# is build time, measured on the dev PC: a cold `cargo tauri build` 197 → 394 s, one after a change
+# in core 183 → 286 s.
+# Line tables: the PDB each release keeps privately (scripts/lib/symbols.ts, never published) then
+# names every Rust function, with its inlining and file:line, so a crash address can be read. With
+# `debug = false` it holds public symbols only — C/C++ (OpenH264, aws-lc, the CRT), next to nothing
+# of the Rust code. Measured: the app's PDB 5.9 → 79.7 MB; nothing of it in the exe — 0
+# build-machine paths (the PDB's source paths are remapped like the exe's, scripts/lib/paths.ts);
+# the exe 31 971 840 → 32 079 360 bytes, .text +101 KB. The game helper is built with this profile
+# too (app/src-tauri/build.rs). Only here: `release` and `dev` keep theirs.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+# OpenH264 with its assembly, whatever NASM builds it. With any debug info in a profile, cargo gives
+# that package's build script `DEBUG=true`, nasm-rs 0.3.2 then runs `nasm -g`, and NASM 3.02 crashes with 0xC0000005 on 11 of OpenH264's 23 x86 .asm files when
+# `-g` is given (all 23 assemble without it). openh264-sys2 0.9.8 swallows the failure («Failed to
+# compile NASM files, not using any assembly.» in its build-script output only) and builds plain C:
+# a 1080p game frame took 15–25 ms to encode instead of 4–6. A package override reaches the build
+# script's `DEBUG` (checked with cargo 1.98.1: `DEBUG=false` for the overridden package, `true` for
+# the rest), so nasm-rs never passes `-g`, locally or in CI. The price: OpenH264's C/C++ has no line
+# tables in the PDB, only its public symbols; the Rust code keeps its own.
+# The shipping build refuses an exe without the assembly (`assertOpenh264Assembly`,
+# scripts/lib/openh264.ts), so a new cause of the same silence cannot ship either.
+[profile.dist.package.openh264-sys2]
+debug = false
+
+# Development and test builds only (the release profile above is untouched), measured on this
+# workspace.
+[profile.dev]
+# file:line in backtraces, no full debug info: core-edit rebuild 63.5 → 32 s, target 21.7 → 7.8 GB.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# Dependencies without any debug info: the PDBs after a cold build 5.4 → 0.9 GB.
+debug = false
+# Optimised deps (OpenH264's C++ via cc, str0m's crypto): test run 134 → 44 s, rebuild 32 → 20.5 s.
+opt-level = 2
+
+# --- lints -------------------------------------------------------------------
+# One table for the whole workspace; each crate opts in with `lints.workspace = true`.
+#
+# Levels are `warn`, not `deny`: CI runs clippy with `-D warnings`, so a violation
+# fails there, while a local build still compiles and lets you finish what you were
+# doing. Denying in the manifest makes an unrelated experiment refuse to build.
+[workspace.lints.rust]
+# Explicit unsafe blocks inside unsafe fns. Default in edition 2024; enabled now so
+# the eventual edition bump is not also a behaviour change.
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Targeted beyond the defaults, chosen for what this codebase actually does. A panic
+# in the agent takes remote access to someone's PC away until they walk to it, and
+# the orchestrator holds locks on a hot path where `unwrap` on a poisoned mutex is a
+# silent death with no log line.
+#
+# Denied, not warned: the ~13 pre-existing `lock().unwrap()` sites are gone, replaced by
+# `afklink_core::sync::lock`, which takes the data through poisoning because none of
+# these mutexes guards an invariant a panic could break. Test targets that legitimately
+# panic opt out per file with a reason.
+unwrap_used = "deny"
+panic = "deny"
+# Numeric code on the capture/encode hot path compares floats and casts a lot.
+float_cmp = "warn"
+# Debug leftovers.
+dbg_macro = "warn"
+todo = "warn"
+
+# Deliberately NOT enabled, having measured them against this codebase:
+#   print_stdout / print_stderr     40 hits - `afklink-agent` is a CLI binary whose
+#                                   println! *is* its output. Wrong lint for the shape.
+#   missing_debug_implementations    18 hits of low value on internal types.
+#   unreachable_pub                  10 hits; it fights a workspace of internal crates
+#                                   that legitimately expose pub items to each other.
