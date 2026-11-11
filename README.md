@@ -1,13 +1,13 @@
 <p align="center">
-  <img src="docs/banner.jpg" width="100%" alt="AFKLink, “GAME without limits”: a phone showing a game that runs on your Windows PC">
+  <img src="docs/banner.jpg" width="100%" alt="AFKLink, «ИГРА без границ»: на телефоне игра, которая идёт на твоём ПК с Windows">
 </p>
 
 <p align="center">
-  <a href="https://github.com/afklink/afklink-pc/releases">Download</a> ·
-  <a href="#get-started">Get started</a> ·
-  <a href="#privacy">Privacy</a> ·
-  <a href="#help">Help</a> ·
-  <a href="README.ru.md">Русский</a>
+  <a href="https://github.com/afklink/afklink-pc/releases">Скачать</a> ·
+  <a href="#как-начать">Как начать</a> ·
+  <a href="#конфиденциальность">Конфиденциальность</a> ·
+  <a href="#помощь">Помощь</a> ·
+  <a href="README.en.md">English</a>
 </p>
 
 <p align="center">
@@ -15,149 +15,148 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only"></a>
 </p>
 
-**Your gaming PC, on your phone.** AFKLink opens the game running on your home PC in Telegram or a browser ([web.afklink.app](https://web.afklink.app)) on a phone, tablet or another
-computer, with no app to install there. This repository is the Windows app that runs on the PC.
+**Твой игровой ПК — в телефоне.** AFKLink открывает игру с домашнего ПК в Telegram или
+браузере ([web.afklink.app](https://web.afklink.app)) на телефоне, планшете или другом
+компьютере, без отдельного приложения. Здесь — программа для Windows, которая работает на самом ПК.
 
-Early access: connecting needs an invite. Join the waitlist in
-[@afklink_app](https://t.me/afklink_app) or ask a friend on AFKLink for a link.
+Ранний доступ: подключаться можно по приглашению. Запишись в лист ожидания в
+[@afklink_app](https://t.me/afklink_app) или попроси ссылку у друга в AFKLink.
 
-## What it does
+## Что умеет
 
-- **Encrypted stream.** H.264 over WebRTC, straight from your PC or, when there is no direct
-  path, through the AFKLink TURN relay, which sees only encrypted packets.
-- **Up to 1080p at 60 fps.** Quality follows your connection and your PC: 1080p60 on a good
-  link, lighter on a weak one.
-- **Easy on mobile data.** When you minimize AFKLink, no video is sent at all.
-- **Input games actually read.** Mouse, keyboard and text in any language. If a game ignores
-  standard Windows input, switch on the [virtual driver](#the-input-driver).
-- **The game comes back.** If it crashes or gets minimized mid-session, AFKLink starts or restores
-  it, with auto-launch on.
-- **You decide who gets in.** Grant and revoke access from Telegram, see who's connected, and
-  disconnect everyone with one click on the PC.
-- **Friends see only the game.** In Game only mode a guest sees the game window; your desktop and
-  other apps stay hidden.
-- **Updates itself.** Installs only updates signed by AFKLink and rolls back one that fails.
+- **Зашифрованный поток.** Экран идёт по WebRTC (H.264) напрямую с ПК, а если прямого пути нет —
+  через TURN-сервер AFKLink, который видит только зашифрованные пакеты.
+- **До 1080p и 60 FPS.** Качество подстраивается под связь и мощность ПК: на хорошем канале
+  1080p при 60 кадрах в секунду, на слабом картинка становится легче.
+- **Бережёт мобильный трафик.** Свернёшь AFKLink — видео не идёт совсем.
+- **Управление, которое видят игры.** Мышь, клавиатура и текст на любом языке. Если игра не
+  реагирует на обычный ввод Windows, включи [виртуальный драйвер](#драйвер-для-игр).
+- **Вылет — не проблема.** Если игра упала или свернулась посреди сеанса, AFKLink сам поднимет её,
+  когда включён автозапуск.
+- **Доступ решаешь ты.** Выдавай и забирай доступ в Telegram, смотри, кто подключён, и
+  одной кнопкой на ПК отключай всех.
+- **Другу — только игра.** В режиме «Только игра» гость видит окно игры, а рабочий стол и другие
+  программы скрыты.
+- **Обновляется сам.** Ставит только обновления с подписью AFKLink, неудачное откатывает.
 
-## Requirements
+## Что нужно
 
-- Windows 10 version 1903 or later, or Windows 11; 64-bit (x64).
-- Microsoft Edge WebView2 Runtime. Windows 11 includes it; if it is missing, the app says so and
-  offers to open the download page.
-- The PC is on, online and running AFKLink.
-- To watch and control: Telegram or a browser on a phone, tablet or another computer.
+- Windows 10 версии 1903 или новее либо Windows 11, 64-разрядная (x64).
+- Microsoft Edge WebView2 Runtime. В Windows 11 он уже есть; если его нет, приложение скажет об
+  этом и предложит открыть страницу загрузки.
+- ПК включён, подключён к интернету, и на нём запущен AFKLink.
+- Чтобы смотреть и управлять: Telegram или браузер на телефоне, планшете или другом компьютере.
 
-## Get started
+## Как начать
 
-Set AFKLink up at home, before you need it.
+Настрой AFKLink дома, до того как он понадобится.
 
-1. Download `AFKLink-<version>.exe` from [Releases](https://github.com/afklink/afklink-pc/releases)
-   and run it on the PC. It is one exe with no installer.
-2. In the app, click “Start pairing”.
-3. Open AFKLink in Telegram or at [web.afklink.app](https://web.afklink.app) and enter the code
-   or scan the QR code.
-4. Click “Allow” in the app on the PC.
+1. Скачай `AFKLink-<версия>.exe` в [Releases](https://github.com/afklink/afklink-pc/releases) и
+   запусти его на ПК. Это один exe без установщика.
+2. В приложении нажми «Начать привязку».
+3. Открой AFKLink в Telegram или на [web.afklink.app](https://web.afklink.app), введи код или
+   отсканируй QR-код.
+4. На ПК нажми «Разрешить».
 
-![The PC app showing a pairing code, and AFKLink in a phone browser with the code entered](docs/screenshot.png)
+![Приложение на ПК показывает код привязки, на телефоне в веб-версии AFKLink этот код введён](docs/screenshot.png)
 
-To keep the PC reachable after a restart, turn on “Start with Windows”. The app offers it once,
-after the first pairing.
+Чтобы ПК был на связи и после перезагрузки, включи «Запускать вместе с Windows». Приложение один
+раз предложит это после первой привязки.
 
-## Install and verify
+## Установка и проверка
 
-A release has `AFKLink-<version>.exe`, its update signature, `SHA256SUMS`, an SBOM and the
-licenses of the third-party code in the exe. To check that the exe was built by this
-repository's release workflow:
+В выпуске лежат `AFKLink-<версия>.exe`, его подпись обновления, `SHA256SUMS`, SBOM и лицензии
+стороннего кода в exe. Проверить, что exe собран процессом выпуска этого репозитория:
 
 ```sh
-gh attestation verify AFKLink-<version>.exe --repo afklink/afklink-pc
+gh attestation verify AFKLink-<версия>.exe --repo afklink/afklink-pc
 ```
 
-The app updates itself when no one is connected, installs an update only if it carries a valid
-signature made with the AFKLink update key (minisign), and rolls back an update that fails. How
-to check the checksums and the update signature by hand:
-[RELEASING.md](RELEASING.md#verifying-a-download). How the app, the server and updates trust
-each other: [SECURITY.md](SECURITY.md#trust-model).
+Приложение обновляется само, когда никто не подключён, ставит обновление, только если оно
+подписано ключом обновлений AFKLink (minisign) и подпись верна, а неудачное обновление
+откатывает. Как вручную проверить контрольные суммы и подпись обновления:
+[RELEASING.md](RELEASING.md#verifying-a-download). Как приложение, сервер и обновления доверяют
+друг другу: [SECURITY.md](SECURITY.md#trust-model). Оба файла на английском.
 
-## The input driver
+## Драйвер для игр
 
-Some games ignore input sent through Windows' `SendInput`. For them the app can install
-[FakerInput](https://github.com/Ryochan7/FakerInput), a third-party virtual mouse and keyboard
-driver by Travis Nickles (MIT). Its official installer, signed by its author, is embedded in the
-app. It is installed only when you click “Install” under “Game controls” in the settings and
-confirm the Windows prompt. You can remove it in the same place.
+Некоторые игры не принимают ввод через `SendInput` Windows. Для них приложение может поставить
+[FakerInput](https://github.com/Ryochan7/FakerInput), сторонний виртуальный драйвер мыши и
+клавиатуры (Travis Nickles, MIT). Официальный установщик драйвера, подписанный автором, вшит в
+приложение. Он ставится, только если ты нажмёшь «Установить» в разделе «Управление в играх» в
+настройках и подтвердишь запрос Windows. Там же драйвер можно удалить.
 
-## Privacy
+## Конфиденциальность
 
-To run the service, the app sends the AFKLink server the PC's ID and public key, the app
-version, a hash of hardware identifiers, the PC's name, pairing and connection setup data,
-session statistics and app events. The statistics count input events by type, not which keys
-you press. Logs go to the server when you click “Send logs”. After a crash, a hang, a long loss
-of connection or a failed session, the app sends a short automatic report, unless the log level
-is “Off”.
+Для работы сервиса приложение отправляет на сервер AFKLink ID ПК и открытый ключ, версию
+приложения, хэш идентификаторов оборудования, имя ПК, данные привязки и установки соединения,
+статистику сеансов и события приложения. В статистике есть число событий ввода по типам, но не
+сами клавиши. Логи уходят на сервер по кнопке «Отправить логи». После сбоя, зависания, долгой
+потери связи или неудачного сеанса приложение само отправляет короткий автоотчёт, если в «Логи»
+не выбрано «Выключены».
 
-Video, input and, if the viewer turns on “Sync clipboard”, the clipboard go between the PC and
-your device directly, or through the AFKLink TURN relay when there is no direct path. WebRTC
-encrypts all of it. The AFKLink server decides who may connect, so it is part of the trust
-boundary: see [SECURITY.md](SECURITY.md#trust-model). “History” (who connected and when) stays on
-the PC; log files leave it only as described above.
+Видео, нажатия и буфер обмена, если зритель включил «Синхронизировать буфер обмена», идут между
+ПК и твоим устройством напрямую, а если прямого пути нет, через TURN-сервер AFKLink. Всё это
+шифрует WebRTC. Сервер AFKLink решает, кому можно подключиться, поэтому ему приходится доверять:
+см. [SECURITY.md](SECURITY.md#trust-model). «Журнал» (кто и когда подключался) остаётся на ПК;
+файлы логов уходят с него только так, как описано выше.
 
-Everything the app sends, item by item: [PRIVACY.md](PRIVACY.md).
+Полный список того, что уходит с ПК: [PRIVACY.md](PRIVACY.md).
 
-## Help
+## Помощь
 
-- A question, or AFKLink won't connect: send `/help` to
-  [@afklink_app](https://t.me/afklink_app) in Telegram and tap “Support”. During a session you can also tap the PC's name
-  at the top and choose “Report issue”; on the PC, use “Settings” → “Diagnostics” → “Send logs”.
-- A bug in the PC app or an idea for it:
-  [open an issue](https://github.com/afklink/afklink-pc/issues/new/choose) with the Bug report
-  or Feature request form.
-- A vulnerability: report it privately, as described in [SECURITY.md](SECURITY.md), not in an
-  issue.
+- Вопрос или не получается подключиться: напиши `/help` в
+  [@afklink_app](https://t.me/afklink_app) в Telegram и нажми «Поддержка». Во время сеанса можно ещё нажать на имя ПК вверху
+  и выбрать «Есть проблема»; на самом ПК — «Настройки» → «Диагностика» → «Отправить логи».
+- Ошибка в приложении для ПК или идея для него:
+  [создай задачу](https://github.com/afklink/afklink-pc/issues/new/choose) по форме Bug report
+  или Feature request.
+- Уязвимость: сообщи приватно, как описано в [SECURITY.md](SECURITY.md), не в задаче.
 
-## Build from source
+## Сборка из исходников
 
-You need Windows 10 1903+ or 11 (x64) and:
+Нужны Windows 10 1903+ или 11 (x64) и:
 
-- [rustup](https://rustup.rs): it installs the compiler pinned in `rust-toolchain.toml` (1.98.1);
-- [Bun](https://bun.sh) 1.4.2 (`packageManager` in `package.json`);
+- [rustup](https://rustup.rs): он сам поставит компилятор из `rust-toolchain.toml` (1.98.1);
+- [Bun](https://bun.sh) 1.4.2 (`packageManager` в `package.json`);
 - Tauri CLI 2: `cargo install tauri-cli --version 2.12.1 --locked`;
-- [NASM](https://www.nasm.us/) 2.10.06 or newer in `PATH`, optional. Without it OpenH264 is
-  built without its assembly: the app works, but encodes slower.
+- [NASM](https://www.nasm.us/) 2.10.06 или новее в `PATH`, по желанию. Без него OpenH264
+  собирается без ассемблерных частей: приложение работает, но кодирует медленнее.
 
-From a git clone:
+В клоне git:
 
 ```sh
 bun install --frozen-lockfile
 bun run portable
 ```
 
-This makes `dist\AFKLink-<version>-dev-<commit>.exe` for the AFKLink server, with a `.sha256`
-file beside it.
+Получится сборка для сервера AFKLink: `dist\AFKLink-<версия>-dev-<коммит>.exe`, а рядом файл
+`.sha256`.
 
-Your build uses the same `%APPDATA%\AFKLink` folder as the official app: the same device and the
-same pairings. It does not update itself. The AFKLink service accepts it like an official build.
-The server sees each build's version, channel and commit: a build from source reports the `dev`
-channel, and `bun run portable` adds its commit (a plain `cargo tauri build` has none).
+Твоя сборка использует ту же папку `%APPDATA%\AFKLink`, что и официальная: то же устройство и те
+же привязки. Сама она не обновляется. Сервис AFKLink пускает её так же, как официальную. Сервер
+видит версию, канал и коммит каждой сборки: сборка из исходников сообщает канал `dev`, а
+`bun run portable` добавляет коммит (у обычного `cargo tauri build` его нет).
 
 <details>
-<summary>Building for another server</summary>
+<summary>Сборка для другого сервера</summary>
 
-To build for another server, set `AFKLINK_SERVER_URL` before the build. A plain
-`cargo tauri build` in `app/src-tauri` without `AFKLINK_SERVER_URL` uses
+Чтобы собрать приложение для другого сервера, задай `AFKLINK_SERVER_URL` перед сборкой. Обычный
+`cargo tauri build` в `app/src-tauri` без `AFKLINK_SERVER_URL` берёт
 `ws://localhost:8787/ws/agent`.
 
-On first run the app saves the server address in `%APPDATA%\AFKLink\config.json`. On every start
-it checks the saved address:
+При первом запуске приложение сохраняет адрес сервера в `%APPDATA%\AFKLink\config.json`, а при
+каждом запуске сверяет сохранённый адрес:
 
-- `ws://localhost:8787/ws/agent` is replaced with the build's own address;
-- a build for another server keeps any other address, so on a PC where AFKLink has already run,
-  change `server_url` in that file;
-- a build for the AFKLink server, such as `bun run portable`, replaces any other address that is
-  not local with the AFKLink server's.
+- `ws://localhost:8787/ws/agent` сборка меняет на свой адрес;
+- любой другой адрес сборка для другого сервера не трогает, поэтому на ПК, где AFKLink уже
+  работал, поменяй `server_url` в этом файле;
+- сборка для сервера AFKLink, например `bun run portable`, меняет любой другой нелокальный адрес
+  на адрес сервера AFKLink.
 
 </details>
 
-## Tests
+## Тесты
 
 ```sh
 cargo test --workspace --tests
@@ -166,33 +165,33 @@ bun run typecheck
 bun run lint --error-on-warnings
 ```
 
-Tests that move the real cursor or type are marked `#[ignore]`; run them by hand on a machine
-you are not using: `cargo test -p afklink-input -- --ignored`. The full set of checks is in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Тесты, которые двигают настоящий курсор и печатают текст, помечены `#[ignore]`; запускай их
+вручную на машине, за которой сейчас не работаешь: `cargo test -p afklink-input -- --ignored`.
+Полный набор проверок — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Repository layout
+## Устройство репозитория
 
-| Path | What it does |
+| Путь | Что делает |
 |---|---|
-| `crates/core` | The agent: identity, config, signaling, sessions, quality control, logs |
-| `crates/capture` | Screen capture with Windows.Graphics.Capture |
-| `crates/encode` | H.264 encoding with OpenH264, built from source |
-| `crates/transport` | WebRTC (str0m, patched copy in `vendor/str0m`) and the signaling socket |
-| `crates/input` | Input: `SendInput`, or the FakerInput driver |
-| `crates/clipboard` | Text clipboard sync |
-| `crates/hw` | The hardware fingerprint |
-| `crates/protocol`, `crates/i18n` | The wire protocol and Windows strings for the tray, notifications and dialogs, checked against `contract/` |
-| `crates/game-helper` | Starts the chosen game and brings it back to the front during a session |
-| `crates/agent` | `afklink-agent`, a headless CLI of the same pipeline |
-| `crates/netem`, `crates/sim`, `crates/corpus` | Network model, offline session simulator and its screen corpus |
-| `app/src-tauri`, `app/ui` | The desktop app (Tauri 2): window, tray, self-update, driver setup |
+| `crates/core` | Агент: устройство, настройки, сигналинг, сеансы, качество, логи |
+| `crates/capture` | Захват экрана через Windows.Graphics.Capture |
+| `crates/encode` | Кодирование H.264 в OpenH264, собранном из исходников |
+| `crates/transport` | WebRTC (str0m, исправленная копия в `vendor/str0m`) и сокет сигналинга |
+| `crates/input` | Ввод: `SendInput` или драйвер FakerInput |
+| `crates/clipboard` | Синхронизация текста в буфере обмена |
+| `crates/hw` | Отпечаток оборудования |
+| `crates/protocol`, `crates/i18n` | Протокол и строки для трея, уведомлений и диалогов Windows; сверяются с `contract/` |
+| `crates/game-helper` | Во время сеанса запускает выбранную игру и возвращает ей фокус |
+| `crates/agent` | `afklink-agent`: тот же конвейер без окна, в командной строке |
+| `crates/netem`, `crates/sim`, `crates/corpus` | Модель сети, симулятор сеанса и экранный корпус к нему |
+| `app/src-tauri`, `app/ui` | Приложение (Tauri 2): окно, трей, обновление, установка драйвера |
 
-## Contributing
+## Участие
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a `Signed-off-by` line
-([Developer Certificate of Origin](https://developercertificate.org/)).
+Смотри [CONTRIBUTING.md](CONTRIBUTING.md) (на английском). Каждый коммит — со строкой
+`Signed-off-by` ([Developer Certificate of Origin](https://developercertificate.org/)).
 
-## License and trademarks
+## Лицензия и товарный знак
 
-The code is licensed under [AGPL-3.0-only](LICENSE). The AFKLink name, logo and banner are not
-covered by it: see [TRADEMARKS.md](TRADEMARKS.md).
+Код распространяется по [AGPL-3.0-only](LICENSE). Имя, логотип и баннер AFKLink лицензия
+не покрывает: смотри [TRADEMARKS.md](TRADEMARKS.md).

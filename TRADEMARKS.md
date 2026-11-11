@@ -2,7 +2,7 @@
 
 The code in this repository is licensed under AGPL-3.0-only. The license covers the code; it
 does not give permission to use the AFKLink name, logo or icons to identify other software.
-The banner images `docs/banner.jpg` and `docs/banner.ru.jpg` are AFKLink brand artwork and are
+The banner images `docs/banner.jpg` and `docs/banner.en.jpg` are AFKLink brand artwork and are
 not licensed under AGPL-3.0-only.
 
 ## What you may do
