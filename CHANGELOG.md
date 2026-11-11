@@ -2,10 +2,11 @@
 
 Что нового в приложении AFKLink для Windows.
 
-## Не выпущено
+## 0.9.0 — 2026-11-11
 
 ### Новое
 
+- Код приложения открыт: [github.com/afklink/afklink-pc](https://github.com/afklink/afklink-pc).
 - Значки AFKLink рядом с часами и у файла приложения обновились.
 
 ### Исправлено
