@@ -24,3 +24,13 @@ paths = ['''(^|/)contract/packages/protocol/vectors/agent-request-signature\.jso
 description = "A published test vector for the signed signaling challenge, its key made for this file only"
 targetRules = ["generic-api-key"]
 paths = ['''(^|/)contract/packages/protocol/vectors/agent-challenge-signature\.json$''']
+
+[[allowlists]]
+description = "Signed viewer-key test vectors: grant tokens and key ids come from fixed test seeds and are covered by the signatures, not real secrets"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)contract/packages/protocol/vectors/viewer-keys/grant\.json$''']
+
+[[allowlists]]
+description = "Viewer-key scenario vectors: the same seeded test tokens and key ids, not real secrets"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)contract/packages/protocol/vectors/viewer-keys/scenarios\.json$''']

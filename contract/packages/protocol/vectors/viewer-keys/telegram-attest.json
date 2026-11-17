@@ -1,0 +1,407 @@
+{
+  "//": "§8.2 Telegram attestation. init_data = raw Telegram.WebApp.initData minus one hash=<v> pair (the first) and one adjacent '&' (raw_init_data_with_hash shows the original; its hash uses a fake bot token and is never checked); a second hash pair is left in place and refused (second_hash_pair_kept_by_removal). Verifier, in order (why): (1) split on '&', key/value at the first '='; decode %XX and '+'->space; per pair, in order: no '=' (parse_no_equals), bad % (parse_percent), non-UTF-8 result (parse_utf8), empty key (parse_empty_key), a raw LF in the decoded key or value (lf), a raw CR there (cr), '=' in the decoded key (key_eq), duplicate key (parse_duplicate) -> attest_bad, all before the signature (lf/key_eq would let the data-check string be re-split under the same signature: resplit_data_check_string / signed_data_check_string verify with the test key; a CR re-splits nothing but is refused by the same rule: cr_in_value, cr_in_key, signed as they are); hash present -> attest_has_hash. (2) auth_date, user, signature, start_param required (missing_<name>). (3) data-check-string = \"<bot_id>:WebAppData\\n\" + all pairs except signature sorted bytewise by key as key=<decoded value>, joined by \\n. (4) signature: exactly 86 characters without '=' or 88 ending in '==' (a single '=' is invalid), else strict base64url, 64 bytes (signature_format); all-zero key always refused (zero_key); Ed25519 with keys.json telegram_test_ed25519 or verify_key_hex (signature). (5) start_param == \"k_\" + new_key_id (start_param). (6) user is a JSON object with integer id in 1..2^53-1 (user_id). Values are encoded like Telegram (encodeURIComponent, user JSON with \\/), so '+' in photo_url travels as %2B. Decoding goes by Unicode code points (a raw astral character is one character, its UTF-8 4 bytes: raw_astral_character_in_user) and keeps a leading U+FEFF in a value (value_with_leading_bom_kept: the signature covers the BOM; a BOM-stripping decoder rebuilds bom_stripped_data_check_string and fails). init_data over 4096 bytes is refused earlier as proof_invalid:malformed (recover.json). Consumers assert both the verdict (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different verdict, and `why` names the rule that must refuse first.",
+  "bot_id": 123456789,
+  "telegram_public_hex": "83e668d7d9bd1694976b3baa355c1f119e52df2c2ef8eee87e22fe8f2631f644",
+  "cases": [
+    {
+      "name": "main",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b0222c226c6173745f6e616d65223a22d0a82e222c22757365726e616d65223a2276657261222c226c616e67756167655f636f6465223a227275222c2269735f7072656d69756d223a747275652c22616c6c6f77735f77726974655f746f5f706d223a747275652c2270686f746f5f75726c223a2268747470733a5c2f5c2f742e6d655c2f695c2f757365727069635c2f3332305c2f712b5a78372e737667227d",
+      "expect": "ok",
+      "user_id": 1001,
+      "raw_init_data_with_hash": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&hash=84fd96e844892aba76f327dc6ade094faa538238b07d3da7b33fe4b2613cf714",
+      "signature_hex": "8d42e2b3be551adfba23a06d07119e3a6ad5337e29cff454efbad983bd2855e2c64f118761757277a0dd268781c2728b081fbb286f8deb349ff7e7d9facb570c"
+    },
+    {
+      "name": "plus_as_space_decodes_to_space",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0+%D0%9C%D0%B0%D1%80%D0%B8%D1%8F%22%2C%22username%22%3A%22vera%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=HYKvbCtXOF7nS05l9STuXoQ5V6FYlM7mnchb6KKNX0ZELknIjOxv9WptuZyDzEAH4fDruAbr0VX-0lSrBNpnBQ",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера Мария\",\"username\":\"vera\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b020d09cd0b0d180d0b8d18f222c22757365726e616d65223a2276657261227d",
+      "expect": "ok",
+      "user_id": 1001
+    },
+    {
+      "name": "signature_with_padding",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA==",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b0222c226c6173745f6e616d65223a22d0a82e222c22757365726e616d65223a2276657261222c226c616e67756167655f636f6465223a227275222c2269735f7072656d69756d223a747275652c22616c6c6f77735f77726974655f746f5f706d223a747275652c2270686f746f5f75726c223a2268747470733a5c2f5c2f742e6d655c2f695c2f757365727069635c2f3332305c2f712b5a78372e737667227d",
+      "expect": "ok",
+      "user_id": 1001
+    },
+    {
+      "name": "user_and_receiver_identity_is_user",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&receiver=%7B%22id%22%3A2002%2C%22first_name%22%3A%22Other%22%2C%22username%22%3A%22other%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=SgDPPI9N54jC-XvyxSPvue7FxyCp7UONN2v8wtTs0kUXrF82h3E1dfOqrJVSc1faVDMFvsdQVxMcHv7ivj2lBA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nreceiver={\"id\":2002,\"first_name\":\"Other\",\"username\":\"other\"}\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a72656365697665723d7b226964223a323030322c2266697273745f6e616d65223a224f74686572222c22757365726e616d65223a226f74686572227d0a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b0222c226c6173745f6e616d65223a22d0a82e222c22757365726e616d65223a2276657261222c226c616e67756167655f636f6465223a227275222c2269735f7072656d69756d223a747275652c22616c6c6f77735f77726974655f746f5f706d223a747275652c2270686f746f5f75726c223a2268747470733a5c2f5c2f742e6d655c2f695c2f757365727069635c2f3332305c2f712b5a78372e737667227d",
+      "expect": "ok",
+      "user_id": 1001
+    },
+    {
+      "name": "user_id_max_safe_integer",
+      "init_data": "user=%7B%22id%22%3A9007199254740991%2C%22first_name%22%3A%22Max%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=zo5Q4oG8QDkLJCQJela9NBmt4n1_d2rD7Q5ivGOg4UJ6pisLf6o6tNQHuOBNhx1alZkpYyExA4sQ5JheEyabBg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":9007199254740991,\"first_name\":\"Max\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a393030373139393235343734303939312c2266697273745f6e616d65223a224d6178227d",
+      "expect": "ok",
+      "user_id": 9007199254740991
+    },
+    {
+      "name": "raw_astral_character_in_user",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%20🎮%22%2C%22username%22%3A%22vera%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=HnQogNBXi8q1nGebCyll4pLkoYTrqqQsAGUP_V-wnLoWrD8fzp2epIKAQqWaLKF5h7-V28rErpqF6dCWJHMDAw",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера 🎮\",\"username\":\"vera\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653d2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b020f09f8eae222c22757365726e616d65223a2276657261227d",
+      "expect": "ok",
+      "user_id": 1001
+    },
+    {
+      "name": "value_with_leading_bom_kept",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=%EF%BB%BF-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=D8aQV20tcDNM9ERfFBnAkxEGUDn-MYoyFZtbHJllKVld7fjJNwg5EMPcCJRyqMb11eZeSBsbKzFi6emsdFIIDQ",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=﻿-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}",
+      "data_check_string_hex": "3132333435363738393a576562417070446174610a617574685f646174653d313738393539393939300a636861745f696e7374616e63653defbbbf2d333738383437353331373537323430343837380a636861745f747970653d707269766174650a73746172745f706172616d3d6b5f7876314c4c464d58736e484a4266506175532d335f6934483375314855786537556f3779624c46764569380a757365723d7b226964223a313030312c2266697273745f6e616d65223a22d092d0b5d180d0b0222c226c6173745f6e616d65223a22d0a82e222c22757365726e616d65223a2276657261222c226c616e67756167655f636f6465223a227275222c2269735f7072656d69756d223a747275652c22616c6c6f77735f77726974655f746f5f706d223a747275652c2270686f746f5f75726c223a2268747470733a5c2f5c2f742e6d655c2f695c2f757365727069635c2f3332305c2f712b5a78372e737667227d",
+      "expect": "ok",
+      "user_id": 1001,
+      "bom_stripped_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}"
+    },
+    {
+      "name": "hash_present",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&hash=84fd96e844892aba76f327dc6ade094faa538238b07d3da7b33fe4b2613cf714",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_has_hash"
+      },
+      "why": "hash"
+    },
+    {
+      "name": "second_hash_pair_kept_by_removal",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&hash=0000000000000000000000000000000000000000000000000000000000000000",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_has_hash"
+      },
+      "why": "hash"
+    },
+    {
+      "name": "duplicate_field",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&auth_date=1789599991",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_duplicate"
+    },
+    {
+      "name": "bad_percent_escape",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=priv%G1te&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_percent"
+    },
+    {
+      "name": "truncated_percent_escape",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&x=%4",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_percent"
+    },
+    {
+      "name": "empty_key",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&=1",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_empty_key"
+    },
+    {
+      "name": "start_param_hidden_in_value_via_lf",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private%0Astart_param%3Dk_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "lf",
+      "resplit_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}"
+    },
+    {
+      "name": "lf_in_value_start_param_also_visible",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private%0Astart_param%3Dk_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=l_Ae9p8GPGwmoUJve9WWYoY8SjQUPN0CUhzWxg0eR5eJGg80-fWV3WztqVu4a3-TOESW6vmKq0Eq895f73lNAg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "lf",
+      "signed_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}"
+    },
+    {
+      "name": "cr_in_value",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private%0D&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=Re4bTBdYmik3AFi0lAWTtOwBoMGk6e_IGicVNcB_3-ce1vtATPesiMDj_NuTCOJWya3DlZxYmfCX7SIFpxv_Bg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "cr",
+      "signed_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\r\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}"
+    },
+    {
+      "name": "cr_in_key",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&x%0Dy=1&signature=YaxK4vtNtdzgqpu8roUR-HgT5vCIhiSHcYAp8mJP3CtoEmPrVbB0sWdi9_Hqw6dCvrwuhkPR5oFLHZtJ8hE2DA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "cr",
+      "signed_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}\nx\ry=1"
+    },
+    {
+      "name": "duplicate_start_param_last_one_signed",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_duplicate"
+    },
+    {
+      "name": "duplicate_start_param_first_one_signed",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&start_param=k_YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_duplicate"
+    },
+    {
+      "name": "key_with_equals",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&x%3Dy=1&signature=T17ElvLnFHVHH8C-sjSTHQuo8a2Yx1z0UQpYDBGm8jfN1mIEHH8gnnv-6tHyNhOayDyuu4EOPHSxf8MY_67WCg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "key_eq",
+      "signed_data_check_string": "123456789:WebAppData\nauth_date=1789599990\nchat_instance=-3788475317572404878\nchat_type=private\nstart_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8\nuser={\"id\":1001,\"first_name\":\"Вера\",\"last_name\":\"Ш.\",\"username\":\"vera\",\"language_code\":\"ru\",\"is_premium\":true,\"allows_write_to_pm\":true,\"photo_url\":\"https:\\/\\/t.me\\/i\\/userpic\\/320\\/q+Zx7.svg\"}\nx=y=1"
+    },
+    {
+      "name": "pair_without_equals",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&flag",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_no_equals"
+    },
+    {
+      "name": "invalid_utf8_after_decoding",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=%FF&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "parse_utf8"
+    },
+    {
+      "name": "start_param_of_other_key",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI&auth_date=1789599990&signature=1v01AwGZ6_zADy9-Md2TxTh4SYAypbGUEmjVIwADPpH6CkphXWw-8tmSzFneb_D0c770IgsRmxH4iSlzvAQfBg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "start_param"
+    },
+    {
+      "name": "identity_only_in_receiver",
+      "init_data": "receiver=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22username%22%3A%22vera%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=tY5n9wkE86Ubf_XTqr5ERQtuQtowO9rRnvAA6NZgCC_l-4FfdB5XHhC2hBjNN1zfbjYgkaE1N0oeEcdrKYCjCg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "missing_user"
+    },
+    {
+      "name": "raw_plus_instead_of_%2B_in_user",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq+Zx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "wrong_signature",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6FtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "signed_for_other_bot_id",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=J0EHFzyXNbee54Cfl_Iw-sE9sSqgZRdQ2SWHiTaVWYf19CimDSQ-O6u05jNPrcKz9ysFjfR1N8rK3O6pACBdDQ",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "zero_public_key",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "zero_key",
+      "verify_key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "signature_63_bytes",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stX",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature_format"
+    },
+    {
+      "name": "signature_single_padding_char",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA=",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature_format"
+    },
+    {
+      "name": "signature_standard_base64_chars",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt+6I6BtBxGeOmrVM34pz/RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB+7KG+N6zSf9+fZ+stXDA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "signature_format"
+    },
+    {
+      "name": "missing_signature",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "missing_signature"
+    },
+    {
+      "name": "missing_start_param",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&auth_date=1789599990&signature=sT86pMHWEFYShEA4A-6ozBdn67AYphkPqpwVRPA0K4sHculZzGTa0BHYfVLr3fymY_bg92xQ3wLzt2-HOhYgDg",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "missing_start_param"
+    },
+    {
+      "name": "missing_auth_date",
+      "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&signature=BzPFlKm19I7iVTXrYlzChkw8SRT-8CPL2DLGmP7mOP0wisMRsGRHmGdQyta65--5sF2LO9gXjXaxPMKyqyspCA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "missing_auth_date"
+    },
+    {
+      "name": "user_id_zero",
+      "init_data": "user=%7B%22id%22%3A0%2C%22first_name%22%3A%22X%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=KTLNC0ZtZmeQ7rzOpOq-QPljlmK2GPyG6AcPuoBNxSUx_PpaWBNFvyB6I6SuLbKQ9JiQbzx0edOYr4iXDAtTDQ",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "user_id"
+    },
+    {
+      "name": "user_id_negative",
+      "init_data": "user=%7B%22id%22%3A-5%2C%22first_name%22%3A%22X%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=Rxl9NKgm5tXhH0RS9ByogmC_UXcDVCF-FPgsjexhnQBynL8a44BYvt_FW1RmFtieVVTKderNdiyFAoCzXHaGDQ",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "user_id"
+    },
+    {
+      "name": "user_id_2^53",
+      "init_data": "user=%7B%22id%22%3A9007199254740992%2C%22first_name%22%3A%22X%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=OTiiK8w6e4X-4QdJchzNgo7tgJBEHNmowzWQpY51oWkl2QOhjsfE2C-fLoHy-J4wDixtiTWpAUhWXN-eMOw8BA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "user_id"
+    },
+    {
+      "name": "user_not_an_object",
+      "init_data": "user=%5B1001%5D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=Z4znicnkp-uOWYbZvKETjjlPumX4qqrVF0N3Zpj1nh2qRRMY9-9vUKdZD3NRKws4d4Z7CyJwuX_PfX0UlSYoAA",
+      "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      },
+      "why": "user_id"
+    }
+  ],
+  "hash_removal": [
+    {
+      "raw": "a=1&hash=ff&b=2",
+      "stripped": "a=1&b=2"
+    },
+    {
+      "raw": "hash=ff&a=1",
+      "stripped": "a=1"
+    },
+    {
+      "raw": "a=1&hash=ff",
+      "stripped": "a=1"
+    },
+    {
+      "raw": "a=1&hash=ff&b=2&hash=ee",
+      "stripped": "a=1&b=2&hash=ee"
+    }
+  ]
+}

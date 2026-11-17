@@ -1,0 +1,187 @@
+{
+  "//": "Strict base64url (§1.2): alphabet A-Z a-z 0-9 - _ only, no '=', exact length for the field (16->22, 32->43, 64->86, 91->122 chars), unused low bits of the last char zero. `bytes` = expected decoded length. \"b64_bad\" is a generator id (in context: proof_invalid:malformed, or the admit's *_malformed / key_reg rejected). why order: padding, alphabet, length, tail_bits. Consumers assert both the verdict (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different verdict, and `why` names the rule that must refuse first.",
+  "cases": [
+    {
+      "name": "nonce_16",
+      "bytes": 16,
+      "hex": "eda06435dcb42727ae0b41deb341a071",
+      "b64url": "7aBkNdy0JyeuC0Hes0GgcQ",
+      "expect": "ok"
+    },
+    {
+      "name": "key_id_32",
+      "bytes": 32,
+      "hex": "61584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "b64url": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "expect": "ok"
+    },
+    {
+      "name": "sig_64",
+      "bytes": 64,
+      "hex": "f29d150d24527981d53b11ea1349fefe8fb2f430907ae0e03c43151f4907bfe32d26ac0c179b761239858dccaa2673c6e55df1dec62be2cde39180a31519d4cd",
+      "b64url": "8p0VDSRSeYHVOxHqE0n-_o-y9DCQeuDgPEMVH0kHv-MtJqwMF5t2EjmFjcyqJnPG5V3x3sYr4s3jkYCjFRnUzQ",
+      "expect": "ok"
+    },
+    {
+      "name": "spki_91",
+      "bytes": 91,
+      "hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+      "expect": "ok"
+    },
+    {
+      "name": "dash_underscore_16",
+      "bytes": 16,
+      "hex": "fbfffbffbffbffbffbffbffbffbffe00",
+      "b64url": "-__7_7_7_7_7_7_7_7_-AA",
+      "expect": "ok"
+    },
+    {
+      "name": "nonce_16_padding",
+      "bytes": 16,
+      "b64url": "7aBkNdy0JyeuC0Hes0GgcQ=",
+      "expect": "b64_bad",
+      "why": "padding"
+    },
+    {
+      "name": "nonce_16_plus",
+      "bytes": 16,
+      "b64url": "+aBkNdy0JyeuC0Hes0GgcQ",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "nonce_16_slash",
+      "bytes": 16,
+      "b64url": "/aBkNdy0JyeuC0Hes0GgcQ",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "nonce_16_nonzero_tail_bits",
+      "bytes": 16,
+      "b64url": "7aBkNdy0JyeuC0Hes0GgcR",
+      "expect": "b64_bad",
+      "why": "tail_bits"
+    },
+    {
+      "name": "nonce_16_len_minus_1",
+      "bytes": 16,
+      "b64url": "7aBkNdy0JyeuC0Hes0Ggc",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "nonce_16_len_plus_1",
+      "bytes": 16,
+      "b64url": "7aBkNdy0JyeuC0Hes0GgcQA",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "nonce_16_space",
+      "bytes": 16,
+      "b64url": "7aBkN y0JyeuC0Hes0GgcQ",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "key_id_32_padding",
+      "bytes": 32,
+      "b64url": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI=",
+      "expect": "b64_bad",
+      "why": "padding"
+    },
+    {
+      "name": "key_id_32_plus",
+      "bytes": 32,
+      "b64url": "+VhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "key_id_32_slash",
+      "bytes": 32,
+      "b64url": "/VhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "key_id_32_nonzero_tail_bits",
+      "bytes": 32,
+      "b64url": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcJ",
+      "expect": "b64_bad",
+      "why": "tail_bits"
+    },
+    {
+      "name": "key_id_32_len_minus_1",
+      "bytes": 32,
+      "b64url": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEc",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "key_id_32_len_plus_1",
+      "bytes": 32,
+      "b64url": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcIA",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "key_id_32_space",
+      "bytes": 32,
+      "b64url": "YVhNh O0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "spki_91_padding",
+      "bytes": 91,
+      "b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw=",
+      "expect": "b64_bad",
+      "why": "padding"
+    },
+    {
+      "name": "spki_91_plus",
+      "bytes": 91,
+      "b64url": "+FkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "spki_91_slash",
+      "bytes": 91,
+      "b64url": "/FkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    },
+    {
+      "name": "spki_91_nonzero_tail_bits",
+      "bytes": 91,
+      "b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBx",
+      "expect": "b64_bad",
+      "why": "tail_bits"
+    },
+    {
+      "name": "spki_91_len_minus_1",
+      "bytes": 91,
+      "b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBB",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "spki_91_len_plus_1",
+      "bytes": 91,
+      "b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBwA",
+      "expect": "b64_bad",
+      "why": "length"
+    },
+    {
+      "name": "spki_91_space",
+      "bytes": 91,
+      "b64url": "MFkwE YHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+      "expect": "b64_bad",
+      "why": "alphabet"
+    }
+  ]
+}

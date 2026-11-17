@@ -1,0 +1,236 @@
+{
+  "//": "§3.3 fp_viewer, checked in this order. (0) The SDP has no bare CR (a \\r not immediately followed by \\n) anywhere, else why line_end. (1) Lines split on \\r\\n or \\n; the candidates are every line that, after leading spaces and tabs, case-insensitively starts with \"a=fingerprint:\" (session level and every m=); none -> why none. (2) Each candidate, top to bottom: starts exactly with lowercase \"a=fingerprint:\" at its first character (no other case, no leading whitespace; str0m would not use such a line, so it is refused, not skipped) else name; then exactly `a=fingerprint:sha-256 <hex>`: `<alg> <value>` split at the first space with a non-empty algorithm else form (`a=fingerprint: sha-256 ...` has an empty algorithm), algorithm exactly lowercase sha-256 else alg, value 32 bytes as 2-digit hex pairs joined by ':' (hex any case) and nothing else (no trailing whitespace, no NUL) else form; every value equal to the first else mismatch. (3) >= 1 line, all values equal -> fp_viewer. Any failure is proof_invalid:fp_bad; why = the first failing check, in this order: line_end -> none -> per line top to bottom: name -> form (no split, or empty algorithm) -> alg -> form (value) -> mismatch. Only spaces and tabs are skipped before \"a=\" (a BOM there makes no candidate); U+2028 does not end a line. Guarantee: an accepted fp_viewer is the only fingerprint str0m can read from that SDP (str0m parses up to the first line it cannot parse and drops the rest, so a bare CR would split lines differently); an SDP str0m reads none from may pass, and DTLS then fails closed. Consumers assert both the verdict (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different verdict, and `why` names the rule that must refuse first.",
+  "cases": [
+    {
+      "name": "chrome_per_m_section_upper_hex",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "firefox_session_level",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "lower_hex_lf_separators",
+      "sdp": "v=0\no=- 4611731400430051336 2 IN IP4 127.0.0.1\ns=-\nt=0 0\na=group:BUNDLE 0 1\na=extmap-allow-mixed\na=msid-semantic: WMS\nm=video 9 UDP/TLS/RTP/SAVPF 96\nc=IN IP4 0.0.0.0\na=ice-ufrag:Xq3p\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\na=ice-options:trickle\na=fingerprint:sha-256 87:35:00:b4:b5:6e:7c:e3:a2:4d:32:da:be:9e:41:f7:25:18:28:bd:c6:05:66:43:b2:2c:01:2c:8f:70:d1:42\na=setup:actpass\na=mid:0\na=recvonly\na=rtcp-mux\na=rtpmap:96 H264/90000\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\nc=IN IP4 0.0.0.0\na=ice-ufrag:Xq3p\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\na=setup:actpass\na=mid:1\na=sctp-port:5000\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "session_and_m_same_value",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256 87:35:00:b4:b5:6e:7c:e3:a2:4d:32:da:be:9e:41:f7:25:18:28:bd:c6:05:66:43:b2:2c:01:2c:8f:70:d1:42\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "mixed_crlf_and_lf",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\na=mid:0\r\na=recvonly\r\na=rtcp-mux\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "u2028_is_not_a_line_end",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=ice-options:trickle a=fingerprint:sha-256 AA:75:13:57:C9:D9:7B:2F:E0:B1:0B:16:5D:56:CD:2F:58:3C:90:D6:4F:13:E5:0A:BB:EA:77:3F:BD:B8:DA:D2\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "bom_before_a_is_not_a_candidate",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\n﻿a=fingerprint:sha-256 AA:75:13:57:C9:D9:7B:2F:E0:B1:0B:16:5D:56:CD:2F:58:3C:90:D6:4F:13:E5:0A:BB:EA:77:3F:BD:B8:DA:D2\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": "ok"
+    },
+    {
+      "name": "no_fingerprint_lines",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "none"
+    },
+    {
+      "name": "sha1_only",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-1 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-1 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "alg"
+    },
+    {
+      "name": "uppercase_SHA-256",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:SHA-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:SHA-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "alg"
+    },
+    {
+      "name": "two_different_values",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 AA:75:13:57:C9:D9:7B:2F:E0:B1:0B:16:5D:56:CD:2F:58:3C:90:D6:4F:13:E5:0A:BB:EA:77:3F:BD:B8:DA:D2\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "mismatch"
+    },
+    {
+      "name": "31_bytes",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "double_space",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256  87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "trailing_space",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42 \r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "line_without_value",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "hex_without_colons",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256 873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "sha256_plus_sha384",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-384 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42:87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "alg"
+    },
+    {
+      "name": "attribute_name_mixed_case",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=Fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\nA=FINGERPRINT:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "attribute_name_upper",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\nA=FINGERPRINT:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\nA=FINGERPRINT:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "valid_plus_mixed_case_line",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=Fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "leading_space",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n a=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "leading_tab",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n\ta=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "valid_plus_leading_space_line",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\n a=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "name"
+    },
+    {
+      "name": "bare_cr_separators",
+      "sdp": "v=0\ro=- 4611731400430051336 2 IN IP4 127.0.0.1\rs=-\rt=0 0\ra=group:BUNDLE 0 1\ra=extmap-allow-mixed\ra=msid-semantic: WMS\rm=video 9 UDP/TLS/RTP/SAVPF 96\rc=IN IP4 0.0.0.0\ra=ice-ufrag:Xq3p\ra=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\ra=ice-options:trickle\ra=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\ra=setup:actpass\ra=mid:0\ra=recvonly\ra=rtcp-mux\ra=rtpmap:96 H264/90000\rm=application 9 UDP/DTLS/SCTP webrtc-datachannel\rc=IN IP4 0.0.0.0\ra=ice-ufrag:Xq3p\ra=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\ra=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\ra=setup:actpass\ra=mid:1\ra=sctp-port:5000\r",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "line_end"
+    },
+    {
+      "name": "bare_cr_inside",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\ra=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "line_end"
+    },
+    {
+      "name": "trailing_bare_cr",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n\r",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "line_end"
+    },
+    {
+      "name": "space_after_colon",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint: sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint: sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    },
+    {
+      "name": "nul_in_value",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:4\u00002\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "fp_bad"
+      },
+      "why": "form"
+    }
+  ]
+}

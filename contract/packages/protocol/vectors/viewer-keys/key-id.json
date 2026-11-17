@@ -1,0 +1,107 @@
+{
+  "//": "§1.3 SPKI -> key_id = SHA-256(\"AFKLINK-VIEWER-KEY-V1\\0\" (22 bytes) || spki (91 bytes)). The same SPKI rules apply to rpk. Accept only: length 91, exact 26-byte prefix, byte 26 == 0x04, X < p and Y < p, point on P-256. \"spki_bad\" is a generator id (in context: admit_refused:key_reg_bad). why = first failing check in that order. Consumers assert both the verdict (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different verdict, and `why` names the rule that must refuse first.",
+  "prefix_hex": "41464b4c494e4b2d5649455745522d4b45592d563100",
+  "spki_prefix_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200",
+  "cases": [
+    {
+      "name": "key_A",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "message_hex": "41464b4c494e4b2d5649455745522d4b45592d5631003059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "key_id_hex": "61584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "expect": "ok"
+    },
+    {
+      "name": "key_B",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004d7198d4758ec097f9ccd34454e58c5da9ffae7fd18dba01d192ac28c444012e78e23ea4ac3627442e67c14ebb969a1c4e3b7d841e76a6eb27ddf28326c2b9a56",
+      "message_hex": "41464b4c494e4b2d5649455745522d4b45592d5631003059301306072a8648ce3d020106082a8648ce3d03010703420004d7198d4758ec097f9ccd34454e58c5da9ffae7fd18dba01d192ac28c444012e78e23ea4ac3627442e67c14ebb969a1c4e3b7d841e76a6eb27ddf28326c2b9a56",
+      "key_id_hex": "c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f",
+      "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "expect": "ok"
+    },
+    {
+      "name": "key_C",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004634c31ae96010a745aa0fce1dec88908dba92daa849d0dbba590a1e4e60c0846c30fa2f5a24312c8513eecef2ebf48059ed0f6bad2635012982804b471bc2369",
+      "message_hex": "41464b4c494e4b2d5649455745522d4b45592d5631003059301306072a8648ce3d020106082a8648ce3d03010703420004634c31ae96010a745aa0fce1dec88908dba92daa849d0dbba590a1e4e60c0846c30fa2f5a24312c8513eecef2ebf48059ed0f6bad2635012982804b471bc2369",
+      "key_id_hex": "ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd12",
+      "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+      "expect": "ok"
+    },
+    {
+      "name": "key_X",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004f878997eccdbeec24a0cc7636bf207004dafe6fc11414206a2a5aa90d81c7d2e372c8e8a27ff4018f8e8aacfde9f59411a61114e012197f38d175b74e73b9833",
+      "message_hex": "41464b4c494e4b2d5649455745522d4b45592d5631003059301306072a8648ce3d020106082a8648ce3d03010703420004f878997eccdbeec24a0cc7636bf207004dafe6fc11414206a2a5aa90d81c7d2e372c8e8a27ff4018f8e8aacfde9f59411a61114e012197f38d175b74e73b9833",
+      "key_id_hex": "e6e4490628194cd69346990308105b0279cd404181b892c1dc42ae40f1d3e17d",
+      "key_id": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0",
+      "expect": "ok"
+    },
+    {
+      "name": "key_RK",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000432c70eb024af9b58e123401ecb3c596032a007546e3b6d953765cd8859117e1fb22d49202d109b4cf6f8f70a8cdb7e8af01756211fa2fe0ee0d40b1a1de6a594",
+      "message_hex": "41464b4c494e4b2d5649455745522d4b45592d5631003059301306072a8648ce3d020106082a8648ce3d0301070342000432c70eb024af9b58e123401ecb3c596032a007546e3b6d953765cd8859117e1fb22d49202d109b4cf6f8f70a8cdb7e8af01756211fa2fe0ee0d40b1a1de6a594",
+      "key_id_hex": "b6713f48940dfe9a99c2b39002381b9679bda307cde532acc875a1d9a4cdf07d",
+      "key_id": "tnE_SJQN_pqZwrOQAjgblnm9owfN5TKsyHWh2aTN8H0",
+      "expect": "ok"
+    },
+    {
+      "name": "p384",
+      "spki_hex": "3076301006072a8648ce3d020106052b8104002203620004e303d91bc66f668f168f944469841b41d06cf3bc5fb447b777e69875046b90580ce6a12ec4e6c5e7e37dcb4b0e9d1c8464e91c44eeaa95e487cc05fbb99663799627378406cbc13fe299a5b8ea22965a36ab09cad7bfb43c028a4b486dedf3ba",
+      "expect": "spki_bad",
+      "why": "length"
+    },
+    {
+      "name": "compressed_point",
+      "spki_hex": "3039301306072a8648ce3d020106082a8648ce3d030107032200037d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6",
+      "expect": "spki_bad",
+      "why": "length"
+    },
+    {
+      "name": "point_not_on_curve",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60106",
+      "expect": "spki_bad",
+      "why": "not_on_curve"
+    },
+    {
+      "name": "point_all_zero",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "spki_bad",
+      "why": "not_on_curve"
+    },
+    {
+      "name": "x_equals_p",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004ffffffff00000001000000000000000000000000fffffffffffffffffffffffff0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "expect": "spki_bad",
+      "why": "coord_range"
+    },
+    {
+      "name": "y_equals_p",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+      "expect": "spki_bad",
+      "why": "coord_range"
+    },
+    {
+      "name": "other_curve_oid_p192",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030101034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "expect": "spki_bad",
+      "why": "prefix"
+    },
+    {
+      "name": "length_90",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea601",
+      "expect": "spki_bad",
+      "why": "length"
+    },
+    {
+      "name": "length_92",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea6010700",
+      "expect": "spki_bad",
+      "why": "length"
+    },
+    {
+      "name": "byte_04_replaced_05",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200057d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "expect": "spki_bad",
+      "why": "point_format"
+    }
+  ]
+}

@@ -1,0 +1,331 @@
+{
+  "//": "§4 key_reg. reg = LP(\"AFKLINK-KEY-REG-V1\") || LP(key_id(spki) 32) || LP(kind) || LP(platform) || LP(rpk 91 bytes, or \"\" when the field is absent); sig = ECDSA(K_dev, reg). kind in {telegram, telegram_desktop, browser}, platform in {iphone, ipad, android, mac, windows, linux, unknown}; the form rule is [a-z0-9_]{1,24} for each; a well-formed value outside the list is accepted (signed as sent) and displayed as unknown (`display`). Checks in order (why): spki canonical (spki); kind form (kind); platform form (platform); rpk absent or canonical SPKI, \"\" and null invalid (rpk); sig 64 bytes (sig); signature (signature). Consumers assert both the verdict (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different verdict, and `why` names the rule that must refuse first.",
+  "cases": [
+    {
+      "name": "with_rpk",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "telegram",
+        "platform": "iphone",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+      "message_hex": "0000001241464b4c494e4b2d4b45592d5245472d56310000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c20000000874656c656772616d000000066970686f6e650000005b3059301306072a8648ce3d020106082a8648ce3d0301070342000432c70eb024af9b58e123401ecb3c596032a007546e3b6d953765cd8859117e1fb22d49202d109b4cf6f8f70a8cdb7e8af01756211fa2fe0ee0d40b1a1de6a594",
+      "expect": "ok",
+      "display": {
+        "kind": "telegram",
+        "platform": "iphone"
+      }
+    },
+    {
+      "name": "without_rpk",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "kind": "browser",
+        "platform": "mac",
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+      },
+      "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+      "message_hex": "0000001241464b4c494e4b2d4b45592d5245472d563100000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f0000000762726f77736572000000036d616300000000",
+      "expect": "ok",
+      "display": {
+        "kind": "browser",
+        "platform": "mac"
+      }
+    },
+    {
+      "name": "unknown_platform_well_formed",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram",
+        "platform": "visionos",
+        "sig": "uevcqU3ihw6WLNPdMmx-khNfmr4yLePcqYtngNAhX3Z6cW_WO4E-PpWfp-ogRkUcxIZajTwIaa6vTh7FqgNIEQ"
+      },
+      "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+      "message_hex": "0000001241464b4c494e4b2d4b45592d5245472d563100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000000874656c656772616d00000008766973696f6e6f7300000000",
+      "expect": "ok",
+      "display": {
+        "kind": "telegram",
+        "platform": "unknown"
+      }
+    },
+    {
+      "name": "unknown_kind_well_formed",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram_web",
+        "platform": "unknown",
+        "sig": "_vyXiVzdrrNlGbXMamhjdLMgdDZ6vf9-Q9r4XWusAQrw49hrdSN_aRODWMys-wsr3zGZ586E9gWJYVlRuMgFyg"
+      },
+      "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+      "message_hex": "0000001241464b4c494e4b2d4b45592d5245472d563100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000000c74656c656772616d5f77656200000007756e6b6e6f776e00000000",
+      "expect": "ok",
+      "display": {
+        "kind": "unknown",
+        "platform": "unknown"
+      }
+    },
+    {
+      "name": "platform_24_chars",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "browser",
+        "platform": "pppppppppppppppppppppppp",
+        "sig": "7b8lOihThQ3RE-ujpo7LC-DhjSJ7FbkBvVetp6km2rvrIAhitcIMuZ_AFQZ0kJE132Rrt8tWjOtlpgokEGlsVQ"
+      },
+      "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+      "message_hex": "0000001241464b4c494e4b2d4b45592d5245472d563100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000000762726f777365720000001870707070707070707070707070707070707070707070707000000000",
+      "expect": "ok",
+      "display": {
+        "kind": "browser",
+        "platform": "unknown"
+      }
+    },
+    {
+      "name": "kind_substituted",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "browser",
+        "platform": "iphone",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "platform_substituted",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "telegram",
+        "platform": "android",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "rpk_substituted",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "telegram",
+        "platform": "iphone",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "rpk_removed",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "telegram",
+        "platform": "iphone",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "signed_by_other_key",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "kind": "telegram",
+        "platform": "iphone",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+        "sig": "mtErk1FPVmmQEUjEACqJ99m-t-LGaTxXjduTeZi_EFYCEtJDgqhhso61nnhJOuwauEcKTSqAYXuUhbN-Ba8OKw"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "signature"
+    },
+    {
+      "name": "platform_capital_letter",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram",
+        "platform": "iPhone",
+        "sig": "CYJpccKUmxAPfrsDWBkAkSwDpFeQ30R791UX52OnVl0CiY8bJKp_jhkFKE3G06DrHlDZb9YqfNDR4PJPyArAMA"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "platform"
+    },
+    {
+      "name": "platform_25_chars",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "browser",
+        "platform": "ppppppppppppppppppppppppp",
+        "sig": "11_0UGOx-ioa-XD2e6p9vr25J4fHHSvVLlxOORXHqekjcP159vlCfPW_5KuC18j4utWwZ5wWopkBNFZop-LArw"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "platform"
+    },
+    {
+      "name": "platform_cyrillic",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram",
+        "platform": "айфон",
+        "sig": "ZEm-UEsw2LMJZdJUHrzQ-F_4YkDDeh0qDqsONZaTNsaBj9e0WBiMqVkvHEVYgpX83SYJJUkg4ABQ3Ykjkmb4ow"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "platform"
+    },
+    {
+      "name": "platform_empty",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram",
+        "platform": "",
+        "sig": "jJDEFL8vS0v726zAL5z9eDigs7Mml5C-9N_Pd9S0wyCao5_Vv__MlMHIQc-3lWIU0iCS83n0eMQLpklXlSbRrA"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "platform"
+    },
+    {
+      "name": "kind_with_dash",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "telegram-desktop",
+        "platform": "windows",
+        "sig": "o8Bn0hNjCXYMTALGADMwkd-QZt4W9jxxktqGLRlAXZb9eqPVnSWZD4o6kskgCdb0zPHDV8KWKu7icfjcXJiC3w"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "kind"
+    },
+    {
+      "name": "kind_with_space",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+        "kind": "tele gram",
+        "platform": "iphone",
+        "sig": "gONh-JAqYjz6MI0tIV4eSj3y5XhLdqQiwgWtXhDR3zhHV-IMrqKmH6CQgETAx8G4rhd3mXSLdxZqvHcBAC81Ug"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "kind"
+    },
+    {
+      "name": "kind_missing",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "platform": "mac",
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "kind"
+    },
+    {
+      "name": "platform_null",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "kind": "browser",
+        "platform": null,
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "platform"
+    },
+    {
+      "name": "rpk_empty_string",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "kind": "browser",
+        "platform": "mac",
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w",
+        "rpk": ""
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "rpk"
+    },
+    {
+      "name": "rpk_null",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "kind": "browser",
+        "platform": "mac",
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w",
+        "rpk": null
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "rpk"
+    },
+    {
+      "name": "rpk_compressed",
+      "key_reg": {
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+        "kind": "browser",
+        "platform": "mac",
+        "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w",
+        "rpk": "MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgACMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh8"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "rpk"
+    },
+    {
+      "name": "spki_compressed",
+      "key_reg": {
+        "spki": "MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8Y",
+        "kind": "telegram",
+        "platform": "iphone",
+        "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+        "sig": "H4DzAbzyr_x9uDEyTHQEMT771K3PFt2aXAtQ7yWQiu8q-WvfE4TGfFZ314Mjjq81pIHPPEyAVjPqsvYSSqdNoQ"
+      },
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "key_reg_bad"
+      },
+      "why": "spki"
+    }
+  ]
+}

@@ -1,0 +1,325 @@
+{
+  "$id": "https://afklink.dev/schema/agent-to-viewer.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "hb"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "restarting",
+            "stalled",
+            "failed"
+          ]
+        },
+        "cause": {
+          "type": "string",
+          "enum": [
+            "capture_lost",
+            "capture_stalled",
+            "encoder_error",
+            "encoder_stalled"
+          ]
+        },
+        "since_capture_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "since_encode_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "still": {
+          "type": "boolean"
+        },
+        "h": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 8640
+        },
+        "fps": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 1000
+        },
+        "restarts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "net_stall": {
+          "type": "boolean"
+        },
+        "rel_exact": {
+          "type": "boolean"
+        },
+        "game": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "absent",
+                "starting",
+                "minimized",
+                "unfocused",
+                "shown"
+              ]
+            },
+            "w": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 16384
+            },
+            "h": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 16384
+            },
+            "launching": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        "no_driver": {
+          "type": "boolean"
+        },
+        "input_blocked": {
+          "type": "boolean"
+        },
+        "vis_ok": {
+          "type": "boolean"
+        },
+        "bg_hold": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "t",
+        "seq",
+        "state",
+        "since_capture_ms",
+        "since_encode_ms",
+        "still",
+        "h",
+        "fps",
+        "restarts"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "cp"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "x": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "ack": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "hidden": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "t",
+        "seq",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "cb_state"
+        },
+        "on": {
+          "type": "boolean"
+        },
+        "pc": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "to_pc_only",
+            "unavailable"
+          ]
+        }
+      },
+      "required": [
+        "t",
+        "on",
+        "pc"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "cb_pc"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "i": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "t",
+        "id",
+        "i",
+        "n",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "cb_ack"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "why": {
+          "type": "string",
+          "enum": [
+            "off",
+            "too_large",
+            "malformed",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "t",
+        "id",
+        "ok"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "ks"
+        },
+        "kid": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "signed",
+            "nonce_stale",
+            "key_required",
+            "key_unknown",
+            "key_unconfirmed",
+            "admit_refused",
+            "key_revoked",
+            "proof_invalid",
+            "fingerprint_changed",
+            "key_list_damaged"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "pattern": "^[a-z0-9_:]{1,32}$"
+        },
+        "admit": {
+          "type": "string",
+          "enum": [
+            "pair",
+            "endorse",
+            "grant",
+            "recover",
+            "first_use"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "observe",
+            "strict"
+          ]
+        }
+      },
+      "required": [
+        "t",
+        "kid",
+        "verdict",
+        "mode"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,701 @@
+{
+  "//": "§9 first_use. f = LP(\"AFKLINK-FIRST-USE-V1\") || LP(device_id) || LP(key_id 32) || LP(uid decimal ASCII); sig = ECDSA(K_dev, f) by the key being added. Admit wire {kind:\"first_use\", uid, sig}. Order: signature first (first_use_bad_sig, also when undecodable), then: observe mode, uid in snapshot, person has no active and no revoked key (first_use_closed). Candidate person/role from the snapshot, always unconfirmed -> verdict key_unconfirmed in observe. Case = PC state + one first-offer step through the full §3.4 path -> expect {verdict = signed | key_unconfirmed | §11 reason, detail = ended_detail, admit}. State: keys [{key_id, spki, role, person, kind, platform, rpk?, source, unconfirmed?}], revoked [{key_id, spki, telegram_user_id, origin}], spent ids, snapshot, nonce_batches. A new key whose candidate would be unconfirmed is refused key_unconfirmed in strict mode without any change (generator choice) and is added with verdict key_unconfirmed in observe mode.",
+  "cases": [
+    {
+      "name": "main",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "Xh35c7paNJ5onwqgPM8LSmwRuOTBJETFVnjMI3W4lWDs2i_2gaMUVaJeTPNheNo5ZPpQv9bEGAj-OmYnjalJwg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "mw_Gw9dzDwtoTwOKEWvZalZ1x4Lv_onBpB6ymALdQhum9XQvkKWzs5NgC9QjtuYppsYtYonzuUJksdhliYJ7jQ"
+            }
+          ]
+        }
+      },
+      "first_use_message_hex": "0000001441464b4c494e4b2d46495253542d5553452d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f0000000431303031",
+      "candidate": {
+        "person": {
+          "telegram_user_id": 1001
+        },
+        "role": "owner",
+        "unconfirmed": true,
+        "source": {
+          "kind": "first_use"
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "key_unconfirmed",
+        "admit": "first_use"
+      }
+    },
+    {
+      "name": "guest_from_snapshot",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 456,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "rEUFJUgGasEytad6HdicsD2y_GUOxMFNu562akEqFXif3FbBUviZrQq5ZmJ9Pl6FLDlR3ZzuDvxNGAw4Jz5X5Q",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+            "kind": "telegram",
+            "platform": "android",
+            "sig": "aHRuXrGFK2eURS-UaCdOl6CyHJzZ7oQKM6HmEosyKvwAiuEfzhIMruBaj5h9yVXTI3RxkfqKZijeFKw2_nkctQ"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 456,
+              "sig": "UVV8FsjYN6krq3HnxjGhJecxIeSPsV0JM6HPpSOroHn1TJRR4iUQXSXcs8BLnJfS8sjjGfdUrZWgY7lAe5VawA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd12000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "key_unconfirmed",
+        "admit": "first_use"
+      }
+    },
+    {
+      "name": "claimed_uid_differs_from_signed_uid",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "AcQowEEAVqKvQJxoUBzuq5wuhvi0EIFxov91F60Cu30nb3YNFORvNVWY3F9HPd4dlrNoUx1RWks7osu4etGhwQ",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 456,
+              "sig": "jBNa-yfILdZb6IXjD7W2sBqYj2x9GAdmfDyfEedF4qrZHABomhi3HoROf5Fcc8CLL0swG-NgWTo2fH1BE0wR8A"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_bad_sig"
+      }
+    },
+    {
+      "name": "signed_for_other_device_id",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "wL08saadXRHU5I-LqW91yNnFzZfUNwHtEdd1Sd8VTbYI27ImTRi9RIjGeHTDYHBADTJl6P5EQmCNOGJT02Ptxg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "bNnbE3N2uQF_5uk2eBnK-GM3iKl-0Cp_pxhF9Q6wbUO7GmJxijVIOviRQw9uPkBJUgxlslc7TEfV3R1PVPuChg"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_bad_sig"
+      }
+    },
+    {
+      "name": "strict_mode_bad_sig_reports_sig_first",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "-Giim7jLGF5vua19aSRXF2LgiQnq0XMoLT2Qn_IBJVy_rHdzFKptQU4s6Vp1B6x5ETd9hVZ1au9g2bU4le7R8A",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "RInTuJvZRjmxn_bmKOwjDzERYjCjo_nqXRj_2p0Tf2HPDyUM6lTbV7z_x4Nl1odFeKpECEOc-PkuurHYDYUBWQ"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_bad_sig"
+      }
+    },
+    {
+      "name": "undecodable_sig",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "KEoGcUUpvjHNnGyyTeJz5wA5KE00sUZ757K3xacOkDgf9dIIlzhRVkfBU9KxgHvrkHhjQ5gah4G_3CAGTnGacg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "AAAA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_bad_sig"
+      }
+    },
+    {
+      "name": "strict_mode",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "DnGW0JjAkDfjjOlaba95mpUHjFj-2euH74jwIfOE_dpZR4ba2svvDG5vbMo51RCOlmBQCmrobwDchcr6N9XURA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "mw_Gw9dzDwtoTwOKEWvZalZ1x4Lv_onBpB6ymALdQhum9XQvkKWzs5NgC9QjtuYppsYtYonzuUJksdhliYJ7jQ"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_closed"
+      }
+    },
+    {
+      "name": "uid_not_in_snapshot",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 777,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "yuqyb_V7IbcRrChkg0UZTgalneo8AtGioFcOCi-Zrzjs4whz6ZH4xWRLIEEnY8OBSSWD0Rp00gwkX7FLVhg6SA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 777,
+              "sig": "3NeWeVaOzoiNVcx5Bv9gNa2IgdSpSVYqdE3AooQomHbGcEOG0vsKz8fmZFVkhE7oap3pLhmfFba4wQwk5YTtAA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_closed"
+      }
+    },
+    {
+      "name": "person_has_key",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "8wniR2_ez6ptadspjcXICLQT4u2KJCYe4b9KwbWBqC88Gn4DlNFIVV1M_N9fkSuKlxA-d7-VtY9y1tJOnjAI1Q",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "mw_Gw9dzDwtoTwOKEWvZalZ1x4Lv_onBpB6ymALdQhum9XQvkKWzs5NgC9QjtuYppsYtYonzuUJksdhliYJ7jQ"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_closed"
+      }
+    },
+    {
+      "name": "person_has_revoked_key",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [],
+        "revoked": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "telegram_user_id": 1001,
+            "origin": "pc",
+            "removed_at": 1789596400000
+          }
+        ],
+        "spent": [],
+        "snapshot": [
+          {
+            "telegram_user_id": 1001,
+            "role": "owner"
+          },
+          {
+            "telegram_user_id": 456,
+            "role": "guest"
+          }
+        ],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "9YYaPO7k2UoqHyBdqtr94RILlkXldBhirgD5fhPXt7H_J4LLGnazeKk-uxqhuvmYs1V-k4uSJiyDtYrBtCl-mA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "browser",
+            "platform": "mac",
+            "sig": "tjWGnT-p7Eqk9wyYU8l8UFQeiGQ5HI2jWmHQEkcJp4n5-fSHGJYfE7cOjnf4JfAldttA9aiwHI9T-jasl51F5w"
+          },
+          "admit": [
+            {
+              "kind": "first_use",
+              "uid": 1001,
+              "sig": "mw_Gw9dzDwtoTwOKEWvZalZ1x4Lv_onBpB6ymALdQhum9XQvkKWzs5NgC9QjtuYppsYtYonzuUJksdhliYJ7jQ"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "first_use_closed"
+      }
+    }
+  ]
+}

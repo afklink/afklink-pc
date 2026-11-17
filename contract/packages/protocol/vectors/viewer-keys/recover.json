@@ -1,0 +1,1374 @@
+{
+  "//": "§8 recovery on the same device. The phone's recovery key RK (keys.json recovery_key); rpk = its SPKI, carried in key_reg of every key of that phone. r = LP(\"AFKLINK-RECOVER-V1\") || LP(device_id) || LP(session_id) || LP(key_id_new 32) || LP(nonce_pc 16); rsig = ECDSA(rk, r). Admit wire {kind:\"recover\", attest:{init_data}, rsig} (no `old` hint). New key = B (key_reg with the same rpk); old record = A of Вера (1001). attest = telegram-attest.json case main. Recovery is always on. §8.4 order: form incl. key_reg.rpk present (recover_malformed); attest (attest_bad / attest_has_hash); candidates = active records with the same rpk AND person == attested uid (recover_no_record); rsig under rpk (recover_bad_sig + journal); then rpk_conflict (the rpk is also on another person's record - generator choice: checked as for every admission), limit; commit: lowest candidate role, unconfirmed if any candidate is, all candidates revoked with origin `replaced`. Case = PC state + one first-offer step through the full §3.4 path -> expect {verdict = signed | key_unconfirmed | §11 reason, detail = ended_detail, admit}. State: keys [{key_id, spki, role, person, kind, platform, rpk?, source, unconfirmed?}], revoked [{key_id, spki, telegram_user_id, origin}], spent ids, snapshot, nonce_batches. A new key whose candidate would be unconfirmed is refused key_unconfirmed in strict mode without any change (generator choice) and is added with verdict key_unconfirmed in observe mode.",
+  "recovery_spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+  "new_key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+  "cases": [
+    {
+      "name": "main",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "_ulCUeH0_GpPYYvTkVZQmeSltTJxQmXpqQ4FN1We6CnEooWft2NJ009DyGL47jIJKm9upvtzP0mxBj-e1iNJLA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "recover_message_hex": "0000001241464b4c494e4b2d5245434f5645522d56310000002438643362316634322d366337612d346530392d623564382d3261396537633166336236340000002435663063366131652d336232642d346338652d396137312d30643265346636623863313000000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd41393447",
+      "replaced": [
+        "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI"
+      ],
+      "new_role": "owner",
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "signed",
+        "admit": "recover"
+      }
+    },
+    {
+      "name": "two_candidates_lowest_role",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          },
+          {
+            "key_id": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE-HiZfszb7sJKDMdja_IHAE2v5vwRQUIGoqWqkNgcfS43LI6KJ_9AGPjoqs_en1lBGmERTgEhl_ONF1t05zuYMw",
+            "role": "guest",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram_desktop",
+            "platform": "windows",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "W2jzbF2belEBAJK9Vzx2eIrx82J_w54Fz1J1Ht3hVOZvWqck-EggsP8fv68bxqkzhy97YfyVdXWBWjD4zj49Wg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "replaced": [
+        "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0"
+      ],
+      "new_role": "guest",
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "signed",
+        "admit": "recover"
+      }
+    },
+    {
+      "name": "unconfirmed_candidate_observe_inherits",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "observe",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "first_use"
+            },
+            "unconfirmed": true
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "1NNbw9WUh3SH4XOKUtonk0u-K_e6qk6YZ0CqEnETnJarOQyZiX2LZnACeSLM5Xr7O2jkipdsST6DQYxXQ8pDGA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "replaced": [
+        "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI"
+      ],
+      "new_role": "owner",
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "key_unconfirmed",
+        "admit": "recover"
+      }
+    },
+    {
+      "name": "rsig_with_old_nonce",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "ud0Xv1TbGRem1fSzmu0pLsPcgrGbqVrbCHZzK--zsA2VAo1uB1835Rh6OpXlIA8wjtGHvvgA-6aREhaq7LgG5A",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "USnvMmaIPUv1gCJMT5AXW6U3nKrPToH7qIyNUrB2ZaEzMZ7-uFl_br4uZNOvqOSZfALd-H_1UseKpr_yQei1vA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_bad_sig"
+      }
+    },
+    {
+      "name": "rsig_with_other_session_id",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "oKIUU5G5nfjv1zRN59TinuwsIKipyLg2o_uAqkYKdK3Ijuc4ZOOPCOID6fmE_7HuWsOC14TqcTuBnRGgb6kYXg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "U8AemdTXl7aRMHjvxriH1zIZq-9aSyJfI6N824iRCuTSM-W6DYWQ_pyGwFkLYCmVSmYQqEddzYJTrXT7xU6ylw"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_bad_sig"
+      }
+    },
+    {
+      "name": "rsig_by_other_rk",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "FjhfwqvvJSaLRi4u4386Rrz8EN0YWUQq6wvXEEMV7V-KRocztLHQ-miLxhmw619fOBiTh8nNvdaE5ua1xDt19g",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "RIjaCihn9QdttQFsuj3OgaSK-KX1ipTPc4D6SoOiS_w3HgVQepp2iPeMlztEPz3n5Rdmz-GFLqzBKqcYKRp7Ww"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_bad_sig"
+      }
+    },
+    {
+      "name": "key_reg_of_other_key",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "qlTlQZaCt0an65YN0s1fXUAzdvgw-HnUY0yD_5oNuEloYHwnAkeJteHEk6rijIjMWYZ-F5CqdA9sAoCQVZD6og",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+            "kind": "telegram",
+            "platform": "android",
+            "sig": "aHRuXrGFK2eURS-UaCdOl6CyHJzZ7oQKM6HmEosyKvwAiuEfzhIMruBaj5h9yVXTI3RxkfqKZijeFKw2_nkctQ"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "key_mismatch"
+      }
+    },
+    {
+      "name": "no_record_with_same_rpk",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "46fuXqdpVMhxQddgr9-msmC0RjG_cI30nCRUsEDo0M_mFk466t_MVGtw9tUEQCSlpnNE7Mn6mj4qRcPeu96AiA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_no_record"
+      }
+    },
+    {
+      "name": "key_reg_without_rpk",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "OOHcKw_zvLxnseZXnONzehyr0F-sJ9Oftw5BSAbfN_fuMtSfJQDVC5ksuL2b0srSfieS48oYfyK1e-moT6c-yg",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "sig": "cWHa58964w0Cvg-JmaEnFnkzUBel9L2nBf_SRZ_iGybvNOs6nxxrgXDdEubPogyn4A9B43uLtFlRSgTW4J1r3g"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_malformed"
+      }
+    },
+    {
+      "name": "attest_of_other_person",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "DjctNYnEwYA0FJn637cNA6_gQG85jV1F-TK-HdS0rLhbwzXdl7bqshA-MBogJK7K7oviFS_kiW94IyW5T1Yl6Q",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A2002%2C%22first_name%22%3A%22%D0%A7%D1%83%D0%B6%D0%BE%D0%B9%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=0KY2mO13G_XlVOgjEoTdi0dh5-TPlhJN1GR6O5-SWL4ZPeiK3XcA055984a6rt31WeIj2XdjI7o_F2GIVD7SDQ"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_no_record"
+      }
+    },
+    {
+      "name": "rpk_only_on_another_persons_record",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "source": {
+              "kind": "pair"
+            }
+          },
+          {
+            "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+            "role": "guest",
+            "person": {
+              "telegram_user_id": 456,
+              "first_name": "Петя",
+              "username": "petya"
+            },
+            "kind": "telegram",
+            "platform": "android",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "Fh-wBPyqSN13xS3yErEMpI2M9_uRF6B9KUsN5EfeBDRFxg44HMByr6sEYJCKYaWkZ_FAQKaV9UpcF1fpj3F5QQ",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_no_record"
+      }
+    },
+    {
+      "name": "two_persons_one_rpk",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          },
+          {
+            "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+            "role": "guest",
+            "person": {
+              "telegram_user_id": 456,
+              "first_name": "Петя",
+              "username": "petya"
+            },
+            "kind": "telegram",
+            "platform": "android",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "FdjaM7X319tNQdmUcRXOmryT4_zsQsGbFLt8lHZEkBWiNXtYsw-zs7XTdhc4X7S7dbSyr2i_3RPi6dKDSjT5ZQ",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "rpk_conflict"
+      }
+    },
+    {
+      "name": "attest_for_other_key",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "v9fdU2KAOMMTNTSCxckTB5UzJmIxdhrdgxaEGMj6CiG65RCuTmB2b02JF32eF6EyH4Wk4qZD_w5aV8BwcT4jCA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k__w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI&auth_date=1789599990&signature=CMYoCCPJY8uHEaZfJ4aXVqCo4e-O-KtZEKT9tWUKT5pC-WGlJk01_LNbLYnuUVIv4-YsScWcxg82N5j8zEdIBw"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_bad"
+      }
+    },
+    {
+      "name": "attest_with_hash",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "3XcHoDA85mwgEZ0Vq9hty3Ukk3WssePh92Vf6Gdudqeif3_Cm2kGu2f4w-3aUP2Omv2unvX812N4BhS2IgerUw",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&hash=84fd96e844892aba76f327dc6ade094faa538238b07d3da7b33fe4b2613cf714"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "attest_has_hash"
+      }
+    },
+    {
+      "name": "rsig_63_bytes",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "Whh4rZ2cPZMOYH9E0bhBgVFHKFeRk1NZxNrBJBdQWpVvIWmpbSrDRBPSpT_TfS4azJ5A0Un-x8pcv4jutEYOOQ",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGC"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "admit_refused",
+        "detail": "recover_malformed"
+      }
+    },
+    {
+      "name": "old_hint_is_ignored_unknown_field",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "oyXHizuaywvWWdO3UVNiyClNqj5ZvSAQyFEibL-dSc0n5PDBi4PdxF6QHUCf2tpqEtWFnW2jbEAdPhhwqInwPw",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA",
+              "old": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0"
+            }
+          ]
+        }
+      },
+      "offer_message_hex": "0000001041464b4c494e4b2d4f464645522d56310000002435663063366131652d336232642d346338652d396137312d3064326534663662386331300000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000020c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f000000106db9e1de86237020d841b0cd4139344700000020873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142",
+      "expect": {
+        "verdict": "signed",
+        "admit": "recover"
+      }
+    },
+    {
+      "name": "init_data_over_4096_bytes",
+      "state": {
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "mode": "strict",
+        "keys": [
+          {
+            "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+            "role": "owner",
+            "person": {
+              "telegram_user_id": 1001,
+              "first_name": "Вера",
+              "username": "vera"
+            },
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "source": {
+              "kind": "pair"
+            }
+          }
+        ],
+        "revoked": [],
+        "spent": [],
+        "snapshot": [],
+        "nonce_batches": [
+          {
+            "issued_at_ms": 0,
+            "nonces": [
+              "bbnh3oYjcCDYQbDNQTk0Rw",
+              "UhqtNCoX8yhiWnryxb9C1A",
+              "qgRl8XVYUFOspg97FPXOGw",
+              "HVVQclGg06NF13rACrma4w"
+            ]
+          }
+        ],
+        "grant_token": ""
+      },
+      "step": {
+        "at_ms": 1000,
+        "kind": "offer",
+        "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+        "session_request": {
+          "telegram_user_id": 1001,
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw"
+        },
+        "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=ice-options:trickle\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:0\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:96 H264/90000\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:Xq3p\r\na=ice-pwd:9b1d2c3e4f5a6b7c8d9e0f1a\r\na=fingerprint:sha-256 87:35:00:B4:B5:6E:7C:E3:A2:4D:32:DA:BE:9E:41:F7:25:18:28:BD:C6:05:66:43:B2:2C:01:2C:8F:70:D1:42\r\na=setup:actpass\r\na=mid:1\r\na=sctp-port:5000\r\n",
+        "proof": {
+          "v": 1,
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+          "sig": "x_u0aXz1TLPFg8x0cupo2NaRg9cD7HKO6PPnEqqToix9KbZjWii2sLIK7UwyZIDGNYZLyrfNC8iLpLpzIBErTA",
+          "key_reg": {
+            "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+            "kind": "telegram",
+            "platform": "iphone",
+            "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+            "sig": "suNyGW7ZFf7z4A_YJcvTTG7B8NrbwGNBi6MGpZjseI5scxRpbrhVAbf1uLYwi6-9T06Lc_W3eMzOWFUiEy5mmA"
+          },
+          "admit": [
+            {
+              "kind": "recover",
+              "attest": {
+                "init_data": "user=%7B%22id%22%3A1001%2C%22first_name%22%3A%22%D0%92%D0%B5%D1%80%D0%B0%22%2C%22last_name%22%3A%22%D0%A8.%22%2C%22username%22%3A%22vera%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Fq%2BZx7.svg%22%7D&chat_instance=-3788475317572404878&chat_type=private&start_param=k_xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8&auth_date=1789599990&signature=jULis75VGt-6I6BtBxGeOmrVM34pz_RU77rZg70oVeLGTxGHYXVyd6DdJoeBwnKLCB-7KG-N6zSf9-fZ-stXDA&pad=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              },
+              "rsig": "dBidKi3S5LDM3U-LXI2-kSZ7E2I8b4zODu2i4-TDaGi4o7bodQmW4TyTzwbz6_79yLvM3Y5jqMxfwqDGOUGChA"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "verdict": "proof_invalid",
+        "detail": "malformed"
+      }
+    }
+  ]
+}

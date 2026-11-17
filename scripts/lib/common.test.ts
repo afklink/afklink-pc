@@ -109,11 +109,10 @@ describe("the production Telegram bot id", () => {
     }
   });
 
-  test("both release scripts refuse it before the build", () => {
-    for (const file of ["official-build.ts", "release-build.ts"]) {
-      const text = readFileSync(join(AGENT, "scripts", file), "utf8");
-      expect(text).toMatch(/botIdOverrideRefusal\((?:env|process\.env)\)/);
-    }
+  // The private release-build.ts is held to the same in release-pipeline.test.ts (private too).
+  test("the official build refuses it before the build", () => {
+    const text = readFileSync(join(AGENT, "scripts", "official-build.ts"), "utf8");
+    expect(text).toMatch(/botIdOverrideRefusal\((?:env|process\.env)\)/);
   });
 });
 

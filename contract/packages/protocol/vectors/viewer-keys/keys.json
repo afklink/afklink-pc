@@ -1,0 +1,159 @@
+{
+  "//": "Test-only keys for viewer-device-keys vectors (docs/design/viewer-device-keys-protocol.md rev 3, §13). Never used anywhere else. P-256 private scalars d = (SHA-256(\"afklink-test-p256:<name>\") mod (n-1)) + 1; jwk = WebCrypto JWK (d, x, y base64url). spki = exportKey(\"spki\") = 26-byte prefix || 04 || X || Y (91 bytes). key_id = SHA-256(\"AFKLINK-VIEWER-KEY-V1\\0\" || spki). device_keys: A, B, C (+ X, Y, Z: further keys of Vera). recovery_key: RK, the rk of Vera's phone; rpk = its spki. telegram_test_ed25519 is generated for these vectors and stands in for Telegram's signing key in test builds (§8.2 p. 4); bot_id likewise. Binary wire values are base64url without padding; *_hex fields are the same bytes in hex.",
+  "device_keys": [
+    {
+      "name": "A",
+      "role_in_vectors": "Vera's phone (owner); signer of endorse/grant; old key in recover",
+      "d_hex": "78536200b8b545656ad8547bb006ed5012f7c8eec1c94104ae9814410e13bd94",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "fUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8Y",
+        "y": "8CVtdTKeHBQWyx0SPWTsMUxOPG5XVNzSPvBuzv6mAQc",
+        "d": "eFNiALi1RWVq2FR7sAbtUBL3yO7ByUEErpgUQQ4TvZQ"
+      },
+      "public_uncompressed_hex": "047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200047d453e2c2cefc69a28a3a87d54d1cde275379121b4dc75b4641ca70be8ae63c6f0256d75329e1c1416cb1d123d64ec314c4e3c6e5754dcd23ef06ecefea60107",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+      "key_id_hex": "61584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI"
+    },
+    {
+      "name": "B",
+      "role_in_vectors": "Vera's new device: endorse N, new key in recover, first_use key",
+      "d_hex": "d4291dfb5ef1838ba33c6d8b51eed539fe4827163ad22ca106dbc4ea24bc7065",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEuc",
+        "y": "jiPqSsNidELmfBTruWmhxOO32EHnam6yfd8oMmwrmlY",
+        "d": "1Ckd-17xg4ujPG2LUe7VOf5IJxY60iyhBtvE6iS8cGU"
+      },
+      "public_uncompressed_hex": "04d7198d4758ec097f9ccd34454e58c5da9ffae7fd18dba01d192ac28c444012e78e23ea4ac3627442e67c14ebb969a1c4e3b7d841e76a6eb27ddf28326c2b9a56",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004d7198d4758ec097f9ccd34454e58c5da9ffae7fd18dba01d192ac28c444012e78e23ea4ac3627442e67c14ebb969a1c4e3b7d841e76a6eb27ddf28326c2b9a56",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+      "key_id_hex": "c6fd4b2c5317b271c905f3dab92fb7fe2e07deed475317bb528ef26cb16f122f",
+      "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8"
+    },
+    {
+      "name": "C",
+      "role_in_vectors": "Petya's device (guest); also used as a foreign signer",
+      "d_hex": "2a6a1577cafca463bf4c1fcdf1e029a7a9a63abea02018e81923e34458414322",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "Y0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEY",
+        "y": "ww-i9aJDEshRPuzvLr9IBZ7Q9rrSY1ASmCgEtHG8I2k",
+        "d": "KmoVd8r8pGO_TB_N8eApp6mmOr6gIBjoGSPjRFhBQyI"
+      },
+      "public_uncompressed_hex": "04634c31ae96010a745aa0fce1dec88908dba92daa849d0dbba590a1e4e60c0846c30fa2f5a24312c8513eecef2ebf48059ed0f6bad2635012982804b471bc2369",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004634c31ae96010a745aa0fce1dec88908dba92daa849d0dbba590a1e4e60c0846c30fa2f5a24312c8513eecef2ebf48059ed0f6bad2635012982804b471bc2369",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+      "key_id_hex": "ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd12",
+      "key_id": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI"
+    },
+    {
+      "name": "X",
+      "role_in_vectors": "second key of Vera on the same phone (same rpk), for recover role selection",
+      "d_hex": "ac6ff49b66bbc04601f8dfd6a688d81226d3c3bd1ab0d1b51466011c2750ccec",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "-HiZfszb7sJKDMdja_IHAE2v5vwRQUIGoqWqkNgcfS4",
+        "y": "NyyOiif_QBj46KrP3p9ZQRphEU4BIZfzjRdbdOc7mDM",
+        "d": "rG_0m2a7wEYB-N_WpojYEibTw70asNG1FGYBHCdQzOw"
+      },
+      "public_uncompressed_hex": "04f878997eccdbeec24a0cc7636bf207004dafe6fc11414206a2a5aa90d81c7d2e372c8e8a27ff4018f8e8aacfde9f59411a61114e012197f38d175b74e73b9833",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d03010703420004f878997eccdbeec24a0cc7636bf207004dafe6fc11414206a2a5aa90d81c7d2e372c8e8a27ff4018f8e8aacfde9f59411a61114e012197f38d175b74e73b9833",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE-HiZfszb7sJKDMdja_IHAE2v5vwRQUIGoqWqkNgcfS43LI6KJ_9AGPjoqs_en1lBGmERTgEhl_ONF1t05zuYMw",
+      "key_id_hex": "e6e4490628194cd69346990308105b0279cd404181b892c1dc42ae40f1d3e17d",
+      "key_id": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0"
+    },
+    {
+      "name": "Y",
+      "role_in_vectors": "extra key of Vera (first_use probe limits)",
+      "d_hex": "df41bd81bcda59c5bcc22aa7cc1c15b7eedab70f5b559e78c9c272a5ffd53369",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "TYXG5tHZ4wzj2Tip04BYn3UEe6QALYj1J5UQA7DTdck",
+        "y": "ryY3uWH0Xg34K4MZ8nyiPm87wp4ftkQykmjteQgMlZw",
+        "d": "30G9gbzaWcW8wiqnzBwVt-7atw9bVZ54ycJypf_VM2k"
+      },
+      "public_uncompressed_hex": "044d85c6e6d1d9e30ce3d938a9d380589f75047ba4002d88f527951003b0d375c9af2637b961f45e0df82b8319f27ca23e6f3bc29e1fb644329268ed79080c959c",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200044d85c6e6d1d9e30ce3d938a9d380589f75047ba4002d88f527951003b0d375c9af2637b961f45e0df82b8319f27ca23e6f3bc29e1fb644329268ed79080c959c",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETYXG5tHZ4wzj2Tip04BYn3UEe6QALYj1J5UQA7DTdcmvJje5YfReDfgrgxnyfKI-bzvCnh-2RDKSaO15CAyVnA",
+      "key_id_hex": "e3605cfe4fb0065381acb73600d76124c494d2e5f7d6f05bdf4f73face3e688e",
+      "key_id": "42Bc_k-wBlOBrLc2ANdhJMSU0uX31vBb309z-s4-aI4"
+    },
+    {
+      "name": "Z",
+      "role_in_vectors": "extra key of Vera (first_use probe limits)",
+      "d_hex": "4901d837c5a046dbf8c94418b89c4b4c81a3393e42ab259a697b5b070659a9a6",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "PPyDNVEln3fsu8etkn0gd28bEsbCX5M-pvoDR102h-w",
+        "y": "p6kqb8dzXC0mWPcHTcVhs5LVbYqZCzu4Uoiy958OZ3k",
+        "d": "SQHYN8WgRtv4yUQYuJxLTIGjOT5CqyWaaXtbBwZZqaY"
+      },
+      "public_uncompressed_hex": "043cfc833551259f77ecbbc7ad927d20776f1b12c6c25f933ea6fa03475d3687eca7a92a6fc7735c2d2658f7074dc561b392d56d8a990b3bb85288b2f79f0e6779",
+      "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200043cfc833551259f77ecbbc7ad927d20776f1b12c6c25f933ea6fa03475d3687eca7a92a6fc7735c2d2658f7074dc561b392d56d8a990b3bb85288b2f79f0e6779",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPPyDNVEln3fsu8etkn0gd28bEsbCX5M-pvoDR102h-ynqSpvx3NcLSZY9wdNxWGzktVtipkLO7hSiLL3nw5neQ",
+      "key_id_hex": "c4f37d8db2862c2b2250ec9479b1c80fc2ba3f746b689fc3cd6ab045bed5eddd",
+      "key_id": "xPN9jbKGLCsiUOyUebHID8K6P3RraJ_DzWqwRb7V7d0"
+    }
+  ],
+  "recovery_key": {
+    "name": "RK",
+    "role_in_vectors": "recovery key rk of Vera's phone (rpk = its SPKI)",
+    "d_hex": "e3d601aa61a993276d71c1a4d63abec0fe412f455443f8dce762eda4ab224d2e",
+    "jwk": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "MscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh8",
+      "y": "si1JIC0Qm0z2-PcKjNt-ivAXViEfov4O4NQLGh3mpZQ",
+      "d": "49YBqmGpkydtccGk1jq-wP5BL0VUQ_jc52LtpKsiTS4"
+    },
+    "public_uncompressed_hex": "0432c70eb024af9b58e123401ecb3c596032a007546e3b6d953765cd8859117e1fb22d49202d109b4cf6f8f70a8cdb7e8af01756211fa2fe0ee0d40b1a1de6a594",
+    "spki_hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000432c70eb024af9b58e123401ecb3c596032a007546e3b6d953765cd8859117e1fb22d49202d109b4cf6f8f70a8cdb7e8af01756211fa2fe0ee0d40b1a1de6a594",
+    "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+    "key_id_hex": "b6713f48940dfe9a99c2b39002381b9679bda307cde532acc875a1d9a4cdf07d",
+    "key_id": "tnE_SJQN_pqZwrOQAjgblnm9owfN5TKsyHWh2aTN8H0"
+  },
+  "telegram_test_ed25519": {
+    "seed_hex": "592580f7050e322b4b64883af15d7ba3a6ec7f969b6bc45b863601d6b13a26e3",
+    "public_hex": "83e668d7d9bd1694976b3baa355c1f119e52df2c2ef8eee87e22fe8f2631f644"
+  },
+  "telegram_published_public_keys_hex": {
+    "//": "copied from the spec §8.2, not re-verified here",
+    "prod": "e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d",
+    "test": "40055058a4ee38156a06562e52eece92a771bcd8346a8c4615cb7376eddf72ec"
+  },
+  "bot_id": 123456789,
+  "ids": {
+    "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+    "other_device_id": "c41e9a07-2f5b-4d83-9e16-7b0a5c3d8f21",
+    "session_id": "5f0c6a1e-3b2d-4c8e-9a71-0d2e4f6b8c10",
+    "other_session_id": "a7e2d913-48c6-4f0b-8d25-61c9b3e70f4a",
+    "add_id": "3e9f7a20-5b14-4c6d-a8e3-9f01d2b7c456",
+    "other_add_id": "e1b0c6d4-7a39-4f52-9c8e-05d6a4f3b218"
+  },
+  "people": {
+    "vera": {
+      "telegram_user_id": 1001,
+      "first_name": "Вера",
+      "username": "vera"
+    },
+    "petya": {
+      "telegram_user_id": 456,
+      "first_name": "Петя",
+      "username": "petya"
+    }
+  },
+  "nonce_pc": {
+    "hex": "6db9e1de86237020d841b0cd41393447",
+    "b64url": "bbnh3oYjcCDYQbDNQTk0Rw"
+  },
+  "fp_viewer_hex": "873500b4b56e7ce3a24d32dabe9e41f7251828bdc6056643b22c012c8f70d142"
+}
