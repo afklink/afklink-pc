@@ -102,6 +102,9 @@ pub const ERROR_CODES: &[(&str, ErrorSeverity)] = {
         ("beta_required", Fatal),
         ("account_blocked", Fatal),
         (DEVICE_BLOCKED, Fatal),
+        // Invites: a claim whose device key card was made for another account (`409`). Answers the
+        // Mini App's `POST /api/invites/claim`, never the agent's socket.
+        ("account_mismatch", Fatal),
         // Catch-all.
         ("internal", Transient),
     ]

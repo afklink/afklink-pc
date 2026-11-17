@@ -18,10 +18,11 @@
 //!
 //! ## Surviving a network change
 //!
-//! ICE losing the path does not end the peer. It starts a grace window ([`ICE_GRACE`]) in which
-//! the viewer can restart ICE with a new offer for the same session ([`PeerSignal::Renegotiate`]);
-//! str0m applies that to the live `Rtc`, so capture, encoder, DTLS and the data channels all carry
-//! on. Only a window that runs out ends the peer, as [`PeerEnd::IceTimeout`].
+//! ICE losing the path does not end the peer. It starts a grace window ([`ICE_GRACE`]; while the
+//! viewer's page is hidden, [`ICE_GRACE_HIDDEN`]) in which the viewer can restart ICE with a new
+//! offer for the same session ([`PeerSignal::Renegotiate`]); str0m applies that to the live `Rtc`,
+//! so capture, encoder, DTLS and the data channels all carry on. Only a window that runs out ends
+//! the peer, as [`PeerEnd::IceTimeout`].
 //!
 //! ## Sending where the viewer is
 //!
@@ -47,7 +48,7 @@ use str0m::format::Codec;
 use str0m::media::{MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::rtp::Extension;
-use str0m::{Candidate, CandidateKind, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Candidate, CandidateKind, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 
@@ -324,6 +325,10 @@ pub enum PeerEvent {
     LinkLost,
     /// Raw bytes received on either input data channel (an input event's JSON string).
     InputData(Vec<u8>),
+    /// The reliable input channel opened: messages for the viewer on it
+    /// ([`PeerControl::SendReliable`]) are written from now on — before it they are dropped. The
+    /// device keys' `ks` (spec §3.7) goes on this. Sent each time a viewer opens it.
+    InputChannelOpen,
     /// The reliable input channel closed while the peer is still up.
     ///
     /// Anything held has to be released by the agent now: the channel a release would
@@ -514,9 +519,15 @@ impl PeerEnd {
 /// session anyway. A viewer that has no picture yet gives up on its own 30 s connect deadline,
 /// which is well inside this.
 ///
+/// All of that is about a viewer that is awake. A viewer whose page is hidden is not: its timers
+/// are throttled or frozen, it gives up on nothing, and it cannot restart ICE until it wakes. While
+/// the page is hidden the window is [`ICE_GRACE_HIDDEN`] instead.
+///
 /// ## And it also bounds a restart
 ///
-/// An applied restart starts a fresh window of the same length, which ends when its path connects.
+/// An applied restart starts a fresh window of the same length, which ends when its path connects
+/// (while the page is hidden it keeps the open window instead, but never with less than this
+/// left: see [`ICE_GRACE_HIDDEN`], "The rules").
 /// Without it a restart that never finds a path could hang forever: str0m holds `Checking` while
 /// an ICE restart has no remote candidates, treating an empty list as "still possible"
 /// (`is-0.11.0/src/agent.rs:2024-2029`), so no `Disconnected` would ever come. The viewer sends its
@@ -524,16 +535,90 @@ impl PeerEnd {
 /// 19 s to work — inside this.
 pub const ICE_GRACE: Duration = Duration::from_secs(20);
 
+/// The grace window while the viewer's page is hidden (`PeerControl::ViewerHidden(true)`, from the
+/// background hold): eleven minutes instead of [`ICE_GRACE`].
+///
+/// ## Why
+///
+/// A hidden page goes to sleep: Safari freezes a hidden tab after a few minutes, a phone
+/// suspends a backgrounded Telegram. It stops answering ICE consent, so str0m reports the path
+/// `Disconnected` 15-25 s later, and the page can neither restart ICE nor say goodbye until it is
+/// shown again — then it re-binds and offers a restart. A session outlives a hidden viewer
+/// for up to ten minutes. The server keeps that grace on the
+/// viewer's socket (`VIEWER_HIDDEN_GRACE_MS`, counted from the socket's loss) and ends the session
+/// as `viewer_disconnected` when it runs out, which reaches this peer as a close.
+///
+/// ## Why eleven, not ten
+///
+/// So that the server's grace is the one that decides, and the session's end says what happened.
+/// That holds when both clocks start at about the same moment — the page's freeze: the server's
+/// heartbeat drops the socket some 20-25 s after it, and our `Disconnected` comes 15-25 s after
+/// it — so the minute over covers that skew and the signaling hop of the server's end with room to
+/// spare. The agent's window is the backstop for when the server's end never reaches us; ten
+/// minutes of a held session cost about 4 MB of str0m padding, which is nothing.
+///
+/// It does not hold when ICE is lost while the hidden page's socket stays up — a backgrounded
+/// phone switching networks, its signaling socket alive or back before the heartbeat notices.
+/// Then the server's grace never starts, and this window alone ends the peer, at the loss plus
+/// eleven minutes, as `ice_timeout`. That is accepted: the session still lasts the owner's ten
+/// minutes and a little more, and the end reason only says it was the path that ran out.
+///
+/// ## The rules
+///
+/// A lost path opens a window of the page's length. The page hidden while a window is open
+/// extends it to `ICE_GRACE_HIDDEN` from when *that window* opened — never from now, so being told
+/// late buys nothing. The page visible again while a window is open shrinks it to whichever is
+/// sooner, its deadline or [`ICE_GRACE`] from now: an awake viewer restarts within that, as above.
+///
+/// An applied restart while the page is visible opens a fresh window of [`ICE_GRACE`]. While it is
+/// hidden, the restart keeps the open window — when it opened, and so the bound of
+/// `ICE_GRACE_HIDDEN` from then — and only moves its deadline out to [`ICE_GRACE`] from now if it
+/// ends sooner, so the restart always has at least that long; with no window open it opens one of
+/// [`ICE_GRACE`]. A page that restarts is awake whatever we last heard — its `vis hidden: false`
+/// may be riding the very path that is lost — so a restart that never finds a path must not hold
+/// the peer for a fresh eleven minutes. The cost: a page that restarts and then freezes again
+/// before the restart's checks finish keeps only what the open window had left, or [`ICE_GRACE`].
+///
+/// A window opened before the viewer connected (the agent's checks giving up on the answer's path)
+/// is a visible one: `vis` only rides the data channel, so a page cannot be hidden before it is up.
+/// See [`LinkWatch`].
+pub const ICE_GRACE_HIDDEN: Duration = Duration::from_secs(11 * 60);
+
+/// The window's two lengths: [`ICE_GRACE`] and [`ICE_GRACE_HIDDEN`], unless a test shortened them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Graces {
+    /// While the viewer's page is visible.
+    visible: Duration,
+    /// While it is hidden.
+    hidden: Duration,
+}
+
+impl Graces {
+    fn of(self, page_hidden: bool) -> Duration {
+        if page_hidden {
+            self.hidden
+        } else {
+            self.visible
+        }
+    }
+}
+
 /// The run loop's view of the ICE path, for the grace window. Sans-IO: the loop supplies the
 /// clock, which is what lets the rules below be tested without a network.
 ///
 /// The rules:
-///   * ICE `Disconnected` opens a window of [`ICE_GRACE`] — unless one is already open, which it
-///     does not extend: the path has been gone since the first report.
-///   * An applied ICE restart replaces whatever window was open with a fresh one: the viewer has
-///     just shown it is alive and trying, and the restart deserves a full window of its own.
+///   * ICE `Disconnected` opens a window of [`ICE_GRACE`] — or [`ICE_GRACE_HIDDEN`] while the
+///     viewer's page is hidden — unless one is already open, which it does not extend: the path has
+///     been gone since the first report.
+///   * An applied ICE restart replaces whatever window was open with a fresh one of [`ICE_GRACE`]:
+///     the viewer has just shown it is alive and trying, and the restart deserves a full window of
+///     its own. While the page is hidden it keeps the open window (its opening, so the hidden
+///     page's bound, stays) and moves the deadline out to [`ICE_GRACE`] from now if that is later.
+///   * The page hidden while a window is open extends it to [`ICE_GRACE_HIDDEN`] from when the
+///     window opened; visible again shrinks it to [`ICE_GRACE`] from now, if that is sooner.
 ///   * ICE `Connected` or `Completed` after a loss or a restart closes the window: the path is
-///     back, and the encoder owes the viewer a keyframe on it.
+///     back, and the encoder owes the viewer a keyframe on it. The page's state is not the
+///     window's and stays as the control task last said.
 ///   * A window that runs out ends the peer as [`PeerEnd::IceTimeout`].
 #[derive(Debug, Default)]
 struct LinkWatch {
@@ -541,8 +626,26 @@ struct LinkWatch {
     outage_since: Option<Instant>,
     /// When the restart currently in progress was applied, if one is.
     restart_at: Option<Instant>,
+    /// When the window now open was opened: the loss, or the restart that replaced its window.
+    /// What a hidden page's extension counts from.
+    window_since: Option<Instant>,
     /// When the peer is given up on unless the path comes back.
     deadline: Option<Instant>,
+    /// The viewer's page is hidden, as the control task last said ([`PeerControl::ViewerHidden`]).
+    page_hidden: bool,
+}
+
+/// What the viewer's page turning hidden or visible did to the [`LinkWatch`]'s window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiddenNote {
+    /// The page was already so: nothing changed.
+    Same,
+    /// No window is open; the next one takes the page's length.
+    NoWindow,
+    /// The deadline moved.
+    Moved { from: Instant, to: Instant },
+    /// The deadline stands: already that late (hidden), or already that soon (visible).
+    Kept { deadline: Instant },
 }
 
 /// What an ICE state change meant to the [`LinkWatch`].
@@ -559,14 +662,15 @@ enum LinkNote {
 }
 
 impl LinkWatch {
-    fn on_state(&mut self, state: IceConnectionState, now: Instant, grace: Duration) -> LinkNote {
+    fn on_state(&mut self, state: IceConnectionState, now: Instant, graces: Graces) -> LinkNote {
         match state {
             IceConnectionState::Disconnected => match self.deadline {
                 Some(deadline) => LinkNote::StillLost {
                     left: deadline.saturating_duration_since(now),
                 },
                 None => {
-                    self.deadline = Some(now + grace);
+                    self.deadline = Some(now + graces.of(self.page_hidden));
+                    self.window_since = Some(now);
                     self.outage_since.get_or_insert(now);
                     LinkNote::Lost
                 }
@@ -575,6 +679,7 @@ impl LinkWatch {
                 match self.outage_since.take() {
                     Some(since) => {
                         self.deadline = None;
+                        self.window_since = None;
                         LinkNote::Restored {
                             outage: now.saturating_duration_since(since),
                             restarted: self.restart_at.take().is_some(),
@@ -587,16 +692,54 @@ impl LinkWatch {
         }
     }
 
-    /// An ICE restart was applied. Returns how much was left of the window it replaced, if one was
-    /// open.
-    fn on_restart(&mut self, now: Instant, grace: Duration) -> Option<Duration> {
+    /// An ICE restart was applied. Returns how much was left of the window it replaced (or, while
+    /// the page is hidden, kept), if one was open.
+    ///
+    /// Visible: a fresh window of [`ICE_GRACE`] from now. Hidden: the open window is kept — its
+    /// opening, and so the hidden page's bound from it, stay — and only pushed out to
+    /// [`ICE_GRACE`] from now if it ends sooner; with none open, one of [`ICE_GRACE`] opens now.
+    /// A restart is a page that is awake, whatever we last heard: its `vis hidden: false` may be
+    /// riding the lost path. So it gets the awake viewer's time to find a path, not a fresh eleven
+    /// minutes.
+    fn on_restart(&mut self, now: Instant, graces: Graces) -> Option<Duration> {
         let replaced = self
             .deadline
             .map(|deadline| deadline.saturating_duration_since(now));
         self.outage_since.get_or_insert(now);
         self.restart_at = Some(now);
-        self.deadline = Some(now + grace);
+        let fresh = now + graces.visible;
+        match (self.page_hidden, self.deadline) {
+            (true, Some(deadline)) => self.deadline = Some(deadline.max(fresh)),
+            _ => {
+                self.window_since = Some(now);
+                self.deadline = Some(fresh);
+            }
+        }
         replaced
+    }
+
+    /// The viewer's page is hidden, or visible again. See [`ICE_GRACE_HIDDEN`], "The rules".
+    fn on_viewer_hidden(&mut self, hidden: bool, now: Instant, graces: Graces) -> HiddenNote {
+        if self.page_hidden == hidden {
+            return HiddenNote::Same;
+        }
+        self.page_hidden = hidden;
+        let Some(deadline) = self.deadline else {
+            return HiddenNote::NoWindow;
+        };
+        let to = if hidden {
+            // From when the window opened, so a late word buys nothing past the bound.
+            let since = self.window_since.unwrap_or(now);
+            deadline.max(since + graces.hidden)
+        } else {
+            deadline.min(now + graces.visible)
+        };
+        if to == deadline {
+            HiddenNote::Kept { deadline }
+        } else {
+            self.deadline = Some(to);
+            HiddenNote::Moved { from: deadline, to }
+        }
     }
 
     fn expired(&self, now: Instant) -> bool {
@@ -605,6 +748,18 @@ impl LinkWatch {
 
     fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+
+    fn page_hidden(&self) -> bool {
+        self.page_hidden
+    }
+
+    /// How long the window now open is, from when it opened to its deadline, for the log.
+    fn window(&self) -> Option<Duration> {
+        match (self.window_since, self.deadline) {
+            (Some(since), Some(deadline)) => Some(deadline.saturating_duration_since(since)),
+            _ => None,
+        }
     }
 
     /// How long the current outage has lasted, for the log.
@@ -635,6 +790,8 @@ impl std::fmt::Debug for HostHooks {
 pub(crate) struct Tuning {
     /// See [`ICE_GRACE`].
     pub ice_grace: Duration,
+    /// See [`ICE_GRACE_HIDDEN`].
+    pub ice_grace_hidden: Duration,
     /// Host candidate addresses, the first of them also the base the srflx line names. `None`
     /// asks the routing table ([`local_ipv4s`], [`primary_local_ipv4`]).
     pub host_ips: Option<Vec<Ipv4Addr>>,
@@ -658,6 +815,7 @@ impl Default for Tuning {
     fn default() -> Self {
         Self {
             ice_grace: ICE_GRACE,
+            ice_grace_hidden: ICE_GRACE_HIDDEN,
             host_ips: None,
             ice_timing: None,
             shaper: None,
@@ -688,6 +846,8 @@ pub async fn spawn_host_peer(
     let tuning = Tuning {
         host_ips: Some(vec![options.host_ip]),
         ice_grace: options.ice_grace,
+        // The host's window, whatever the page: a host chose its grace and keeps it.
+        ice_grace_hidden: options.ice_grace,
         ice_timing: options.ice_timing,
         hooks: Some(HostHooks(hooks)),
         ..Tuning::default()
@@ -1640,6 +1800,80 @@ async fn spawn_peer_on(
     Ok(peer)
 }
 
+/// The str0m configuration of every agent peer: the agent's only `Rtc::builder()` outside tests
+/// (`tests/rtc_config.rs` holds the product sources to that), so what is asserted of it holds for
+/// every peer.
+///
+/// DTLS: str0m holds the certificate the viewer presents in the handshake to the `a=fingerprint`
+/// of the first offer it accepted, and drops the peer on a mismatch (`fingerprint_verification`;
+/// `vendor/str0m/src/lib.rs`, `DtlsOutput::PeerCert`). That fingerprint is the one the viewer's
+/// device key signs (device keys protocol §3.3, §3.6), so this check is what ties the signature to
+/// the session's DTLS. str0m's default is on; it is set here explicitly, and
+/// `afklink-core`'s `tests/dtls_fingerprint.rs` shows a peer from this configuration refusing a
+/// certificate the offer does not name.
+///
+/// `ice_timing` replaces str0m's ICE check schedule; `None` in production.
+pub fn peer_rtc_config(ice_timing: Option<IceTiming>) -> RtcConfig {
+    // An answerer that only speaks H.264. The provider is str0m's RustCrypto one, but its DTLS
+    // layer (dimpl) is built with aws-lc-rs and runs on it, so aws-lc ships too.
+    let mut config = Rtc::builder()
+        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+        .clear_codecs()
+        .enable_h264(true)
+        // Congestion control. Off by default in str0m (`bwe_config: None`), which meant the
+        // agent sent at a fixed rate no matter what was getting through — the classic way to
+        // turn a merely slow link into an unusable one, because the queue that builds is in
+        // front of the input packets too.
+        //
+        // This sets where the estimate *starts*; the ceiling it climbs towards is set separately
+        // (`set_desired_bitrate` in `spawn_peer_task`), and confusing the two is what broke the
+        // first version.
+        .enable_bwe(Some(Bitrate::kbps(INITIAL_BITRATE_KBPS)))
+        // What the *receiver* says, once a second. Off by default in str0m, and its absence is why
+        // every diagnosis so far has been half-blind.
+        //
+        // `MediaEgressStats` carries four things this agent has never had and cannot derive:
+        //
+        //   rtt    the path, from RTCP receiver reports. Every "latency" figure in this project so
+        //          far has been the local send queue — one term of a sum whose other terms were
+        //          guessed at 70 ms and never measured.
+        //   loss   whether the link is dropping. A relay that loses 3% and a link that is merely
+        //          narrow look identical from a bandwidth estimate.
+        //   plis   how often the viewer has lost the picture and asked for a keyframe. Each PLI
+        //          costs an IDR, and an IDR is the single largest thing this pipeline emits, so a
+        //          PLI storm is both a symptom and its own cause.
+        //   nacks  retransmission requests, which spend bandwidth the estimate then reports as used.
+        //
+        // One second, matching the pipeline line, so the two can be read side by side.
+        .set_stats_interval(Some(Duration::from_secs(1)))
+        // The sender's only lever on the browser's jitter buffer, and it has to be negotiated
+        // before a single header goes out. `ExtensionMap::standard()` — what str0m starts from —
+        // maps only ids 1, 2, 3, 4, 10, 11, 13, none of which is either of these (`rtp/ext.rs:370`),
+        // so `Writer::playout_delay` was writing values into an extension that was never on the
+        // wire. Enabling them here is what makes [`PLAYOUT_DELAY_MAX_MS`] mean anything.
+        //
+        // `video-content-type` is negotiated alongside it because it is the same lever's other
+        // half — Chrome applies a different jitter and decode policy to screenshare content — but
+        // see [`Inner::log_negotiated_jitter_extensions`]: str0m 0.23.1's frame-level `Writer`
+        // exposes no setter for the value, so we currently negotiate it without writing it.
+        .set_extension(EXT_ID_PLAYOUT_DELAY, Extension::PlayoutDelay)
+        .set_extension(EXT_ID_VIDEO_CONTENT_TYPE, Extension::VideoContentType)
+        .enable_raw_packets(true)
+        // Device keys protocol §3.6: never off.
+        .set_fingerprint_verification(true);
+    tracing::debug!(
+        fingerprint_verification = config.fingerprint_verification(),
+        "str0m config for the peer: the viewer's DTLS certificate is held to its offer's fingerprint"
+    );
+    if let Some(t) = ice_timing {
+        tracing::debug!(?t, "ICE check schedule overridden by the caller");
+        config.set_initial_stun_rto(t.initial_rto);
+        config.set_max_stun_rto(t.max_rto);
+        config.set_max_stun_retransmits(t.retransmits);
+    }
+    config
+}
+
 /// The peer, and its run loop's task.
 async fn spawn_peer_task(
     mut socket: PeerSocket,
@@ -1711,57 +1945,9 @@ async fn spawn_peer_task(
          the retransmission trace only at debug (trace_rtx)"
     );
 
-    // Build the Rtc as an answerer that only speaks H.264. The provider is str0m's RustCrypto one,
-    // but its DTLS layer (dimpl) is built with aws-lc-rs and runs on it, so aws-lc ships too.
-    let mut config = Rtc::builder()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .clear_codecs()
-        .enable_h264(true)
-        // Congestion control. Off by default in str0m (`bwe_config: None`), which meant the
-        // agent sent at a fixed rate no matter what was getting through — the classic way to
-        // turn a merely slow link into an unusable one, because the queue that builds is in
-        // front of the input packets too.
-        //
-        // This sets where the estimate *starts*; the ceiling it climbs towards is set separately
-        // below, and confusing the two is what broke the first version.
-        .enable_bwe(Some(Bitrate::kbps(INITIAL_BITRATE_KBPS)))
-        // What the *receiver* says, once a second. Off by default in str0m, and its absence is why
-        // every diagnosis so far has been half-blind.
-        //
-        // `MediaEgressStats` carries four things this agent has never had and cannot derive:
-        //
-        //   rtt    the path, from RTCP receiver reports. Every "latency" figure in this project so
-        //          far has been the local send queue — one term of a sum whose other terms were
-        //          guessed at 70 ms and never measured.
-        //   loss   whether the link is dropping. A relay that loses 3% and a link that is merely
-        //          narrow look identical from a bandwidth estimate.
-        //   plis   how often the viewer has lost the picture and asked for a keyframe. Each PLI
-        //          costs an IDR, and an IDR is the single largest thing this pipeline emits, so a
-        //          PLI storm is both a symptom and its own cause.
-        //   nacks  retransmission requests, which spend bandwidth the estimate then reports as used.
-        //
-        // One second, matching the pipeline line, so the two can be read side by side.
-        .set_stats_interval(Some(Duration::from_secs(1)))
-        // The sender's only lever on the browser's jitter buffer, and it has to be negotiated
-        // before a single header goes out. `ExtensionMap::standard()` — what str0m starts from —
-        // maps only ids 1, 2, 3, 4, 10, 11, 13, none of which is either of these (`rtp/ext.rs:370`),
-        // so `Writer::playout_delay` was writing values into an extension that was never on the
-        // wire. Enabling them here is what makes [`PLAYOUT_DELAY_MAX_MS`] mean anything.
-        //
-        // `video-content-type` is negotiated alongside it because it is the same lever's other
-        // half — Chrome applies a different jitter and decode policy to screenshare content — but
-        // see [`Inner::log_negotiated_jitter_extensions`]: str0m 0.23.1's frame-level `Writer`
-        // exposes no setter for the value, so we currently negotiate it without writing it.
-        .set_extension(EXT_ID_PLAYOUT_DELAY, Extension::PlayoutDelay)
-        .set_extension(EXT_ID_VIDEO_CONTENT_TYPE, Extension::VideoContentType)
-        .enable_raw_packets(true);
-    if let Some(t) = tuning.ice_timing {
-        tracing::debug!(?t, "ICE check schedule overridden by the caller");
-        config.set_initial_stun_rto(t.initial_rto);
-        config.set_max_stun_rto(t.max_rto);
-        config.set_max_stun_retransmits(t.retransmits);
-    }
-    let mut rtc = config.build(Instant::now());
+    // Build the Rtc as an answerer that only speaks H.264, from the one configuration every agent
+    // peer is built from.
+    let mut rtc = peer_rtc_config(tuning.ice_timing).build(Instant::now());
 
     // The ceiling to aim for. A property of what this agent can produce, not of what the network
     // is currently doing — updating it from the estimate is what made the first version ratchet
@@ -2063,7 +2249,10 @@ async fn spawn_peer_task(
         own_ips,
         srflx_addr,
         link: LinkWatch::default(),
-        ice_grace: tuning.ice_grace,
+        graces: Graces {
+            visible: tuning.ice_grace,
+            hidden: tuning.ice_grace_hidden,
+        },
         unsent_before_connect: 0,
         unsent_no_video: 0,
         kf_request_logged_at: None,
@@ -2291,8 +2480,8 @@ struct PeerLoop {
     srflx_addr: Option<SocketAddr>,
     /// The ICE path and its grace window. See [`LinkWatch`] and [`ICE_GRACE`].
     link: LinkWatch,
-    /// [`ICE_GRACE`], unless a test shortened it.
-    ice_grace: Duration,
+    /// [`ICE_GRACE`] and [`ICE_GRACE_HIDDEN`], unless a test shortened them.
+    graces: Graces,
     /// Frames the encoder sent before the connection was up, and so never written. Expected — the
     /// encode thread starts with the answer — and said once, on `Connected`, as a count.
     unsent_before_connect: u64,
@@ -3206,16 +3395,19 @@ impl PeerLoop {
             if self.follow_viewer(now).await? {
                 continue;
             }
-            // The grace window ran out: the path has been gone for `ice_grace` and neither a
-            // restart nor the path itself came back. The viewer, if it is still there, gave up on
-            // its own deadline before this — see `ICE_GRACE` — so there is nobody left to wait for.
+            // The grace window ran out: the path has been gone for the window's length and neither
+            // a restart nor the path itself came back. The viewer, if it is still there, gave up on
+            // its own deadline before this — see `ICE_GRACE` — or, hidden, outlived the server's
+            // own grace — see `ICE_GRACE_HIDDEN` — so there is nobody left to wait for.
             if self.link.expired(now) {
                 tracing::warn!(
-                    grace_s = self.ice_grace.as_secs_f32(),
+                    window_s = self.link.window().map(|d| d.as_secs_f32()),
+                    page_hidden = self.link.page_hidden(),
                     outage_ms = self.link.outage(now).map(|d| d.as_millis() as u64),
                     restarting = self.link.restarting(),
                     "ICE path lost for the whole grace window and nothing brought it back \
-                     (restarting=true: a restart was applied and found no path); ending the peer"
+                     (restarting=true: a restart was applied and found no path; page_hidden=true: \
+                     the hidden page's window); ending the peer"
                 );
                 self.rtc.disconnect();
                 return Ok(PeerEnd::IceTimeout);
@@ -3480,6 +3672,7 @@ impl PeerLoop {
                         Some(PeerControl::SendCursor(text)) => self.send_cursor_report(text),
                         Some(PeerControl::ViewerHidden(hidden)) => {
                             self.gate_cursor_lane(None, Some(hidden), "viewer_vis");
+                            self.note_viewer_hidden(hidden, Instant::now());
                         }
                         Some(PeerControl::SendReliable(messages)) => {
                             self.queue_reliable(messages, false);
@@ -3635,7 +3828,7 @@ impl PeerLoop {
         if restarted {
             let now = Instant::now();
             let outage_ms = self.link.outage(now).map(|d| d.as_millis() as u64);
-            let replaced = self.link.on_restart(now, self.ice_grace);
+            let replaced = self.link.on_restart(now, self.graces);
             // str0m flushed every pair and remote candidate: what the path book knew about this
             // generation's pairs, and every remote withdrawn from it, is history.
             self.paths.new_generation(Some(after.ufrag.clone()));
@@ -3661,7 +3854,12 @@ impl PeerLoop {
                 offered_candidates,
                 outage_ms,
                 replaced_window_left_ms = replaced.map(|d| d.as_millis() as u64),
-                grace_s = self.ice_grace.as_secs_f32(),
+                window_left_ms = self
+                    .link
+                    .deadline()
+                    .map(|at| at.saturating_duration_since(now).as_millis() as u64),
+                window_s = self.link.window().map(|d| d.as_secs_f32()),
+                page_hidden = self.link.page_hidden(),
                 dtls_connected = self.connected,
                 dtls_stalled_ms = self
                     .dtls
@@ -3670,7 +3868,10 @@ impl PeerLoop {
                 dtls_out = self.paths.dtls_summary(Dir::Out, self.start),
                 dtls_in = self.paths.dtls_summary(Dir::In, self.start),
                 "ICE restart applied: new credentials, pairs flushed, media and data channels \
-                 carry on; the restart has grace_s to find a path"
+                 carry on; the restart has window_left_ms to find a path (page_hidden=false: a \
+                 fresh visible grace; page_hidden=true: the open window kept from when it opened \
+                 — the old window's left, replaced_window_left_ms — pushed out to the visible \
+                 grace from now if that is later, or a visible grace if none was open)"
             );
         } else {
             tracing::info!(
@@ -3968,6 +4169,40 @@ impl PeerLoop {
         });
     }
 
+    /// The viewer's page hidden or visible again, for the grace window: see [`ICE_GRACE_HIDDEN`].
+    fn note_viewer_hidden(&mut self, hidden: bool, now: Instant) {
+        let left = |at: Instant| at.saturating_duration_since(now).as_millis() as u64;
+        let outage_ms = self.link.outage(now).map(|d| d.as_millis() as u64);
+        match self.link.on_viewer_hidden(hidden, now, self.graces) {
+            HiddenNote::Same => tracing::debug!(
+                hidden,
+                "grace window: the viewer's page was already so; nothing to change"
+            ),
+            HiddenNote::NoWindow => tracing::debug!(
+                hidden,
+                grace_s = self.graces.of(hidden).as_secs_f32(),
+                "grace window: none open; the next lost path or restart gets grace_s"
+            ),
+            HiddenNote::Moved { from, to } => tracing::debug!(
+                hidden,
+                old_left_ms = left(from),
+                new_left_ms = left(to),
+                outage_ms,
+                window_s = self.link.window().map(|d| d.as_secs_f32()),
+                "grace window moved: hidden=true extends it to the hidden page's length from \
+                 when it opened; hidden=false shrinks it to the visible grace from now"
+            ),
+            HiddenNote::Kept { deadline } => tracing::debug!(
+                hidden,
+                left_ms = left(deadline),
+                outage_ms,
+                "grace window kept: hidden=true and it already ends past the hidden length from \
+                 its opening (a restart late in it pushed it out), or hidden=false and it ends \
+                 sooner than the visible grace from now"
+            ),
+        }
+    }
+
     /// What an ICE state change means for the session: the grace window, held input, a keyframe.
     async fn on_ice_state(&mut self, state: IceConnectionState) {
         let now = Instant::now();
@@ -3998,13 +4233,15 @@ impl PeerLoop {
             );
             self.publish_path(now, "ice_connected");
         }
-        match self.link.on_state(state, now, self.ice_grace) {
+        match self.link.on_state(state, now, self.graces) {
             LinkNote::Lost => {
                 tracing::warn!(
-                    grace_s = self.ice_grace.as_secs_f32(),
+                    grace_s = self.graces.of(self.link.page_hidden()).as_secs_f32(),
+                    page_hidden = self.link.page_hidden(),
                     dtls_connected = self.connected,
                     "ICE lost the path: the session stays up for grace_s for the viewer to restart \
-                     ICE; media keeps going to the last path meanwhile; releasing held input"
+                     ICE (the hidden page's window when page_hidden=true); media keeps going to the \
+                     last path meanwhile; releasing held input"
                 );
                 // The viewer is out of reach: the `cursor` lane may hold from here.
                 self.gate_cursor_lane(Some(true), None, "ice_lost");
@@ -5235,7 +5472,14 @@ impl PeerLoop {
                 // either way the event still has to be applied rather than dropped,
                 // because dropping it is what leaves a button held.
                 match label.as_str() {
-                    CHANNEL_INPUT => self.input_channel = Some(id),
+                    CHANNEL_INPUT => {
+                        self.input_channel = Some(id);
+                        if self.events.send(PeerEvent::InputChannelOpen).await.is_err() {
+                            tracing::debug!(
+                                "the orchestrator is gone; input channel open not reported"
+                            );
+                        }
+                    }
                     CHANNEL_CURSOR => {
                         self.cursor_channel = Some(id);
                         self.reset_cursor_lane("cursor channel opened");
@@ -6883,10 +7127,11 @@ mod tests {
         reanchor_bwe_probing, relay_transport, remember_candidate, remote_path_kinds,
         same_mdns_candidate, sdp_candidates, sdp_ice_ufrag, sdp_summary, short_kind,
         spawn_host_peer, spawn_peer_on, srflx_candidate, srflx_need, with_mdns_address, Breaker,
-        CandidateMix, ChainBreak, EgressMeter, Gate, IceTiming, KeyframeAsk, LinkNote, LinkWatch,
-        MdnsResolver, MediaSample, PeerControl, PeerEnd, PeerEvent, PeerPath, PeerSignal, Reanchor,
-        RefChain, RemoteCandidate, RouteNote, Shed, SrflxNeed, Tuning, ICE_GRACE, KEYFRAME_RETRY,
-        PATH_KIND_HOST, PATH_KIND_REFLEXIVE, PATH_KIND_RELAY, QUEUE_HARD_LIMIT_MS, QUEUE_RESUME_MS,
+        CandidateMix, ChainBreak, EgressMeter, Gate, Graces, HiddenNote, IceTiming, KeyframeAsk,
+        LinkNote, LinkWatch, MdnsResolver, MediaSample, PeerControl, PeerEnd, PeerEvent, PeerPath,
+        PeerSignal, Reanchor, RefChain, RemoteCandidate, RouteNote, Shed, SrflxNeed, Tuning,
+        ICE_GRACE, ICE_GRACE_HIDDEN, KEYFRAME_RETRY, PATH_KIND_HOST, PATH_KIND_REFLEXIVE,
+        PATH_KIND_RELAY, QUEUE_HARD_LIMIT_MS, QUEUE_RESUME_MS,
     };
 
     /// `RevokeQueued` takes back the PC's clipboard text still queued, and nothing else: the
@@ -7684,36 +7929,37 @@ mod tests {
     fn a_lost_path_opens_a_window_that_a_second_report_does_not_extend() {
         let t0 = Instant::now();
         let grace = S(20);
+        let g = graces(grace);
         let mut w = LinkWatch::default();
         // The first connection is not a restore: nothing was lost.
         assert_eq!(
-            w.on_state(IceConnectionState::Checking, t0, grace),
+            w.on_state(IceConnectionState::Checking, t0, g),
             LinkNote::Unchanged
         );
         assert_eq!(
-            w.on_state(IceConnectionState::Connected, t0, grace),
+            w.on_state(IceConnectionState::Connected, t0, g),
             LinkNote::Unchanged
         );
         assert_eq!(
-            w.on_state(IceConnectionState::Completed, t0, grace),
+            w.on_state(IceConnectionState::Completed, t0, g),
             LinkNote::Unchanged
         );
         assert!(!w.expired(t0 + S(3600)), "a healthy link has no deadline");
 
         let lost = t0 + S(60);
         assert_eq!(
-            w.on_state(IceConnectionState::Disconnected, lost, grace),
+            w.on_state(IceConnectionState::Disconnected, lost, g),
             LinkNote::Lost
         );
         assert_eq!(w.deadline(), Some(lost + grace));
         // A trickled candidate briefly gives str0m something to check, and that fails too. The
         // path has been gone since the first report, and the window says so.
         assert_eq!(
-            w.on_state(IceConnectionState::Checking, lost + S(5), grace),
+            w.on_state(IceConnectionState::Checking, lost + S(5), g),
             LinkNote::Unchanged
         );
         assert_eq!(
-            w.on_state(IceConnectionState::Disconnected, lost + S(8), grace),
+            w.on_state(IceConnectionState::Disconnected, lost + S(8), g),
             LinkNote::StillLost { left: S(12) }
         );
         assert!(!w.expired(lost + grace - Duration::from_millis(1)));
@@ -7724,13 +7970,14 @@ mod tests {
     fn a_restart_replaces_the_window_and_the_restored_path_closes_it() {
         let t0 = Instant::now();
         let grace = S(20);
+        let g = graces(grace);
         let mut w = LinkWatch::default();
-        w.on_state(IceConnectionState::Connected, t0, grace);
-        w.on_state(IceConnectionState::Disconnected, t0 + S(1), grace);
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_state(IceConnectionState::Disconnected, t0 + S(1), g);
 
         // The viewer's restart lands ten seconds into the window: the rest of that window goes,
         // and the restart gets a whole one of its own.
-        assert_eq!(w.on_restart(t0 + S(11), grace), Some(S(10)));
+        assert_eq!(w.on_restart(t0 + S(11), g), Some(S(10)));
         assert!(
             !w.expired(t0 + S(1) + grace),
             "the loss's window no longer applies"
@@ -7738,11 +7985,11 @@ mod tests {
         assert_eq!(w.deadline(), Some(t0 + S(11) + grace));
         // The restart's own checks failing does not buy it more time.
         assert_eq!(
-            w.on_state(IceConnectionState::Disconnected, t0 + S(15), grace),
+            w.on_state(IceConnectionState::Disconnected, t0 + S(15), g),
             LinkNote::StillLost { left: S(16) }
         );
         assert_eq!(
-            w.on_state(IceConnectionState::Connected, t0 + S(16), grace),
+            w.on_state(IceConnectionState::Connected, t0 + S(16), g),
             LinkNote::Restored {
                 outage: S(15),
                 restarted: true
@@ -7753,11 +8000,11 @@ mod tests {
 
         // A later loss is a new outage, and recovering from it without a restart says so.
         assert_eq!(
-            w.on_state(IceConnectionState::Disconnected, t0 + S(100), grace),
+            w.on_state(IceConnectionState::Disconnected, t0 + S(100), g),
             LinkNote::Lost
         );
         assert_eq!(
-            w.on_state(IceConnectionState::Completed, t0 + S(103), grace),
+            w.on_state(IceConnectionState::Completed, t0 + S(103), g),
             LinkNote::Restored {
                 outage: S(3),
                 restarted: false
@@ -7772,15 +8019,405 @@ mod tests {
         // so only this window ends it.
         let t0 = Instant::now();
         let grace = S(20);
+        let g = graces(grace);
         let mut w = LinkWatch::default();
-        w.on_state(IceConnectionState::Connected, t0, grace);
-        assert_eq!(w.on_restart(t0 + S(5), grace), None);
+        w.on_state(IceConnectionState::Connected, t0, g);
+        assert_eq!(w.on_restart(t0 + S(5), g), None);
         assert_eq!(
-            w.on_state(IceConnectionState::Checking, t0 + S(5), grace),
+            w.on_state(IceConnectionState::Checking, t0 + S(5), g),
             LinkNote::Unchanged
         );
         assert!(!w.expired(t0 + S(5) + grace - Duration::from_millis(1)));
         assert!(w.expired(t0 + S(5) + grace));
+    }
+
+    /// The window's lengths for these rules: twenty seconds visible, eleven minutes hidden.
+    fn graces(visible: Duration) -> Graces {
+        Graces {
+            visible,
+            hidden: ICE_GRACE_HIDDEN,
+        }
+    }
+
+    #[test]
+    fn the_hidden_grace_outlasts_the_servers_ten_minutes() {
+        // The server's `VIEWER_HIDDEN_GRACE_MS` is what ends a hidden session; the agent's window
+        // is the backstop, so it must not run out first.
+        assert!(ICE_GRACE_HIDDEN >= Duration::from_secs(10 * 60) + S(60));
+        assert!(ICE_GRACE_HIDDEN > ICE_GRACE);
+    }
+
+    #[test]
+    fn a_hidden_page_keeps_a_lost_path_past_the_grace_until_the_hidden_one() {
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        // Told before the page froze: no window yet, the next one is the hidden page's.
+        assert_eq!(w.on_viewer_hidden(true, t0 + S(1), g), HiddenNote::NoWindow);
+        assert_eq!(
+            w.on_viewer_hidden(true, t0 + S(2), g),
+            HiddenNote::Same,
+            "said again on a later tick: nothing"
+        );
+
+        let lost = t0 + S(240);
+        assert_eq!(
+            w.on_state(IceConnectionState::Disconnected, lost, g),
+            LinkNote::Lost
+        );
+        assert_eq!(w.deadline(), Some(lost + ICE_GRACE_HIDDEN));
+        assert_eq!(w.window(), Some(ICE_GRACE_HIDDEN));
+        assert!(!w.expired(lost + S(20)), "kept past the visible grace");
+        assert!(!w.expired(lost + ICE_GRACE_HIDDEN - Duration::from_millis(1)));
+        assert!(
+            w.expired(lost + ICE_GRACE_HIDDEN),
+            "and ended at the hidden one"
+        );
+    }
+
+    #[test]
+    fn a_restart_while_hidden_keeps_the_window_and_gets_at_least_the_grace() {
+        // The page wakes nine minutes in and offers a restart before its `vis hidden: false` can
+        // reach us (the data channel rides the lost path): still hidden here, so the restart keeps
+        // the loss's window — two minutes left, more than the visible grace — and its path closes
+        // it.
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        let lost = t0 + S(30);
+        w.on_state(IceConnectionState::Disconnected, lost, g);
+        let woke = lost + S(9 * 60);
+        assert!(!w.expired(woke));
+        assert_eq!(w.on_restart(woke, g), Some(S(120)));
+        assert_eq!(
+            w.deadline(),
+            Some(lost + ICE_GRACE_HIDDEN),
+            "the loss's bound stands: no fresh eleven minutes"
+        );
+        assert_eq!(
+            w.window(),
+            Some(ICE_GRACE_HIDDEN),
+            "and so does its opening"
+        );
+        assert_eq!(
+            w.on_state(IceConnectionState::Connected, woke + S(2), g),
+            LinkNote::Restored {
+                outage: S(9 * 60 + 2),
+                restarted: true
+            }
+        );
+        assert_eq!(w.deadline(), None);
+        // Then its `vis hidden: false`: no window to touch.
+        assert_eq!(
+            w.on_viewer_hidden(false, woke + S(3), g),
+            HiddenNote::NoWindow
+        );
+    }
+
+    #[test]
+    fn a_hidden_restart_that_never_finds_a_path_ends_at_the_losss_bound() {
+        // The awake viewer whose `vis hidden: false` never reached us, and whose restart never
+        // finds a path: the peer goes at the loss's bound, not eleven minutes after the restart.
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        let lost = t0 + S(30);
+        w.on_state(IceConnectionState::Disconnected, lost, g);
+        let woke = lost + S(5 * 60);
+        w.on_restart(woke, g);
+        assert_eq!(
+            w.on_state(IceConnectionState::Checking, woke, g),
+            LinkNote::Unchanged
+        );
+        assert!(!w.expired(lost + ICE_GRACE_HIDDEN - Duration::from_millis(1)));
+        assert!(w.expired(lost + ICE_GRACE_HIDDEN));
+
+        // A restart late in the window still gets the visible grace from itself.
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        w.on_state(IceConnectionState::Disconnected, lost, g);
+        let late = lost + ICE_GRACE_HIDDEN - S(5);
+        assert_eq!(w.on_restart(late, g), Some(S(5)));
+        assert_eq!(w.deadline(), Some(late + S(20)));
+        assert!(!w.expired(late + S(20) - Duration::from_millis(1)));
+        assert!(w.expired(late + S(20)));
+        // The page's word coming after that: hidden again is the same; visible keeps the
+        // restart's twenty seconds, already no later than twenty from now.
+        assert_eq!(w.on_viewer_hidden(true, late + S(1), g), HiddenNote::Same);
+        assert_eq!(
+            w.on_viewer_hidden(false, late + S(1), g),
+            HiddenNote::Kept {
+                deadline: late + S(20)
+            }
+        );
+
+        // Hidden with no window open (the path still up as far as str0m knows): a visible grace
+        // from the restart, which is also the window's opening.
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        assert_eq!(w.on_restart(t0 + S(60), g), None);
+        assert_eq!(w.deadline(), Some(t0 + S(80)));
+        assert_eq!(w.window(), Some(S(20)));
+    }
+
+    #[test]
+    fn a_visible_restart_then_hidden_extends_from_the_restart() {
+        // The restart opens a visible window at T; the page hides five seconds later, before its
+        // checks finish: the hidden length from the window's opening, the restart.
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        let restart = t0 + S(10);
+        assert_eq!(w.on_restart(restart, g), None);
+        assert_eq!(w.deadline(), Some(restart + S(20)));
+        assert_eq!(
+            w.on_viewer_hidden(true, restart + S(5), g),
+            HiddenNote::Moved {
+                from: restart + S(20),
+                to: restart + ICE_GRACE_HIDDEN
+            }
+        );
+        assert_eq!(w.window(), Some(ICE_GRACE_HIDDEN));
+        assert!(!w.expired(restart + ICE_GRACE_HIDDEN - Duration::from_millis(1)));
+        assert!(w.expired(restart + ICE_GRACE_HIDDEN));
+    }
+
+    #[test]
+    fn hidden_then_visible_gives_the_normal_grace_from_then() {
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        let lost = t0 + S(10);
+        w.on_state(IceConnectionState::Disconnected, lost, g);
+        assert_eq!(w.deadline(), Some(lost + ICE_GRACE_HIDDEN));
+
+        // Visible five minutes into the hidden window: twenty seconds from then.
+        let shown = lost + S(300);
+        assert_eq!(
+            w.on_viewer_hidden(false, shown, g),
+            HiddenNote::Moved {
+                from: lost + ICE_GRACE_HIDDEN,
+                to: shown + S(20)
+            }
+        );
+        assert!(!w.expired(shown + S(20) - Duration::from_millis(1)));
+        assert!(w.expired(shown + S(20)));
+
+        // Lost, hidden and shown again within seconds: twenty seconds from the showing.
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_state(IceConnectionState::Disconnected, t0 + S(1), g);
+        assert_eq!(w.deadline(), Some(t0 + S(21)));
+        w.on_viewer_hidden(true, t0 + S(2), g);
+        assert_eq!(
+            w.on_viewer_hidden(false, t0 + S(3), g),
+            HiddenNote::Moved {
+                from: t0 + S(1) + ICE_GRACE_HIDDEN,
+                to: t0 + S(23)
+            }
+        );
+        // And again: each showing counts from itself.
+        w.on_viewer_hidden(true, t0 + S(4), g);
+        assert_eq!(
+            w.on_viewer_hidden(false, t0 + S(4), g),
+            HiddenNote::Moved {
+                from: t0 + S(1) + ICE_GRACE_HIDDEN,
+                to: t0 + S(24)
+            }
+        );
+        // Shown while the window already ends sooner than that: it stands.
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_state(IceConnectionState::Disconnected, t0 + S(1), g);
+        w.page_hidden = true;
+        assert_eq!(
+            w.on_viewer_hidden(false, t0 + S(5), g),
+            HiddenNote::Kept {
+                deadline: t0 + S(21)
+            },
+            "already sooner than twenty seconds from now"
+        );
+    }
+
+    #[test]
+    fn hidden_toggles_and_repeated_losses_never_push_the_deadline_past_the_hidden_bound() {
+        // A page flapping hidden and visible while str0m keeps reporting `Disconnected`, with no
+        // restart: however the words and reports interleave, the deadline never ends later than
+        // the hidden length from the window's opening, and the opening never moves.
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        let lost = t0 + S(3);
+
+        /// One step of the sequence, at this many seconds after `t0`.
+        #[derive(Clone, Copy, Debug)]
+        enum Step {
+            Hidden(bool),
+            Lost,
+        }
+        use Step::{Hidden, Lost};
+        let steps = [
+            (1, Hidden(true)),
+            (2, Hidden(false)),
+            (3, Lost),
+            (4, Hidden(true)),
+            (5, Lost),
+            (6, Hidden(true)),
+            (30, Hidden(false)),
+            (31, Lost),
+            (32, Hidden(true)),
+            (120, Lost),
+            (121, Hidden(false)),
+            (122, Hidden(true)),
+            (300, Lost),
+            (301, Hidden(false)),
+            (302, Lost),
+            (303, Hidden(true)),
+            (600, Hidden(false)),
+            (601, Hidden(true)),
+            (650, Lost),
+            (660, Hidden(false)),
+            (661, Hidden(true)),
+            (700, Lost),
+        ];
+        for (at, step) in steps {
+            let now = t0 + S(at);
+            match step {
+                Hidden(hidden) => {
+                    w.on_viewer_hidden(hidden, now, g);
+                }
+                Lost => {
+                    let note = w.on_state(IceConnectionState::Disconnected, now, g);
+                    if now > lost {
+                        assert!(
+                            matches!(note, LinkNote::StillLost { .. }),
+                            "at {at}s: a second report opens nothing: {note:?}"
+                        );
+                    }
+                }
+            }
+            if now < lost {
+                assert_eq!(w.deadline(), None, "at {at}s {step:?}: no window yet");
+                continue;
+            }
+            assert_eq!(
+                w.window_since,
+                Some(lost),
+                "at {at}s {step:?}: the window's opening moved"
+            );
+            let deadline = w.deadline().expect("a window is open");
+            assert!(
+                deadline <= lost + ICE_GRACE_HIDDEN,
+                "at {at}s {step:?}: the deadline {:?} past the hidden bound",
+                deadline - lost
+            );
+            if !w.page_hidden() {
+                assert!(
+                    deadline <= now + S(20),
+                    "at {at}s {step:?}: visible yet more than the grace left"
+                );
+            }
+        }
+        // And it does run out by the bound, with nothing else said.
+        assert!(w.expired(lost + ICE_GRACE_HIDDEN));
+    }
+
+    #[test]
+    fn hidden_while_already_lost_extends_from_the_loss() {
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        let lost = t0 + S(100);
+        w.on_state(IceConnectionState::Disconnected, lost, g);
+        assert_eq!(w.deadline(), Some(lost + S(20)));
+
+        // The word comes fifteen seconds into the visible window (the control task's tick, or a
+        // page that hid as the path went): the hidden length, counted from the loss — not from now.
+        assert_eq!(
+            w.on_viewer_hidden(true, lost + S(15), g),
+            HiddenNote::Moved {
+                from: lost + S(20),
+                to: lost + ICE_GRACE_HIDDEN
+            }
+        );
+        assert_eq!(w.window(), Some(ICE_GRACE_HIDDEN));
+        // A second report of the loss does not extend it further.
+        assert_eq!(
+            w.on_state(IceConnectionState::Disconnected, lost + S(60), g),
+            LinkNote::StillLost {
+                left: ICE_GRACE_HIDDEN - S(60)
+            }
+        );
+        assert!(!w.expired(lost + ICE_GRACE_HIDDEN - Duration::from_millis(1)));
+        assert!(w.expired(lost + ICE_GRACE_HIDDEN));
+
+        // A window that already ends later than the hidden length from its opening (the clock
+        // forced here): being told never ends it sooner.
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_state(IceConnectionState::Disconnected, t0 + S(1), g);
+        w.on_restart(
+            t0 + S(2),
+            Graces {
+                visible: S(20),
+                hidden: S(20),
+            },
+        );
+        w.window_since = Some(t0 + S(2) - ICE_GRACE_HIDDEN);
+        assert_eq!(
+            w.on_viewer_hidden(true, t0 + S(3), g),
+            HiddenNote::Kept {
+                deadline: t0 + S(22)
+            }
+        );
+    }
+
+    #[test]
+    fn the_path_back_clears_the_window_and_the_next_loss_takes_the_pages_length() {
+        let t0 = Instant::now();
+        let g = graces(S(20));
+        let mut w = LinkWatch::default();
+        w.on_state(IceConnectionState::Connected, t0, g);
+        w.on_viewer_hidden(true, t0, g);
+        w.on_state(IceConnectionState::Disconnected, t0 + S(10), g);
+        assert_eq!(
+            w.on_state(IceConnectionState::Connected, t0 + S(70), g),
+            LinkNote::Restored {
+                outage: S(60),
+                restarted: false
+            }
+        );
+        assert_eq!(w.deadline(), None);
+        assert_eq!(w.window(), None);
+        assert!(!w.expired(t0 + S(3600)));
+        assert!(
+            w.page_hidden(),
+            "the page's state is the control task's, not the window's"
+        );
+
+        // Still hidden: the next loss gets the hidden length.
+        w.on_state(IceConnectionState::Disconnected, t0 + S(100), g);
+        assert_eq!(w.deadline(), Some(t0 + S(100) + ICE_GRACE_HIDDEN));
+        w.on_state(IceConnectionState::Completed, t0 + S(101), g);
+        // Visible with no window open: the next loss gets the visible one.
+        assert_eq!(
+            w.on_viewer_hidden(false, t0 + S(102), g),
+            HiddenNote::NoWindow
+        );
+        w.on_state(IceConnectionState::Disconnected, t0 + S(200), g);
+        assert_eq!(w.deadline(), Some(t0 + S(220)));
     }
 
     #[test]
@@ -8267,6 +8904,8 @@ mod tests {
     fn loopback(ice_grace: Duration, fast_checks: bool) -> Tuning {
         Tuning {
             ice_grace,
+            // The same as the visible one unless a test is about a hidden page.
+            ice_grace_hidden: ice_grace,
             host_ips: Some(vec![Ipv4Addr::LOCALHOST]),
             // Four unanswered checks 100..300 ms apart, then 300 ms: a dead path is noticed in
             // about 1.3 s instead of 20.
@@ -9865,6 +10504,237 @@ mod tests {
             ),
             "{seen:?}"
         );
+    }
+
+    /// A viewer whose page said `vis hidden` and then went to sleep: the control task's
+    /// `ViewerHidden(true)`, then silence.
+    async fn connected_then_hidden(grace: Duration, hidden: Duration) -> (TestViewer, super::Peer) {
+        let tuning = Tuning {
+            ice_grace_hidden: hidden,
+            ..loopback(grace, true)
+        };
+        let (viewer, mut peer, _) = connected(true, vec![], tuning).await;
+        peer.control_tx
+            .send(PeerControl::ViewerHidden(true))
+            .await
+            .expect("control");
+        let seen = silent_until(&mut peer.events, S(10), |e| {
+            matches!(e, PeerEvent::LinkLost | PeerEvent::Disconnected { .. })
+        })
+        .await;
+        assert!(matches!(seen.last(), Some(PeerEvent::LinkLost)), "{seen:?}");
+        (viewer, peer)
+    }
+
+    #[tokio::test]
+    async fn a_hidden_page_keeps_a_lost_path_past_the_grace_and_ends_at_the_hidden_one() {
+        let log = CapturedLog::default();
+        let _log = log.install();
+        let grace = Duration::from_millis(800);
+        let hidden = Duration::from_millis(2_500);
+        let (_viewer, mut peer) = connected_then_hidden(grace, hidden).await;
+        let lost_at = Instant::now();
+
+        let seen = silent_until(&mut peer.events, hidden + S(5), |e| {
+            matches!(e, PeerEvent::Disconnected { .. })
+        })
+        .await;
+        let waited = lost_at.elapsed();
+        assert!(
+            matches!(
+                seen.last(),
+                Some(PeerEvent::Disconnected {
+                    reason: PeerEnd::IceTimeout
+                })
+            ),
+            "{seen:?}"
+        );
+        // Well past the visible window, and not before the hidden one ran out (less the time the
+        // loss report took to reach us); promptly once it had.
+        assert!(
+            waited + Duration::from_millis(100) >= hidden,
+            "ended {waited:?} after the loss, inside a {hidden:?} hidden window"
+        );
+        assert!(waited < hidden + S(2), "ended only after {waited:?}");
+
+        let text = log.text();
+        let lost = line_with(&text, "ICE lost the path");
+        assert!(lost.contains("page_hidden=true"), "{lost}");
+        let ended = line_with(&text, "ICE path lost for the whole grace window");
+        assert!(ended.contains("page_hidden=true"), "{ended}");
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_a_hidden_spell_past_the_grace_brings_the_picture_back() {
+        let log = CapturedLog::default();
+        let _log = log.install();
+        let grace = Duration::from_millis(800);
+        let hidden = S(8);
+        let (mut viewer, mut peer) = connected_then_hidden(grace, hidden).await;
+
+        // Asleep well past the visible window: the peer is still there.
+        tokio::time::sleep(grace + Duration::from_millis(1_500)).await;
+        let mut seen = Vec::new();
+        while let Ok(e) = peer.events.try_recv() {
+            seen.push(e);
+        }
+        assert!(!ended(&seen), "kept while hidden: {seen:?}");
+
+        // Awake: the page restarts ICE before its `vis hidden: false` can reach us.
+        let (restart, pending) = viewer.restart_offer();
+        signal(&peer, PeerSignal::Renegotiate(restart));
+        let seen = pump_until(&mut viewer, &mut peer.events, S(3), |e| {
+            matches!(e, PeerEvent::Answer(_))
+        })
+        .await;
+        viewer.accept(pending, &answer_in(&seen));
+        let seen = pump_until(&mut viewer, &mut peer.events, S(5), |e| {
+            matches!(e, PeerEvent::KeyframeRequest(_))
+        })
+        .await;
+        assert!(!ended(&seen), "{seen:?}");
+        // Then the `vis hidden: false`, on the path that is back.
+        peer.control_tx
+            .send(PeerControl::ViewerHidden(false))
+            .await
+            .expect("control");
+        let seen = pump_for(
+            &mut viewer,
+            &mut peer.events,
+            grace + Duration::from_millis(700),
+        )
+        .await;
+        assert!(
+            !ended(&seen),
+            "the restored path closed the window: {seen:?}"
+        );
+        assert!(viewer.rtc.is_connected());
+
+        let text = log.text();
+        let restart = line_with(&text, "ICE restart applied");
+        assert!(restart.contains("page_hidden=true"), "{restart}");
+        // The loss's window kept, not a fresh hidden one: less than its length left at the
+        // restart, and at least the visible grace.
+        let left = field_u64(restart, "window_left_ms");
+        assert!(
+            left < hidden.as_millis() as u64 && left >= grace.as_millis() as u64,
+            "window_left_ms={left}: {restart}"
+        );
+        // The `vis hidden: false` itself handled, with the path back: no window to shrink. (The
+        // first `ViewerHidden(true)` said "none open" too, so the line must be the `false` one.)
+        assert!(
+            text.lines()
+                .any(|l| l.contains("grace window: none open")
+                    && l.contains(" hidden=false grace_s=")),
+            "the page shown with the path back:\n{text}"
+        );
+        peer.closer.close();
+    }
+
+    #[tokio::test]
+    async fn visible_again_while_lost_ends_the_peer_at_the_visible_grace_from_then() {
+        // The page shown again while the path is still gone, and no restart comes: the hidden
+        // window shrinks to the visible grace from the showing, and the loop wakes for it.
+        let log = CapturedLog::default();
+        let _log = log.install();
+        let grace = Duration::from_millis(800);
+        let hidden = S(8);
+        let (_viewer, mut peer) = connected_then_hidden(grace, hidden).await;
+
+        // Past the visible window: still kept, being hidden.
+        tokio::time::sleep(grace + Duration::from_millis(700)).await;
+        let mut seen = Vec::new();
+        while let Ok(e) = peer.events.try_recv() {
+            seen.push(e);
+        }
+        assert!(!ended(&seen), "kept while hidden: {seen:?}");
+
+        let shown = Instant::now();
+        peer.control_tx
+            .send(PeerControl::ViewerHidden(false))
+            .await
+            .expect("control");
+        let seen = silent_until(&mut peer.events, S(5), |e| {
+            matches!(e, PeerEvent::Disconnected { .. })
+        })
+        .await;
+        let waited = shown.elapsed();
+        assert!(
+            matches!(
+                seen.last(),
+                Some(PeerEvent::Disconnected {
+                    reason: PeerEnd::IceTimeout
+                })
+            ),
+            "{seen:?}"
+        );
+        assert!(
+            waited + Duration::from_millis(100) >= grace,
+            "ended {waited:?} after the showing, inside the {grace:?} visible grace"
+        );
+        assert!(
+            waited < grace + Duration::from_millis(1_500),
+            "ended only {waited:?} after the showing: the hidden window was not shrunk"
+        );
+
+        let text = log.text();
+        let moved = line_with(&text, "grace window moved");
+        assert!(moved.contains(" hidden=false old_left_ms="), "{moved}");
+        let ended = line_with(&text, "ICE path lost for the whole grace window");
+        assert!(ended.contains("page_hidden=false"), "{ended}");
+    }
+
+    #[tokio::test]
+    async fn a_close_while_hidden_and_lost_ends_the_peer_at_once_not_at_the_hidden_window() {
+        // The hidden window only holds back the ICE timeout. A close from the orchestrator (the
+        // server ended the session, a revoke, a stop) must end the peer at once even while the
+        // hidden page's eleven minutes are still running.
+        let grace = Duration::from_millis(800);
+        let hidden = S(60);
+        let (_viewer, mut peer) = connected_then_hidden(grace, hidden).await;
+
+        // Past the visible window, so only the hidden one is keeping the peer.
+        tokio::time::sleep(grace + Duration::from_millis(500)).await;
+        let mut seen = Vec::new();
+        while let Ok(e) = peer.events.try_recv() {
+            seen.push(e);
+        }
+        assert!(!ended(&seen), "kept while hidden: {seen:?}");
+
+        let asked = Instant::now();
+        assert!(peer.closer.close(), "the peer is running to hear it");
+        let seen = silent_until(&mut peer.events, S(5), |e| {
+            matches!(e, PeerEvent::Disconnected { .. })
+        })
+        .await;
+        let waited = asked.elapsed();
+        assert!(
+            matches!(
+                seen.last(),
+                Some(PeerEvent::Disconnected {
+                    reason: PeerEnd::Closed
+                })
+            ),
+            "{seen:?}"
+        );
+        assert!(
+            waited < S(1),
+            "the close took {waited:?}: held back by the {hidden:?} hidden window"
+        );
+    }
+
+    /// The number a log line gives for `name=`.
+    fn field_u64(line: &str, name: &str) -> u64 {
+        let key = format!(" {name}=");
+        let at = line
+            .find(&key)
+            .unwrap_or_else(|| panic!("no {key} in: {line}"))
+            + key.len();
+        line[at..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{key} is not a number in: {line}"))
     }
 
     #[tokio::test]

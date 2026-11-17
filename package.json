@@ -14,6 +14,7 @@
     "portable": "bun scripts/portable.ts",
     "release:build": "bun scripts/official-build.ts",
     "test:scripts": "bun test ./scripts/",
+    "test:ui": "bun test ./app/ui/tests",
     "typecheck": "bun run --filter afklink-agent-ui typecheck && tsc -p scripts",
     "lint": "biome check .",
     "lint:fix": "biome check . --write",

@@ -1,0 +1,16 @@
+{
+  "type": "pair_request",
+  "request_id": "7c4b1e90-2a3d-4f51-9b8e-6d5c4a3b2f10",
+  "telegram_user_id": 24680,
+  "username": "friend",
+  "first_name": "Друг",
+  "expires_at": 1789600120000,
+  "has_owner": true,
+  "viewer_key": {
+    "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ",
+    "kind": "telegram",
+    "platform": "android",
+    "rpk": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMscOsCSvm1jhI0AeyzxZYDKgB1RuO22VN2XNiFkRfh-yLUkgLRCbTPb49wqM236K8BdWIR-i_g7g1AsaHeallA",
+    "sig": "XnT7JOapScGCAddTFV7ApQRB5yHfojn8y3oBM6ci3dvRnjekyZkca88H1WkZS5AtQddm8z-Ss6JU7DDsdOY-Fw"
+  }
+}

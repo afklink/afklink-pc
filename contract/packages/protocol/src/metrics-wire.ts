@@ -45,6 +45,7 @@ import {
   VIEWER_BUILD_PATTERN,
 } from "./metrics";
 import { AGENT_BUILD_CHANNELS } from "./start-failure";
+import { KEY_MODES } from "./viewer-keys";
 
 /* --- primitives ---------------------------------------------------------------------------- */
 
@@ -171,6 +172,11 @@ export type QualityProfileSource = (typeof QUALITY_PROFILE_SOURCES)[number];
 /** A rung's encoded height as a key of `rung_s`: `1080`, `720`, `540`. */
 const RUNG_KEY_PATTERN = /^\d{2,5}$/;
 
+/** A device-key code in the summary (`END_DETAIL_CODE_PATTERN`): checked against its list by the server. */
+const keyCode = z
+  .string()
+  .regex(END_DETAIL_CODE_PATTERN, "expected a short code: a-z, 0-9, _ and :");
+
 /**
  * The agent's summary of a session (`session_stats.stats.summary`), cumulative like the rest of the
  * report: every report carries the whole session so far, the final one the whole session.
@@ -227,6 +233,19 @@ export const agentSessionSummarySchema = z.object({
   quality_profile: z.string().max(48).optional(),
   /** Where it came from: the server's `quality_profile`, or the agent's compiled fallback. */
   quality_profile_source: z.enum(QUALITY_PROFILE_SOURCES).optional(),
+  /**
+   * Viewer device keys (docs/design/viewer-device-keys-protocol.md §11.1): the session's verdict —
+   * `signed`, `unsigned` (no `proof`) or a reason of §11 (`KEY_VERDICTS`) — its `ended_detail`
+   * (`SESSION_END_DETAILS`), the base that added the key in this session (`KEY_ADMITS`), and the PC's
+   * mode (`KEY_MODES`). The first three are patterned codes, not their enums, like `session_end.detail`:
+   * a value a newer agent knows must cost the field, never the final report; the server keeps the ones
+   * on their lists. `key_mode` is an enum, like `quality_profile_source`: the server ships before the
+   * agent (§12), so it knows a mode before any agent sends it. Absent from an agent older than device keys.
+   */
+  key_verdict: keyCode.optional(),
+  key_detail: keyCode.optional(),
+  key_admit: keyCode.optional(),
+  key_mode: z.enum(KEY_MODES).optional(),
 });
 export type AgentSessionSummary = z.infer<typeof agentSessionSummarySchema>;
 
@@ -300,6 +319,34 @@ export const sessionEndDetailSchema = z.object({
   relay_transport: endDetailCode.optional(),
 });
 export type SessionEndDetail = z.infer<typeof sessionEndDetailSchema>;
+
+/**
+ * The agent's `session_end.detail`: `sessionEndDetailSchema` and `key_mode`, the PC's
+ * «Доверенные устройства» mode at the moment it ended the session — one of `KEY_MODES`. Set by the
+ * agent only on its own ends with a reason of docs/design/viewer-device-keys-protocol.md §11
+ * (`KEY_END_REASONS`); absent on every other end (`unbound` included) and from an agent older than
+ * it. Observe mode ends sessions with §11 reasons too (a person the PC does not see as bound, and a
+ * few ends of a bound one), so a §11 end alone does not mean strict. Display only — the line of the
+ * §11a copy takes its mode from it; never admission.
+ *
+ * Agent only: the viewer's `session_end` keeps `sessionEndDetailSchema`, and the server never relays
+ * it to the viewer (`viewerEndDetailSchema` is `ended_detail` alone). A patterned code like the rest
+ * of `detail`, not `z.enum(KEY_MODES)`: an off-list value must not cost the whole frame — a dropped
+ * end would leave the session open until the agent's socket closes. The server keeps only a value of
+ * `KEY_MODES` and treats any other as absent (mode null: the line keeps its old mode; a debug log);
+ * the end itself goes through.
+ */
+export const agentSessionEndDetailSchema = sessionEndDetailSchema.extend({
+  key_mode: endDetailCode.optional(),
+});
+export type AgentSessionEndDetail = z.infer<typeof agentSessionEndDetailSchema>;
+
+/**
+ * `session_end.detail` from the server to the viewer (docs/design/viewer-device-keys-protocol.md §11):
+ * the agent's `ended_detail` alone, relayed once the server held it to its reason's list.
+ */
+export const viewerEndDetailSchema = sessionEndDetailSchema.pick({ ended_detail: true });
+export type ViewerEndDetail = z.infer<typeof viewerEndDetailSchema>;
 
 /* --- the agent's events -------------------------------------------------------------------- */
 

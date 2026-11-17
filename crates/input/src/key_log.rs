@@ -937,7 +937,7 @@ mod tests {
 
     /// How many log calls say why a field that looks like a key's is none (`not-a-key-name:`):
     /// pinned, so a new exemption is a deliberate change here, read in review.
-    const EXEMPTIONS: usize = 55;
+    const EXEMPTIONS: usize = 81;
 
     /// Wider than [`every_line_that_names_a_key_is_under_its_target`]: in the crates whose lines
     /// reach a log (input, core, transport, capture, clipboard, the CLI, the app), a log call with

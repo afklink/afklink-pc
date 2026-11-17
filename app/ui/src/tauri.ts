@@ -140,8 +140,9 @@ export interface PendingPairDto {
   /** Unix ms, after which the backend withdraws the request. */
   expires_at: number;
   /**
-   * «Разрешить» leads to «Кто это?» («Владелец» / «Гость»): the PC has no owner. Absent from an
-   * older agent: no question.
+   * «Разрешить» leads to «Кто это?» («Владелец» / «Гость»): the PC has no owner — the agent's
+   * reading (the server's word, and with device keys no role this PC derives for the person).
+   * Absent from an older agent: no question.
    */
   asks_role?: boolean;
   /**
@@ -157,7 +158,103 @@ export interface PendingPairDto {
    * buttons still wait. Absent from an older agent: `live`.
    */
   link?: PairLink;
+  /**
+   * The device the request comes from: «Разрешить» puts its access key in this PC's list of trusted
+   * devices («Станет доверенным: Telegram на iPhone»). Device keys milestone 1, not in its first
+   * IPC part yet; absent from an older agent: no line.
+   */
+  device?: TrustedDeviceRefDto | null;
+  /**
+   * The request's access key as this PC sees it (device keys): `valid` — «Разрешить» trusts `device`
+   * («Станет доверенным: …»); `was_removed` — a valid key the owner removed from trusted earlier
+   * («Станет снова доверенным: …»); `absent` /
+   * `invalid` — no usable key: «Не станет доверенным: нет ключа доступа»; `not_trusted_session` —
+   * strict mode and a session that is not a confirmed owner's ran since the pairing panel opened:
+   * nothing is written («Не станет доверенным: во время привязки шёл сеанс»). Absent from an older
+   * agent: today's look (the device line when `device` is named, else none).
+   */
+  key_state?: PairKeyState;
+  /**
+   * A session that is not a confirmed owner's ran since the pairing panel opened: the device lands
+   * unconfirmed (§10.1), «Добавится без подтверждения: …» in place of «Станет доверенным: …».
+   * Absent from an older agent: false.
+   */
+  will_be_unconfirmed?: boolean;
+  /**
+   * When this request's key was removed at this PC (its removed record of origin `pc`), unix ms
+   * (the core's `removed_here_at`): a fact, it gates nothing — «Удалено из доверенных: {when}»
+   * under the title. Absent: no such removal of this key.
+   */
+  removed_here_at?: number;
+  /**
+   * «Разрешить» goes via `pc_allow` now (a session of someone who is not the owner is live, §5): it
+   * only asks the owner and takes no second step. The press ends the request. Absent without device
+   * keys: false.
+   */
+  via_pc_allow?: boolean;
+  /**
+   * What «Разрешить» gives the person, as the agent reads the press (device keys): `connects` —
+   * they can connect after it; `added` — the same, by the same key listed for them already
+   * (nothing is written); otherwise why they cannot, for the window's lines: `no_key` (strict, no
+   * usable key), `session` (strict, a session ran since the panel opened; or a guest's session is
+   * live: `pc_allow` — strict, or an owner on this PC in either mode), and in strict the list
+   * refusing the key: `other_person` (it is another person's), `list_closed` (full, damaged,
+   * unreadable, or the key's own record admits nothing).
+   */
+  allow_gives?: PairGives;
+  /**
+   * The press lets the person connect (the agent's one reading of `allow_gives`): the window offers
+   * «Разрешить» exactly then. Absent from an older agent: offered.
+   */
+  allow_connects?: boolean;
+  /**
+   * The requester is an owner on this PC (the agent's reading: a working owner key here, or the
+   * owner by the bindings). With a device line the window says «Это
+   * устройство получит доступ владельца», «Разрешить» waits for «Это моё устройство» and sends the
+   * owner's role with that step; with no key, the owner's own step line. Absent: not one.
+   */
+  owner_here?: boolean;
+  /**
+   * What is on screen (device keys): a generation of the request in the window's slot, new each
+   * time a request is placed there. The consent «Это моё устройство» holds only for the `shown` and
+   * `role` it was given for (`consentKeyOf`); the press sends it back.
+   */
+  shown?: number;
+  /** The role the press carries when this PC derives it; absent when it is chosen. */
+  role?: BindingRole;
+  /** «Разрешить» waits for «Это моё устройство»: the agent's plan writes an owner-role key. */
+  needs_owner_step?: boolean;
+  /** What «Разрешить» does to the device, the agent's reading, true in either mode. */
+  device_line?: DeviceLineName;
 }
+
+/** The agent's device line (`PendingPairDto.device_line`). */
+export type DeviceLineName =
+  | "none"
+  | "trusted"
+  | "again"
+  | "unconfirmed"
+  | "unconfirmed_again"
+  | "no_key"
+  | "not_trusted"
+  | "added"
+  | "listed_waiting"
+  | "other_person"
+  | "list_full"
+  | "list_unavailable";
+
+/** What «Разрешить» on a pairing request gives the person (`PendingPairDto.allow_gives`). */
+export type PairGives =
+  | "connects"
+  | "added"
+  | "no_key"
+  | "session"
+  | "other_person"
+  | "list_closed"
+  | "listed_waiting";
+
+/** A pairing request's access key (`PendingPairDto.key_state`). */
+export type PairKeyState = "valid" | "absent" | "invalid" | "was_removed" | "not_trusted_session";
 
 /** The pairing prompt's steps: «Отклонить» / «Разрешить», then «Кто это?» on a PC with no owner. */
 export type PairStep = "consent" | "role";
@@ -238,6 +335,11 @@ export interface StatusDto {
    * there is none. Absent from an older agent.
    */
   held_pair?: HeldPairDto | null;
+  /**
+   * Moves after every installed change to the trusted devices' list, reopen or repair: the window
+   * reads `get_trusted` again. Absent from an older agent.
+   */
+  trusted_rev?: number;
   sessions: SessionDto[];
   device_name: string;
   server_url: string;
@@ -284,7 +386,31 @@ export type GameRow = "choose" | "off" | "on" | "no_game";
  * What a journal entry records (`afklink_core::journal::Kind`): `invited` — a guest the owner let in
  * from Telegram by his invite, nobody at the PC asked (`binding_added.via`).
  */
-export type JournalKind = "session" | "granted" | "invited" | "revoked" | "paused";
+export type JournalKind =
+  | "session"
+  | "granted"
+  | "invited"
+  | "revoked"
+  | "paused"
+  | TrustedJournalKind;
+
+/**
+ * The trusted devices' entries (device keys milestone 1): a new device in the list, a key restored
+ * on the same device, a connection turned down for its key, the mode switched, a device removed
+ * from trusted, a connection attempt from a person's device that is not in the list
+ * (`other_device_attempt`: the person, no device). Milestone 1 writes `trusted_on`, `trusted_off`
+ * and `device_untrusted`; the others come with admission. An older agent sends none.
+ */
+export type TrustedJournalKind =
+  | "device_added"
+  | "key_restored"
+  | "declined_no_key"
+  | "declined_untrusted"
+  | "declined_unknown"
+  | "trusted_on"
+  | "trusted_off"
+  | "device_untrusted"
+  | "other_device_attempt";
 
 /** The viewer's device, by its Telegram platform (`afklink_core::journal::Device`). */
 export type ClientDevice = "iphone" | "android" | "mac" | "desktop" | "browser";
@@ -314,6 +440,18 @@ export interface JournalEntryDto {
   weak: boolean;
   /** Sessions: its log is still kept, so «Отправить логи» can carry it first. */
   logs: boolean;
+  /**
+   * The trusted devices' entries: the device it is about, and how it came into the list — the
+   * entry's second line «Telegram на iPhone · Разрешено на ПК». Absent elsewhere and from an older
+   * agent.
+   */
+  trusted_device?: TrustedJournalDeviceDto | null;
+  /**
+   * The `declined_*` entries: why the connection was refused, when the window words it apart —
+   * `grant_stale`, `key_unconfirmed`; any other word (a newer agent's) reads as
+   * the kind. Absent elsewhere and from an older agent.
+   */
+  declined_reason?: string | null;
 }
 
 /**
@@ -432,10 +570,24 @@ export const cancelPairing = (reason: PairingCloseReason) =>
 /**
  * The owner's answer to a pending request. This is what turns a code into access; the request
  * window closes at once. `role`: the answer to «Кто это?» when the prompt asked it; without it an
- * approval makes the person a guest.
+ * approval makes the person a guest. `secondStep`: the owner's explicit second step («Это моё
+ * устройство»). `shown`: the `PendingPairDto.shown` the window showed — another request placed
+ * under the id since: the approval changes nothing.
  */
-export const respondPair = (requestId: string, accept: boolean, role?: BindingRole) =>
-  invoke<void>("respond_pair", { requestId, accept, role: role ?? null });
+export const respondPair = (
+  requestId: string,
+  accept: boolean,
+  role?: BindingRole,
+  secondStep?: boolean,
+  shown?: number,
+) =>
+  invoke<void>("respond_pair", {
+    requestId,
+    accept,
+    role: role ?? null,
+    secondStep: secondStep ?? false,
+    shown: shown ?? null,
+  });
 
 /**
  * «Разрешить» on a prompt that asks «Кто это?»: the prompt becomes the question; nothing is sent
@@ -478,6 +630,268 @@ export function onPairPrompt(handler: () => void): Promise<() => void> {
  * Telegram (Rust decides by the roles it has), and the row shows the request.
  */
 export const unbind = (telegramUserId: number) => invoke<void>("unbind", { telegramUserId });
+
+/* ── Trusted devices (device keys milestone 1) ─────────────────────────────────────────────────
+ * The window's IPC (docs/design/viewer-device-keys.md §3.2,
+ * §9.1, §10, §16 1b, §18), served by `app/src-tauri` (`trusted.rs`). The window asks `get_trusted`
+ * and, when the agent does not know it (an older agent), keeps today's look — no layers, no device
+ * lines. It reads the list again when `StatusDto.trusted_rev` moves and after each command. */
+
+/** What kind of client holds an access key; unknown raw values come as null. */
+export type TrustedKind = "telegram" | "telegram_desktop" | "browser";
+
+/**
+ * How a key came into the list (§3.2, §18): `pairing` — «Разрешить» at this PC; `endorsed` — the
+ * person's own trusted device confirmed it (`by`); `owner` — the owner's device signed a guest in;
+ * `migrated` — the first key after the update, remembered; `restored` — the same device got a new
+ * key after Telegram erased the old one (§9.1).
+ */
+export type TrustedSource = "pairing" | "endorsed" | "owner" | "restored" | "migrated";
+
+/** A device, as far as its name goes: what client, on what (iPhone, Mac, Windows, Android…). */
+export interface TrustedDeviceRefDto {
+  /** Null: the PC cannot tell («Неизвестное устройство»). */
+  kind: TrustedKind | null;
+  /**
+   * The raw store value (iphone, mac, windows, unknown…); the window names the known ones and shows
+   * anything else as unknown, never raw (`platformName`).
+   */
+  platform: string | null;
+}
+
+/** One device of a person (§3.2: the key's record on the PC). */
+export interface TrustedDeviceDto extends TrustedDeviceRefDto {
+  /** The full key id (43 characters): IPC only, never logged whole. */
+  key_id: string;
+  /** Its first 8 characters, shown in the confirm dialog (§10.1). */
+  key_short: string;
+  role: "owner" | "guest";
+  source: TrustedSource;
+  /** `endorsed` / `owner`: the device that signed it in, while it is still in the list. */
+  by: TrustedDeviceRefDto | null;
+  by_key_id: string | null;
+  /** Added without a check on this PC (§10.1): it does not count as trusted until confirmed here. */
+  unconfirmed: boolean;
+  /** Keys removed together with it (its descendants by endorse / grant / invite). */
+  dependents: number;
+  /** Unix ms. */
+  added_at: number;
+  /** Unix ms of the last connection from it; null: never connected. */
+  last_used_at: number | null;
+  /** A session from this device goes on now (false until admission is wired). */
+  in_session: boolean;
+}
+
+/** A person with at least one active key, whether or not they have a binding now. */
+export interface TrustedPersonDto {
+  telegram_user_id: number;
+  /** From the key's record: names a person who has no binding row. */
+  first_name: string | null;
+  username: string | null;
+  devices: TrustedDeviceDto[];
+  /**
+   * Connection attempts from a device of this person that is not in the list (§10.2), newest
+   * first: «Разрешить» / «Скрыть» on each, and the confirm dialog says the latest and asks «Я узнаю
+   * это устройство». A person with attempts and no device is listed too (`devices` empty). Absent
+   * from an older agent: none.
+   */
+  attempts?: TrustedAttemptDto[];
+  /**
+   * What «Разрешить» on their attempt gives — the agent's reading «owner on this PC» (a working
+   * owner key here, or the owner by the bindings): the owner's role, else a guest's. Absent from an
+   * older agent.
+   */
+  role?: "owner" | "guest";
+  /**
+   * «Разрешить» needs the explicit second step (the owner by bindings or keys — «Это моё
+   * устройство»); without it the agent refuses `second_step`.
+   */
+  needs_second_step?: boolean;
+}
+
+/**
+ * Another device's attempt (§10.2): a device the PC does not know that tried to connect as this
+ * person, its offer signed by its own key. Every field but `at` is absent from an older agent.
+ */
+export interface TrustedAttemptDto {
+  /** Unix ms of the latest try (the same as `last_at`). */
+  at: number;
+  /** As its key card names it (shown with «Не проверено»). */
+  kind?: TrustedKind | null;
+  platform?: string | null;
+  /** The full key id (43 characters): IPC only (`attemptAllow`, `attemptHide`), never shown whole. */
+  key_id?: string;
+  /** Its first 8 characters. */
+  key_short?: string;
+  /** How many times it tried (`app.trustedAttemptCount*`). */
+  count?: number;
+  /** Unix ms of the first and the latest try (`app.trustedAttemptRange`). */
+  first_at?: number;
+  last_at?: number;
+}
+
+/** What the PC can do about a damaged list. */
+export interface TrustedDamageDto {
+  /** `unreadable` (I/O), `corrupt` (bad JSON or record), `newer_version` (a newer agent wrote it). */
+  reason: "unreadable" | "corrupt" | "newer_version";
+  /** The backup is readable and of this version: «Восстановить из копии». */
+  can_restore: boolean;
+  /** «Начать список заново» (refused for `unreadable` and `newer_version`). */
+  can_reset: boolean;
+}
+
+/** The PC's trusted devices. Restoring a key on the same device (§9.1) is always on: no flag. */
+export interface TrustedDto {
+  /**
+   * `damaged`: the list is unread; with `trusted_mode` on it denies everyone until it is repaired
+   * at this PC, with it off everyone with access connects and only the repairs work.
+   */
+  state: "ok" | "damaged";
+  /** Only while damaged. */
+  damage: TrustedDamageDto | null;
+  /**
+   * «Доверенные устройства» on: only a confirmed device with an access key connects. While damaged:
+   * the switch the admission decides by — the mode file's, on (strict) when it says nothing.
+   */
+  trusted_mode: boolean;
+  people: TrustedPersonDto[];
+  /** People of the first-use snapshot (§9) with no key yet, by Telegram id. */
+  waiting: number[];
+  /**
+   * Where the owner's own device stands for the switch (§10.2), the agent's reading: `ready` — it
+   * may go on; `needs_confirm` — the owner's devices here are all unconfirmed: «Подтвердить» one
+   * first; `needs_device` — none: add one at this PC first. Turning it off is never held. Absent
+   * from an older agent: as before, offered.
+   */
+  owner_device?: OwnerDevice;
+  /**
+   * Confirming and turning the mode on are possible now: no session (live or pending) but one
+   * signed by a confirmed owner key.
+   */
+  clean: boolean;
+  /** Opaque (a decimal u64): passed back to confirm / mode-on, refused with `session` when stale. */
+  token: string;
+  /** The limits are reached (§10): new keys are refused until some are removed here. */
+  full: boolean;
+}
+
+/** The journal's device on a trusted devices' entry: `{kind, platform, source}`. */
+export interface TrustedJournalDeviceDto extends TrustedDeviceRefDto {
+  source?: TrustedSource | null;
+}
+
+/** What `repair_trusted` does: read again, restore the backup, or start an empty list. */
+export type TrustedRepair = "reopen" | "restore" | "reset";
+
+/**
+ * The trusted commands' error codes (`Err(String)` from Rust): `session` — a session other than a
+ * confirmed owner's went on since the window read the list; `slow` — the write outlived 2 s and
+ * finishes in the background; `busy` should not reach the window; `owner` — «Удалить все
+ * устройства» for the owner (never offered); `second_step` — «Разрешить» without the owner's
+ * explicit second step (`needs_second_step`); `tainted` — «Разрешить» after a session went on since
+ * the dialog opened, in either mode: nothing written, the attempt stays; `expired` — the attempt is older than 30 days; `added` — its device
+ * is in the list already; `key_other_person` — its device is in the list (or removed from it) at
+ * another person: nothing written, the attempt stays («Скрыть» removes it); `refused` — anything
+ * else.
+ */
+export type TrustedError =
+  | "session"
+  | "damaged"
+  | "newer_version"
+  | "full"
+  | "not_found"
+  | "write_failed"
+  | "slow"
+  | "busy"
+  | "owner"
+  | "second_step"
+  | "tainted"
+  | "expired"
+  | "added"
+  | "key_other_person"
+  | "no_owner_device"
+  | "role"
+  | "refused";
+
+const TRUSTED_ERRORS: readonly TrustedError[] = [
+  "session",
+  "damaged",
+  "newer_version",
+  "full",
+  "not_found",
+  "write_failed",
+  "slow",
+  "busy",
+  "owner",
+  "second_step",
+  "tainted",
+  "expired",
+  "added",
+  "key_other_person",
+  "no_owner_device",
+  "role",
+  "refused",
+];
+
+/** `TrustedDto.owner_device`. */
+export type OwnerDevice = "ready" | "needs_confirm" | "needs_device";
+
+/** A trusted command's rejection as its code; anything else (no bridge, a crash) is `refused`. */
+export function trustedError(e: unknown): TrustedError {
+  return typeof e === "string" && (TRUSTED_ERRORS as readonly string[]).includes(e)
+    ? (e as TrustedError)
+    : "refused";
+}
+
+export const getTrusted = () => invoke<TrustedDto>("get_trusted");
+
+/** Turn the mode on (with the list's `token`) or off (no token needed). Asked first in a dialog. */
+export const setTrustedMode = (enabled: boolean, token: string | null) =>
+  invoke<void>("set_trusted_mode", { enabled, token });
+
+/** Take one device (and its dependents) off the list. Resolves with the number of keys removed. */
+export const removeTrustedDevice = (keyId: string) =>
+  invoke<number>("remove_trusted_device", { keyId });
+
+/** Take every device of a person off the list. Resolves with the number of keys removed. */
+export const removePerson = (telegramUserId: number) =>
+  invoke<number>("remove_person", { telegramUserId });
+
+/** Confirm an unconfirmed device (§10.1), with the list's `token`: one press. */
+export const confirmTrustedDevice = (keyId: string, token: string) =>
+  invoke<void>("confirm_trusted_device", { keyId, token });
+
+/**
+ * «Разрешить» on another device's attempt (§10.2), with the dialog's `token` and the owner's second
+ * step (`needs_second_step`); `role`: the role the dialog showed (the owner's line, or none: a
+ * guest's) — the agent refuses the press `role` when it derives another now. Resolves once the
+ * device is in the list, confirmed.
+ */
+export const attemptAllow = (
+  telegramUserId: number,
+  keyId: string,
+  token: string,
+  secondStep: boolean,
+  role: "owner" | "guest",
+) =>
+  invoke<void>("attempt_allow", {
+    telegramUserId,
+    keyId,
+    token,
+    secondStep,
+    role,
+  });
+
+/** «Скрыть» another device's attempt, with the list's `token`. */
+export const attemptHide = (telegramUserId: number, keyId: string, token: string) =>
+  invoke<void>("attempt_hide", { telegramUserId, keyId, token });
+
+/**
+ * Repair a damaged list (`reopen` is also allowed on a healthy one). `restore` carries the window
+ * `token` its dialog opened with (refused `session` when stale or absent, as confirm).
+ */
+export const repairTrusted = (action: TrustedRepair, token: string | null = null) =>
+  invoke<void>("repair_trusted", { action, token });
 
 /** «Сделать владельцем» on a guest: a request the owner confirms in Telegram. */
 export const makeOwner = (telegramUserId: number) => invoke<void>("make_owner", { telegramUserId });

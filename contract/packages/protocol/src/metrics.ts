@@ -188,6 +188,9 @@ export type SessionEndedBy = (typeof SESSION_ENDED_BY)[number];
  *   agent_disconnected  the server's own: the agent's socket did not come back within the grace
  *                       window. Its goodbye on that socket (`goodbye:<reason>`), the next process
  *                       saying the last one died (`crash`), or neither (`network`)
+ *   viewer_disconnected the server's own: the viewer's socket did not come back within the grace
+ *                       window. `hidden` — its page had said it was hidden (`viewer_visibility`), so
+ *                       the window was the long one (10 min, not 20 s); none — the ordinary one
  */
 export const SESSION_END_DETAILS = {
   viewer_closed: ["button", "back", "unmount", "pagehide"],
@@ -200,16 +203,61 @@ export const SESSION_END_DETAILS = {
     "crash",
     "network",
   ],
+  viewer_disconnected: ["hidden"],
+  // Viewer device keys (docs/design/viewer-device-keys-protocol.md §11; `KEY_END_REASONS` in
+  // viewer-keys.ts): the agent's, and relayed to the viewer (`session_end.detail`). `key_unknown`,
+  // `key_unconfirmed`, `key_revoked` and `fingerprint_changed` have none.
+  nonce_stale: ["no_nonce", "nonce_unknown", "nonce_expired", "nonce_used"],
+  key_required: ["no_proof"],
+  admit_refused: [
+    "key_reg_bad",
+    "limit",
+    "rpk_conflict",
+    "invite_missing",
+    "invite_bad",
+    "invite_spent",
+    "invite_expired",
+    "invite_owner_mismatch",
+    "endorse_malformed",
+    "endorse_key_mismatch",
+    "endorse_signer_unknown",
+    "endorse_signer_revoked",
+    "endorse_spent",
+    "endorse_bad_sig",
+    "grant_malformed",
+    "grant_key_mismatch",
+    "grant_not_owner",
+    "grant_role",
+    "grant_spent",
+    "grant_device",
+    "grant_bad_sig",
+    "grant_stale",
+    "attest_bad",
+    "attest_has_hash",
+    "recover_malformed",
+    "recover_no_record",
+    "recover_bad_sig",
+    "first_use_closed",
+    "first_use_bad_sig",
+  ],
+  proof_invalid: ["malformed", "fp_bad", "key_mismatch", "bad_sig", "proof_mismatch", "busy"],
+  key_list_damaged: ["read_failed", "write_failed"],
 } as const;
 export type SessionEndDetailsByReason = typeof SESSION_END_DETAILS;
 
 /**
  * The details a client may send in `session_end.detail.ended_detail`: those of the reasons a client
- * ends with. `agent_disconnected`'s are the server's, derived from what it saw.
+ * ends with — the agent's device-key reasons among them. `agent_disconnected`'s and
+ * `viewer_disconnected`'s are the server's, derived from what it saw.
  */
 export const CLIENT_END_DETAILS = [
   ...SESSION_END_DETAILS.viewer_closed,
   ...SESSION_END_DETAILS.peer_closed,
+  ...SESSION_END_DETAILS.nonce_stale,
+  ...SESSION_END_DETAILS.key_required,
+  ...SESSION_END_DETAILS.admit_refused,
+  ...SESSION_END_DETAILS.proof_invalid,
+  ...SESSION_END_DETAILS.key_list_damaged,
 ] as const;
 export type ClientEndDetail = (typeof CLIENT_END_DETAILS)[number];
 

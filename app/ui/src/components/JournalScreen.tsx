@@ -2,11 +2,20 @@ import { Send, Unlink } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { useLanguage, useT } from "../i18n";
-import { byDay, dayTitle, eventLabel, sessionMeta, timeText } from "../lib/journal";
+import {
+  byDay,
+  dayTitle,
+  eventLabel,
+  isTrustedKind,
+  namesNobody,
+  sessionMeta,
+  timeText,
+} from "../lib/journal";
 import { cn } from "../lib/utils";
 import { type BindingDto, getJournal, type JournalEntryDto } from "../tauri";
 import { RevokeConfirm } from "./AccessScreen";
 import { SendLogsDialog, useSendLogs } from "./SendLogs";
+import { deviceName, sourceText } from "./TrustedDevices";
 import { Button } from "./ui/button";
 import { Spinner } from "./ui/spinner";
 
@@ -148,6 +157,8 @@ export function JournalScreen({
                       else rowButtons.current.delete(e.id);
                     }}
                   />
+                ) : isTrustedKind(e.kind) ? (
+                  <TrustedItem key={e.id} entry={e} time={timeText(locale, e.at_ms)} />
                 ) : (
                   <li
                     key={e.id}
@@ -344,6 +355,41 @@ function SessionItem({
           )}
         </div>
       ) : null}
+    </li>
+  );
+}
+
+/**
+ * A trusted devices' entry (device keys milestone 1): «Вера · Новое устройство» and the
+ * time, and under them, small, the device and how it came into the list — «Telegram на iPhone ·
+ * Разрешено на ПК». The name gives way first (cut, whole in its tooltip); the event is never cut —
+ * where it does not fit beside the name it goes on to the next line. The mode switched names nobody:
+ * the event alone.
+ */
+function TrustedItem({ entry: e, time }: { entry: JournalEntryDto; time: string }) {
+  const t = useT();
+  if (e.kind === "session") return null;
+  const d = e.trusted_device ?? null;
+  // The journal names no confirming device: an endorsed one goes without its source.
+  const source = d ? sourceText(t, d.source) : null;
+  const meta = d ? [deviceName(t, d), source].filter((p) => p !== null).join(" · ") : null;
+  return (
+    <li className="border-t border-line px-4 py-2 text-muted first:border-t-0">
+      <span className="flex items-start gap-2.5">
+        <span className="min-w-0 flex-1 text-body">
+          {namesNobody(e.kind) ? null : (
+            <>
+              <span className="inline-block max-w-[55%] truncate align-top" title={e.name}>
+                {e.name}
+              </span>
+              {" · "}
+            </>
+          )}
+          {eventLabel(t, e.kind, e.declined_reason)}
+        </span>
+        <span className="shrink-0 text-body text-faint tabular-nums">{time}</span>
+      </span>
+      {meta ? <span className="mt-0.5 block font-small text-hint text-faint">{meta}</span> : null}
     </li>
   );
 }

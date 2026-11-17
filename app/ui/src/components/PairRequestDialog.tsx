@@ -1,10 +1,11 @@
-import { Crown, UserRound } from "lucide-react";
+import { Crown, KeyRound, UserRound } from "lucide-react";
 import { type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
-import { useT } from "../i18n";
+import { useLanguage, useT } from "../i18n";
 import {
   allowPair,
   type BindingRole,
+  type DeviceLineName,
   type PairStep,
   type PendingPairDto,
   respondPair,
@@ -13,7 +14,9 @@ import {
 import { formatCountdown, pairTimeLeft, useCountdown } from "../useAgentStatus";
 import { initialOf } from "./ScreenGlyph";
 import { StepDisc } from "./Steps";
+import { deviceName, whenText } from "./TrustedDevices";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import { MiddleEllipsis } from "./ui/middle-ellipsis";
 
 /**
@@ -59,8 +62,16 @@ const TITLE_LINES = 3;
  *
  * Read like a notification, top to bottom: the requester's initial in a circle beside «{name}
  * просит доступ к этому ПК» (always these words, «Только игра» too), the @username
- * under it — the #id when there is none; the time left as a thin amber bar with «1:47» at its end
- * (amber means this and nothing else in the app); Decline and Allow.
+ * under it — the #id when there is none; what «Разрешить» does to the trusted devices
+ * (`TrustedDeviceLine`); the time left as a thin amber bar with «1:47» at its end; Decline and Allow.
+ * Amber means that bar, the trusted line's «Раньше его удалили из доверенных» and the owner's line
+ * — nothing else. A person removed earlier is let back with one press, as anyone.
+ *
+ * An owner on this PC (`owner_here`, the agent's reading) gets the owner's role, never a guest's
+ * and never asked «Кто это?»: with a device line, under it in amber «Это устройство получит доступ
+ * владельца» and the box «Это моё устройство»; «Разрешить» waits for it and sends the owner's role
+ * with the step (`ownerStepShown`, `pairAllowPress`). Without a key the no-key lines give the
+ * owner's own way back.
  *
  * At the first pairing (`step`, from `pairingStep`) the top row ends in the steps' lime «3»: the
  * request is their last (press «Разрешить» here) — the steps on the main view and in the pairing
@@ -109,10 +120,8 @@ export function PairRequestPrompt({
   const titleId = useId();
   const whoId = useId();
   const [pending, setPending] = useState(false);
-  // «Разрешить» pressed here, before Rust's step comes back with the next read.
-  const [allowedHere, setAllowedHere] = useState<string | null>(null);
-  const at: PairStep =
-    request.step === "role" || allowedHere === request.request_id ? "role" : "consent";
+  const { own } = useConsent(request);
+  const at = pairPhase(request);
   // An older agent sends no `link`: always live.
   const link = request.link ?? "live";
   const live = link === "live";
@@ -144,30 +153,46 @@ export function PairRequestPrompt({
     // «Гость» and «Владелец» take the place of «Разрешить» and «Отклонить»: the second click of a
     // double click on «Разрешить» must not choose a role.
     const sinceMs = performance.now() - questionSince;
-    if (role !== undefined && sinceMs < ROLE_ARM_MS) {
+    if (role !== undefined && at === "role" && sinceMs < ROLE_ARM_MS) {
       // biome-ignore lint/suspicious/noConsole: a press dropped on purpose, said once per press
       console.debug(
         `[pair] «${role}» pressed ${Math.round(sinceMs)} ms after «Кто это?» appeared: taken for the rest of a double click on «Разрешить», ignored`,
       );
       return;
     }
+    const press = answerPress(request, accept, own.ticked);
+    if ("held" in press) {
+      // biome-ignore lint/suspicious/noConsole: a press held on purpose, said once per press
+      console.debug(
+        `[pair] ${answerSaid(accept, role)} on ${request.request_id} held: ${press.held}`,
+      );
+      return;
+    }
+    const step = press.send;
+    const said = answerSaid(accept, role ?? step.role);
     setPending(true);
-    respondPair(request.request_id, accept, role)
+    // biome-ignore lint/suspicious/noConsole: the owner's answer, once per press
+    console.debug(`[pair] respond_pair ${request.request_id}: ${said}${stepSaid(step)}`);
+    respondPair(request.request_id, accept, role ?? step.role, step.secondStep, request.shown)
       .then(() => onAnswered?.())
       .catch((e: unknown) =>
-        console.warn(
-          `[ipc] respond_pair ${accept ? `accept${role ? ` as ${role}` : ""}` : "decline"} (${request.request_id}) failed: ${String(e)}`,
-        ),
+        console.warn(`[ipc] respond_pair ${said} (${request.request_id}) failed: ${String(e)}`),
       )
       .finally(() => setPending(false));
   };
 
   const allow = () => {
-    if (!request.asks_role) {
+    if (!asksRole(request)) {
       answer(true);
       return;
     }
     if (pending) return;
+    const press = pairAllowPress(request, own.ticked);
+    if ("held" in press) {
+      // biome-ignore lint/suspicious/noConsole: a press held on purpose, said once per press
+      console.debug(`[pair] «Разрешить» on ${request.request_id} held: ${press.held}`);
+      return;
+    }
     if (!live) {
       // biome-ignore lint/suspicious/noConsole: a press dropped on purpose, said once per press
       console.debug(
@@ -176,24 +201,26 @@ export function PairRequestPrompt({
       return;
     }
     setPending(true);
-    setAllowedHere(request.request_id);
     allowPair(request.request_id)
       .then((ok) => {
         if (!ok) {
           // Rust's log says why (withdrawn, or the PC has an owner after all); the next read shows
           // what is so.
           console.warn(`[pair] «Кто это?» not taken for ${request.request_id}: no longer pending`);
-          setAllowedHere(null);
         }
+        // The step is Rust's (`step`): the read that follows shows «Кто это?».
         onAnswered?.();
       })
-      .catch((e: unknown) => {
-        console.warn(`[ipc] allow_pair (${request.request_id}) failed: ${String(e)}`);
-        setAllowedHere(null);
-      })
+      .catch((e: unknown) =>
+        console.warn(`[ipc] allow_pair (${request.request_id}) failed: ${String(e)}`),
+      )
       .finally(() => setPending(false));
   };
 
+  // «Разрешить» (and the roles) wait, in place, for «Это моё устройство».
+  const stepWaits = "held" in pairAllowPress(request, own.ticked);
+  const offer = allowOffer(request);
+  useOfferLog(request.request_id, offer);
   const initial = initialOf(name.full);
   return (
     <div
@@ -247,17 +274,21 @@ export function PairRequestPrompt({
               // — and whole in its tooltip.
               <MiddleEllipsis text={handle} className="text-body text-muted" />
             ) : null}
+            <RemovedHereLine request={request} />
           </div>
         )}
         {step === undefined ? null : <StepDisc n={step} size="card" tone="now" />}
       </div>
+      {at === "consent" ? (
+        <ConsentKeyLine request={request} offer={offer} own={own} held={held} />
+      ) : null}
       <Countdown secondsLeft={secondsLeft} offline={link === "lost"} />
       {at === "role" ? (
         // Two equal choices, one kind of button: neither is the default, neither the quieter one.
         <div className="grid grid-cols-2 gap-2">
           <Button
             className="h-14 flex-col gap-1 [&_svg]:size-5"
-            aria-disabled={held || undefined}
+            aria-disabled={held || stepWaits || undefined}
             onClick={() => answer(true, "owner")}
           >
             <Crown aria-hidden="true" />
@@ -265,7 +296,7 @@ export function PairRequestPrompt({
           </Button>
           <Button
             className="h-14 flex-col gap-1 [&_svg]:size-5"
-            aria-disabled={held || undefined}
+            aria-disabled={held || stepWaits || undefined}
             onClick={() => answer(true, "guest")}
           >
             <UserRound aria-hidden="true" />
@@ -273,26 +304,490 @@ export function PairRequestPrompt({
           </Button>
         </div>
       ) : (
-        <div className="flex gap-2">
-          <Button
-            className="flex-1"
-            aria-disabled={held || undefined}
-            onClick={() => answer(false)}
-          >
-            {t("app.pairDecline")}
-          </Button>
-          <Button
-            variant="primary"
-            className="flex-1"
-            aria-disabled={held || undefined}
-            onClick={allow}
-          >
-            {t("app.pairApprove")}
-          </Button>
-        </div>
+        <ConsentButtons
+          held={held}
+          allowWaits={stepWaits}
+          offered={offer.kind === "allow"}
+          onDecline={() => answer(false)}
+          onAllow={allow}
+        />
       )}
     </div>
   );
+}
+
+/**
+ * What «Разрешить» does to this PC's trusted devices (device keys), by the request's key
+ * (`key_state`), under the person and before the countdown — one line with a key, and under it, small,
+ * what the owner should know about it:
+ * - `valid`: «Станет доверенным: Telegram на iPhone» — the device whose access key goes in the list;
+ * - `was_removed`: «Станет снова доверенным: …» (the removal itself is said under the title);
+ * - `absent` / `invalid`: «Не станет доверенным: нет ключа доступа» — no device line;
+ * - with a device line, when a session that is not a confirmed owner's ran since the pairing panel
+ *   opened (`will_be_unconfirmed`): «Добавится без подтверждения: …» in its place, and under it
+ *   the note that a session ran during the request and the device is confirmed in «Доступ» (§10.1);
+ * - `not_trusted_session`: strict mode and such a session — nothing is written: «Не станет
+ *   доверенным: во время привязки шёл сеанс», and under it what to do (no device line).
+ * An older agent sends no `key_state`: today's look — the «Станет доверенным» line when it names the
+ * device, else none. Wraps rather than cuts: what «Разрешить» trusts is read whole. Nothing here
+ * changes what «Отклонить» and «Разрешить» do.
+ */
+function TrustedDeviceLine({ request }: { request: PendingPairDto }) {
+  const t = useT();
+  const line = deviceLineOf(request);
+  const ref = request.device ?? null;
+  // Primitives, not the object: the status is read again every second.
+  const kind = ref?.kind ?? "unknown";
+  const platform = ref?.platform ?? "-";
+  const keyState = request.key_state ?? "-";
+  const unconfirmed = request.will_be_unconfirmed === true;
+  useEffect(() => {
+    // biome-ignore lint/suspicious/noConsole: once per request and change of what the line says
+    console.debug(
+      `[pair] request ${request.request_id}: key ${keyState}${unconfirmed ? ", will be unconfirmed" : ""}, device ${kind} on ${platform} → ${line}${keyState === "-" ? " (an older agent: no key state)" : ""}`,
+    );
+  }, [request.request_id, keyState, unconfirmed, kind, platform, line]);
+  if (line === "none") return null;
+  // Absent from an older agent with a `key_state` it has no device for: «Неизвестное устройство».
+  const device = deviceName(t, ref ?? { kind: null, platform: null });
+  const notes = NOTES[line] ?? [];
+  return (
+    <div className="flex items-start gap-2 text-body text-muted">
+      <KeyRound className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="text-balance">{t(MAIN[line], { device })}</p>
+        {notes.map((note) => (
+          <p
+            key={note.key}
+            className={`text-hint text-balance${note.attention ? " text-attention" : ""}`}
+          >
+            {t(note.key)}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Under the request at its consent step: the key line — and for an owner on this PC his line and
+ * box (`OwnerBlock`) — or, not offered, why and what to do.
+ */
+function ConsentKeyLine({
+  request,
+  offer,
+  own,
+  held,
+}: {
+  request: PendingPairDto;
+  offer: AllowOffer;
+  own: OwnerStep;
+  held: boolean;
+}) {
+  if (offer.kind !== "allow")
+    return <NoOffer request={request} fact={offer.fact} step={offer.step} />;
+  return (
+    <>
+      <TrustedDeviceLine request={request} />
+      {own.shown ? (
+        <OwnerBlock ticked={own.ticked} disabled={held} onTick={(next) => own.tick(next, held)} />
+      ) : null}
+    </>
+  );
+}
+
+/** «Отклонить» and, only when it lets the person connect, the lime «Разрешить». */
+function ConsentButtons({
+  held,
+  allowWaits,
+  offered,
+  onDecline,
+  onAllow,
+}: {
+  held: boolean;
+  /** «Разрешить» waits for «Это моё устройство». */
+  allowWaits: boolean;
+  offered: boolean;
+  onDecline: () => void;
+  onAllow: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex gap-2">
+      <Button className="flex-1" aria-disabled={held || undefined} onClick={onDecline}>
+        {t("app.pairDecline")}
+      </Button>
+      {offered ? (
+        <Button
+          variant="primary"
+          className="flex-1"
+          aria-disabled={held || allowWaits || undefined}
+          onClick={onAllow}
+        >
+          {t("app.pairApprove")}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * A request whose «Разрешить» would not let the person connect (`allowOffer`): in amber what
+ * stands, under it what to do — in place of the key line, with no primary button.
+ */
+function NoOffer({
+  request,
+  fact,
+  step,
+}: {
+  request: PendingPairDto;
+  fact: NoOfferFact | null;
+  step: NoOfferStep | null;
+}) {
+  const t = useT();
+  if (fact === null) return null;
+  const device = deviceName(t, request.device ?? { kind: null, platform: null });
+  return (
+    <div className="flex items-start gap-2 text-body">
+      <KeyRound className="mt-0.5 size-4 shrink-0 text-attention" aria-hidden="true" />
+      <div className="min-w-0">
+        <p className="text-balance text-attention">{t(fact, { device })}</p>
+        {step === null ? null : <p className="text-hint text-balance text-muted">{t(step)}</p>}
+      </div>
+    </div>
+  );
+}
+
+/** Says once per request and change whether «Разрешить» is offered, and why not. */
+function useOfferLog(requestId: string, offer: AllowOffer) {
+  const said = offer.kind === "allow" ? "offered" : `not offered (${offer.gives})`;
+  useEffect(() => {
+    // biome-ignore lint/suspicious/noConsole: once per request and change of the offer
+    console.debug(`[pair] request ${requestId}: «Разрешить» ${said}`);
+  }, [requestId, said]);
+}
+
+/** The key line's text per device line (`{device}` where the string has it). */
+const MAIN = {
+  trusted: "app.pairTrustedDevice",
+  again: "app.pairTrustedAgain",
+  unconfirmed: "app.pairUnconfirmed",
+  unconfirmed_again: "app.pairUnconfirmed",
+  no_key: "app.pairNoKey",
+  not_trusted: "app.pairNotTrustedSession",
+  added: "app.trustedAttemptAdded",
+  listed_waiting: "app.pairListedWaiting",
+  // Observe: «Разрешить» binds, but the list writes no key — its cause, never «Станет доверенным».
+  other_person: "app.trustedAttemptOtherPerson",
+  list_full: "app.trustedFull",
+  list_unavailable: "app.trustedHomeDamaged",
+} as const satisfies Record<Exclude<DeviceLine, "none">, string>;
+
+/** A small line under it: what «Разрешить» means for the owner. */
+type Note = { key: NoteKey; attention: boolean };
+
+const UNCONFIRMED_NOTE: Note = { key: "app.pairUnconfirmedAbout", attention: false };
+
+/** The small lines under the key line, in order. */
+const NOTES: Partial<Record<Exclude<DeviceLine, "none">, readonly Note[]>> = {
+  unconfirmed: [UNCONFIRMED_NOTE],
+  unconfirmed_again: [UNCONFIRMED_NOTE],
+  not_trusted: [{ key: "app.pairNotTrustedSessionAbout", attention: false }],
+  listed_waiting: [{ key: "app.pairListedConfirm", attention: false }],
+};
+
+type NoteKey =
+  | "app.pairUnconfirmedAbout"
+  | "app.pairNotTrustedSessionAbout"
+  | "app.pairListedConfirm";
+
+/**
+ * «Удалено из доверенных: {when}» under the title: this request's key was removed at this PC
+ * (`removed_here_at`, the time of its removed record of origin `pc`, the agent's reading). A fact:
+ * it gates nothing and changes no other line.
+ */
+
+function RemovedHereLine({ request }: { request: PendingPairDto }) {
+  const t = useT();
+  const { locale } = useLanguage();
+  const at = request.removed_here_at;
+  useEffect(() => {
+    // biome-ignore lint/suspicious/noConsole: once per request and change of the removal shown
+    console.debug(
+      `[pair] request ${request.request_id}: ${at === undefined ? "no removal at this PC to show" : `removed at this PC at ${at}: «Удалено из доверенных» under the title`}`,
+    );
+  }, [request.request_id, at]);
+  if (at === undefined) return null;
+  return (
+    <p className="text-hint text-balance text-attention">
+      {t("app.pairRemovedHere", { when: whenText(t, locale, at, Date.now()) })}
+    </p>
+  );
+}
+
+/** Which device line a request gets (`TrustedDeviceLine`): the agent's `device_line`. */
+export type DeviceLine = DeviceLineName;
+
+export function deviceLineOf(request: PendingPairDto): DeviceLine {
+  // Device keys: the agent's reading of what the press does to the device — never worked out here.
+  if (request.device_line !== undefined) return request.device_line;
+  const state = request.key_state;
+  // An older agent: the device line when it names the device, as before key states.
+  if (state === undefined) return request.device ? "trusted" : "none";
+  if (state === "absent" || state === "invalid") return "no_key";
+  if (state === "not_trusted_session") return "not_trusted";
+  const unconfirmed = request.will_be_unconfirmed === true;
+  if (state === "was_removed") return unconfirmed ? "unconfirmed_again" : "again";
+  return unconfirmed ? "unconfirmed" : "trusted";
+}
+
+/** The fact line of a request whose «Разрешить» is not offered (`allowOffer`). */
+export type NoOfferFact =
+  | "app.pairNoKey"
+  | "app.pairNotTrustedSession"
+  | "app.trustedAttemptOtherPerson"
+  | "app.pairListClosed"
+  | "app.pairListedWaiting";
+
+/** What to do instead, under the fact line. */
+export type NoOfferStep =
+  | "app.pairNoKeyInvite"
+  | "app.pairNoKeyOwner"
+  | "app.pairNotTrustedSessionAbout"
+  | "app.pairListedConfirm";
+
+/**
+ * Whether the window offers «Разрешить»: exactly when the agent says the press lets the person
+ * connect (`allow_connects`, the core's one reading — never worked out here). Otherwise no primary
+ * button: the fact and what to do for what the press gives (`allow_gives`), and «Отклонить». An
+ * older agent says nothing: offered, as before.
+ */
+export type AllowOffer =
+  | { kind: "allow" }
+  | { kind: "none"; gives: string; fact: NoOfferFact | null; step: NoOfferStep | null };
+
+export function allowOffer(r: PendingPairDto): AllowOffer {
+  if (r.allow_connects !== false) return { kind: "allow" };
+  const gives = r.allow_gives ?? "-";
+  return { kind: "none", gives, ...noOfferLines(r) };
+}
+
+/**
+ * The lines of a request whose «Разрешить» is not offered, by what the press gives: one fact and at
+ * most one step. Causes a person would act on alike share their lines — a session (during the
+ * pairing, or a guest's now: try again with none), the list (full or unreadable: open «Доступ»).
+ */
+function noOfferLines(r: PendingPairDto): { fact: NoOfferFact | null; step: NoOfferStep | null } {
+  switch (r.allow_gives) {
+    case "no_key":
+      // The owner tries again at this PC; a guest asks a trusted device of the owner's.
+      return {
+        fact: "app.pairNoKey",
+        step: r.owner_here === true ? "app.pairNoKeyOwner" : "app.pairNoKeyInvite",
+      };
+    case "session":
+      return { fact: "app.pairNotTrustedSession", step: "app.pairNotTrustedSessionAbout" };
+    // The list refuses the key: nothing to try here.
+    case "other_person":
+      return { fact: "app.trustedAttemptOtherPerson", step: null };
+    case "list_closed":
+      return { fact: "app.pairListClosed", step: null };
+    // Strict: the key is listed for the person and works after «Подтвердить» in «Доступ».
+    case "listed_waiting":
+      return { fact: "app.pairListedWaiting", step: "app.pairListedConfirm" };
+    default:
+      return { fact: null, step: null };
+  }
+}
+
+/**
+ * What is on screen, which the window's consent «Это моё устройство» is for: the request, its
+ * generation in the window's slot (`shown` — another request under the same id is another one) and
+ * the role the press carries. Any change — another request, the same id received again, another
+ * role — is another key, and finds the box unticked for good.
+ */
+export function consentKeyOf(r: PendingPairDto): string {
+  return `${r.request_id}:${r.shown ?? "-"}:${r.role ?? "-"}`;
+}
+
+/** Whether «Разрешить» leads to «Кто это?»: the agent's reading (`asks_role`), never the window's. */
+export function asksRole(r: PendingPairDto): boolean {
+  return r.asks_role === true;
+}
+
+/**
+ * The step the window is at, from the agent's reading alone — the window keeps no step of its own:
+ * «Кто это?» only while the agent asks the role and Rust's step (`step`, kept by the prompt for the
+ * request and generation «Разрешить» was pressed on) says so. The role derived meanwhile (the
+ * requester an owner on this PC now): back at the consent, its consent dropped (`consentTick`) —
+ * never at «Кто это?» with its answers held.
+ */
+export function pairPhase(r: PendingPairDto): PairStep {
+  return asksRole(r) && r.step === "role" ? "role" : "consent";
+}
+
+/** What an approving press sends besides the request and the answer. */
+export interface PairAllowSend {
+  secondStep: boolean;
+  /** The owner's role, with «Это моё устройство» (`ownerStepShown`); else the role the window picks. */
+  role?: BindingRole;
+}
+
+/**
+ * Whether the request window shows the owner's line «Это устройство получит доступ владельца» and
+ * the box «Это моё устройство»: the agent says the press writes an owner-role key
+ * (`needs_owner_step`) and «Разрешить» is offered — the owner's role goes only with that step.
+ * With no key written there is nothing to consent to.
+ */
+export function ownerStepShown(r: PendingPairDto): boolean {
+  return r.needs_owner_step === true && allowOffer(r).kind === "allow";
+}
+
+/**
+ * An approving press («Разрешить», or a role at «Кто это?»): what it sends, or why it is held — the
+ * owner's second step when the window shows his box, else a plain press.
+ */
+export function pairAllowPress(
+  r: PendingPairDto,
+  ownerTicked = false,
+): { send: PairAllowSend } | { held: string } {
+  const offer = allowOffer(r);
+  if (offer.kind === "none") {
+    return {
+      held: `«Разрешить» is not offered: it would not let the person connect (${offer.gives})`,
+    };
+  }
+  if (ownerStepShown(r)) {
+    return ownerTicked
+      ? { send: { secondStep: true, role: "owner" } }
+      : { held: "an owner on this PC and «Это моё устройство» is not ticked" };
+  }
+  // The role the agent derives; none while it is chosen at «Кто это?».
+  const role: BindingRole | undefined = r.role ?? undefined;
+  return { send: role ? { secondStep: false, role } : { secondStep: false } };
+}
+
+/** What an answer sends: a decline needs no step; an approval may wait for «Это моё устройство». */
+function answerPress(
+  request: PendingPairDto,
+  accept: boolean,
+  ownerTicked: boolean,
+): { send: PairAllowSend } | { held: string } {
+  return accept ? pairAllowPress(request, ownerTicked) : { send: { secondStep: false } };
+}
+
+/** How the press's step is said in the log. */
+function stepSaid(step: PairAllowSend): string {
+  return step.secondStep ? " with the second step «Это моё устройство»" : ", no second step";
+}
+
+/**
+ * «Это моё устройство» for the request (`ownerStepShown`): ticked only for what is on screen
+ * (`consentKeyOf`, kept by `useConsent`). `tick`: the press on the box (ignored while the answer
+ * buttons wait).
+ */
+interface OwnerStep {
+  shown: boolean;
+  ticked: boolean;
+  tick: (next: boolean, held: boolean) => void;
+}
+
+/**
+ * An owner on this PC with a device line: in amber what «Разрешить» gives — the owner's access —
+ * and under it the box «Это моё устройство», where the lines' icons stand.
+ */
+function OwnerBlock({
+  ticked,
+  disabled,
+  onTick,
+}: {
+  ticked: boolean;
+  disabled: boolean;
+  onTick: (next: boolean) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-col text-body">
+      <div className="flex items-start gap-2">
+        <Crown className="mt-0.5 size-4 shrink-0 text-attention" aria-hidden="true" />
+        <p className="min-w-0 flex-1 text-balance text-attention">{t("app.trustedAllowOwner")}</p>
+      </div>
+      <Checkbox checked={ticked} held={disabled} onCheckedChange={onTick}>
+        {t("app.trustedAllowOwnerCheck")}
+      </Checkbox>
+    </div>
+  );
+}
+
+/** How an answer is said in the log: «accept as owner», «decline». */
+function answerSaid(accept: boolean, role: BindingRole | undefined): string {
+  if (!accept) return "decline";
+  return role === undefined ? "accept" : `accept as ${role}`;
+}
+
+/**
+ * The window's consent «Это моё устройство» (`ownerStepShown`), kept only for what is on screen
+ * (`consentKeyOf`: the request, its generation and the role) and dropped for good when it changes
+ * (`consentTick`). A tick is ignored while the answer buttons wait.
+ */
+function useConsent(request: PendingPairDto): { own: OwnerStep } {
+  const key = consentKeyOf(request);
+  const [held, setHeld] = useState<ConsentTick>({ seen: key, ownerFor: null, dropped: null });
+  // Another request, generation or role on screen: the consent given goes for good.
+  const now = consentTick(held, key);
+  if (now !== held) setHeld(now);
+  const ownerShown = ownerStepShown(request);
+  const ownerTicked = ownerShown && now.ownerFor === key;
+  useConsentDropLog(key, now.dropped);
+  useEffect(() => {
+    if (!ownerShown) return;
+    // biome-ignore lint/suspicious/noConsole: once per request it shows for
+    console.debug(
+      `[pair] request ${request.request_id} (shown ${request.shown ?? "-"}): the press writes an owner key — the owner's line and «Это моё устройство», «Разрешить» waits for it`,
+    );
+  }, [request.request_id, request.shown, ownerShown]);
+  const ownerTick = (next: boolean, wait: boolean) => {
+    if (wait || !ownerShown) return;
+    // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+    console.debug(
+      `[pair] «Это моё устройство» ${next ? "ticked" : "unticked"} on ${key}: «Разрешить» ${next ? "may go with the owner's role" : "waits"}`,
+    );
+    setHeld({ ...now, ownerFor: next ? key : null, dropped: null });
+  };
+  return { own: { shown: ownerShown, ticked: ownerTicked, tick: ownerTick } };
+}
+
+/**
+ * The window's consent as it keeps it: what was on screen when it was last looked at (`seen`, a
+ * `consentKeyOf`), what «Это моё устройство» was ticked for, and the key whose consent was just
+ * dropped (for the log).
+ */
+export interface ConsentTick {
+  seen: string;
+  ownerFor: string | null;
+  dropped: string | null;
+}
+
+/**
+ * The consent as what is on screen (`key`) now finds it: unchanged for the same request,
+ * generation and role — `pc_allow` coming or going changes none of them — and unticked for good
+ * once anything of it changes, so a request coming back (A, then B, then A again; the same id
+ * received again with another key; owner, guest, owner again) finds its box unticked.
+ */
+export function consentTick(tick: ConsentTick, key: string): ConsentTick {
+  if (tick.seen === key) return tick;
+  return { seen: key, ownerFor: null, dropped: tick.ownerFor !== null ? tick.seen : null };
+}
+
+/** A consent dropped because another request or role is on screen: once per change. */
+function useConsentDropLog(key: string, dropped: string | null) {
+  useEffect(() => {
+    if (dropped === null) return;
+    // biome-ignore lint/suspicious/noConsole: once per consent dropped
+    console.debug(
+      `[pair] a consent was given for ${dropped}; now ${key} is on screen: dropped, the box unticked`,
+    );
+  }, [dropped, key]);
 }
 
 /**

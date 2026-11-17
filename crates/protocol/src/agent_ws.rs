@@ -10,7 +10,7 @@ use crate::common::{BindingInfo, IceCandidate, PairDeclineReason, SdpType, TurnC
 use crate::hw::AgentHw;
 use crate::invites::BindingVia;
 use crate::metrics::{
-    AgentBuildInfo, AgentEvent, AgentLastExit, AgentSessionSummary, SessionEndDetail,
+    AgentBuildInfo, AgentEvent, AgentLastExit, AgentSessionEndDetail, AgentSessionSummary,
 };
 use crate::roles::{
     BindingRole, OwnerRequestKind, OwnerRequestReason, OwnerRequestState, OwnerStateKind,
@@ -44,6 +44,22 @@ pub fn agent_challenge_message(nonce: &[u8]) -> Option<[u8; AGENT_CHALLENGE_MESS
     prefix.copy_from_slice(AGENT_CHALLENGE_PREFIX);
     rest.copy_from_slice(nonce);
     Some(message)
+}
+
+/// [`AgentToServer::GrantToken`]'s value, as on the wire (a bare string). Its `Debug` shows only
+/// whether there is one, so a message printed with `{:?}` never carries the token.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GrantTokenText(pub String);
+
+impl std::fmt::Debug for GrantTokenText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "GrantTokenText(\"\")"
+        } else {
+            "GrantTokenText(<hidden>)"
+        })
+    }
 }
 
 /// Messages the agent sends to the backend.
@@ -99,12 +115,50 @@ pub enum AgentToServer {
         /// owner when the answer arrives. `None` with a refusal: no key on the wire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<BindingRole>,
+        /// The device key the PC took from this request's `viewer_key` (device keys, spec §5), sent
+        /// with an approval that recorded one: for the server's hints only, it lets in nobody.
+        /// Strict base64url of 32 bytes ([`crate::viewer_keys::is_b64url`]). `None` when no key was
+        /// taken, and with a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<String>,
     },
     /// This PC's name, after every authentication and whenever the owner renames the PC: the
     /// device's name follows the PC. Always a valid device name
     /// ([`crate::validate_device_name`]); the agent sends nothing rather than one that is not.
     DeviceName {
         name: String,
+    },
+    /// A batch of one-time numbers for `offer_proof` (device keys, spec §2.2): [`NONCE_BATCH`]
+    /// fresh `nonce_pc` from the PC's CSPRNG, each strict base64url of 16 bytes, all different
+    /// ([`crate::viewer_keys::is_nonce_batch`]). Sent only on a connection whose `agent_ready` said
+    /// `nonce_pool` — an older server answers `bad_message` — after `device_name`, every
+    /// `NONCE_ROTATE_MS`, and on a `session_request` that asks for a refill. Dropped while offline
+    /// (`afklink_core::relay`): a batch is worth nothing on another connection. `batch` rises with
+    /// every batch of the process, for the logs. Never logged: the nonces.
+    ///
+    /// [`NONCE_BATCH`]: crate::viewer_keys::NONCE_BATCH
+    SessionNonces {
+        batch: u32,
+        nonces: Vec<String>,
+    },
+    /// The PC's mode (device keys, spec §12): `observe`, or `strict` with «Доверенные устройства»
+    /// on. Sent right after `agent_ready` (after `device_name`) only on a connection whose
+    /// `agent_ready` said `nonce_pool` — an older server answers `bad_message` — and again at every
+    /// switch. The server keeps the last one per connection (each `agent_ready` resets it to
+    /// unknown, read as `observe`) and asks the owner about a guest's `new_device` by it (§7); it
+    /// lets in nobody. Dropped while offline (`afklink_core::relay`): the next connection gets the
+    /// mode after its own `agent_ready`.
+    KeyMode {
+        mode: crate::viewer_keys::KeyMode,
+    },
+    /// The PC's grant token (device keys, spec §7 «Токен выдачи», §12): 22 characters of
+    /// base64url, or `""` while the PC has none. Sent after this connection's `key_mode` and right
+    /// after every write that replaced the token lands, only on a connection whose `agent_ready`
+    /// said `grant_token` — an older server answers `bad_message`; never while the key list is
+    /// damaged. The server hands it to the owner, who signs it into a `grant`; it decides nothing
+    /// by it. Never logged: only that it was sent.
+    GrantToken {
+        token: GrantTokenText,
     },
     /// Revoke a user's access from the PC side. A guest's goes at once; the owner's is taken by the
     /// server as [`AgentToServer::OwnerRequest`] `unbind_owner` and waits for the owner.
@@ -137,9 +191,10 @@ pub enum AgentToServer {
         reason: Option<String>,
         /// Contract v2 (`crate::metrics::SessionEndDetail`): `peer_closed` split into the viewer's
         /// goodbye and str0m's own close, and how the peer saw its path — kinds and verdicts, never
-        /// an address. Absent when there is nothing to say, and from an older agent.
+        /// an address. Absent when there is nothing to say, and from an older agent. On an end with a
+        /// reason of device keys also `key_mode` ([`AgentSessionEndDetail`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<SessionEndDetail>,
+        detail: Option<AgentSessionEndDetail>,
     },
     /// A cumulative report on a running session.
     ///
@@ -273,6 +328,17 @@ pub enum ServerToAgent {
         protocol_version: u32,
         min_supported_protocol: u32,
         bindings: Vec<BindingInfo>,
+        /// The server keeps a pool of the PC's one-time numbers (device keys, spec §2.2): the agent
+        /// sends [`AgentToServer::SessionNonces`] on this connection, and only on one that said so.
+        /// `Some(true)` from such a server (the contract's literal `true`); `None` from a server
+        /// older than device keys.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_pool: Option<bool>,
+        /// The server takes [`AgentToServer::GrantToken`] (spec §7 «Токен выдачи», §12): the agent
+        /// sends it on this connection, and only on one that said so. `Some(true)` from such a
+        /// server; `None` from one older than the grant token (the owner then signs `""`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_token: Option<bool>,
     },
     /// The code to display. `expires_at` is a ceiling, not the expected lifetime.
     PairingCode {
@@ -300,6 +366,14 @@ pub enum ServerToAgent {
         /// new person is a guest. `None` from a server older than roles: no question either.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         has_owner: Option<bool>,
+        /// The asking device's key card (`key_reg`, device keys, spec §4, §5), from `POST /api/pair`.
+        /// Opaque here, kept raw like `session_request.quality_profile`: the agent holds it to the
+        /// limits itself ([`crate::viewer_keys::check_viewer_key_wire`]) and parses it in
+        /// `afklink_core`, taking it only while its pairing panel is open; one it cannot parse costs
+        /// the key (`admit_refused:key_reg_bad`), never the prompt. `None` from a client or a server
+        /// older than device keys. Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        viewer_key: Option<serde_json::Value>,
     },
     /// The pending prompt is no longer valid; dismiss it.
     PairCancelled {
@@ -381,11 +455,28 @@ pub enum ServerToAgent {
         /// neither (`any_quality_profile_leaves_the_session_request_parsing` pins both cases).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality_profile: Option<serde_json::Value>,
+        /// The one-time number the server put in this session's `session_created` (device keys,
+        /// spec §2.2): for the PC's accounting and logs — the truth is in the offer's `proof`. Kept
+        /// as a string: one not of a nonce's form costs the refill decision, never the request
+        /// ([`crate::viewer_keys::is_b64url`]). `None` when the pool had none, and from a server
+        /// older than device keys. Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce_pc: Option<String>,
     },
+    /// The viewer's SDP, relayed.
     Sdp {
         session_id: String,
         sdp_type: SdpType,
         sdp: String,
+        /// The viewer's `offer_proof` (device keys, spec §3.2), relayed unchanged: opaque here, held
+        /// to the limits by [`crate::viewer_keys::check_proof_wire`] and parsed in `afklink_core`,
+        /// which turns any fault into a verdict, never into a dropped frame. Only an offer carries
+        /// one; on an answer the contract refuses it, and the agent ignores it rather than drop the
+        /// frame. The JSON nesting `serde_json` itself refuses (past 128) still fails the frame —
+        /// see [`crate::viewer_keys`]. `None` from a viewer or a server older than device keys.
+        /// Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<serde_json::Value>,
     },
     Ice {
         session_id: String,
@@ -418,6 +509,9 @@ impl AgentToServer {
             Self::PairingCancel => "pairing_cancel",
             Self::PairResponse { .. } => "pair_response",
             Self::DeviceName { .. } => "device_name",
+            Self::SessionNonces { .. } => "session_nonces",
+            Self::KeyMode { .. } => "key_mode",
+            Self::GrantToken { .. } => "grant_token",
             Self::Unbind { .. } => "unbind",
             Self::OwnerRequest { .. } => "owner_request",
             Self::OwnerRequestCancel { .. } => "owner_request_cancel",
@@ -537,8 +631,19 @@ mod tests {
                 accept: true,
                 name: Some(s()),
                 role: Some(BindingRole::Guest),
+                key_id: Some(s()),
             },
             AgentToServer::DeviceName { name: s() },
+            AgentToServer::SessionNonces {
+                batch: 0,
+                nonces: vec![s()],
+            },
+            AgentToServer::KeyMode {
+                mode: crate::viewer_keys::KeyMode::Strict,
+            },
+            AgentToServer::GrantToken {
+                token: GrantTokenText(s()),
+            },
             AgentToServer::Unbind {
                 telegram_user_id: 1,
             },
@@ -588,6 +693,8 @@ mod tests {
                 protocol_version: 1,
                 min_supported_protocol: 1,
                 bindings: vec![],
+                nonce_pool: Some(true),
+                grant_token: Some(true),
             },
             ServerToAgent::PairingCode {
                 code: s(),
@@ -602,6 +709,7 @@ mod tests {
                 first_name: None,
                 expires_at: 0,
                 has_owner: None,
+                viewer_key: Some(serde_json::json!({})),
             },
             ServerToAgent::PairCancelled {
                 request_id: s(),
@@ -640,11 +748,13 @@ mod tests {
                     credential: s(),
                 },
                 quality_profile: None,
+                nonce_pc: Some(s()),
             },
             ServerToAgent::Sdp {
                 session_id: s(),
                 sdp_type: SdpType::Offer,
                 sdp: s(),
+                proof: Some(serde_json::json!({})),
             },
             ServerToAgent::Ice {
                 session_id: s(),
@@ -698,6 +808,35 @@ mod tests {
         assert!(
             serde_json::from_str::<AgentToServer>(r#"{"type":"agent_goodbye"}"#).is_err(),
             "the reason is required"
+        );
+    }
+
+    /// The grant token goes out as a bare string, and a message printed with `{:?}` (a log line,
+    /// a panic, a test's failure) carries none of it.
+    #[test]
+    fn a_grant_token_is_sent_as_text_and_never_printed() {
+        let value = "AQEBAQEBAQEBAQEBAQEBAQ";
+        let msg = AgentToServer::GrantToken {
+            token: GrantTokenText(value.into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({"type": "grant_token", "token": value})
+        );
+        let back: AgentToServer =
+            serde_json::from_value(serde_json::json!({"type": "grant_token", "token": value}))
+                .unwrap();
+        assert_eq!(back, msg);
+        for printed in [format!("{msg:?}"), format!("{msg:#?}"), format!("{back:?}")] {
+            assert!(!printed.contains(value), "{printed}");
+            assert!(printed.contains("<hidden>"), "{printed}");
+        }
+        let none = AgentToServer::GrantToken {
+            token: GrantTokenText(String::new()),
+        };
+        assert_eq!(
+            format!("{none:?}"),
+            "GrantToken { token: GrantTokenText(\"\") }"
         );
     }
 
@@ -756,10 +895,12 @@ mod tests {
             accept: false,
             name: None,
             role: None,
+            key_id: None,
         };
         let v = serde_json::to_value(&refusal).expect("serialises");
         assert!(v.get("name").is_none(), "{v}");
         assert!(v.get("role").is_none(), "a refusal gives no role: {v}");
+        assert!(v.get("key_id").is_none(), "a refusal names no key: {v}");
         // And the shape older agents send still reads.
         let old = r#"{"type":"pair_response","request_id":"r","accept":true}"#;
         assert_eq!(
@@ -769,6 +910,7 @@ mod tests {
                 accept: true,
                 name: None,
                 role: None,
+                key_id: None,
             }
         );
     }
@@ -1041,5 +1183,101 @@ mod tests {
                 "known: the message fails with this profile"
             );
         }
+    }
+
+    /// Device keys (spec §12): every new field is optional — a server or an agent older than device
+    /// keys reads and writes exactly what it did — and the opaque two are carried raw, whatever
+    /// their shape, so a `proof` or a `viewer_key` the agent cannot use costs a verdict, never the
+    /// offer or the prompt.
+    #[test]
+    fn device_key_fields_are_optional_and_the_opaque_ones_raw() {
+        // Older shapes: parsed, nothing made up, nothing written back.
+        let ready = r#"{"type":"agent_ready","protocol_version":1,"min_supported_protocol":1,"bindings":[]}"#;
+        let msg: ServerToAgent = serde_json::from_str(ready).expect("old agent_ready parses");
+        assert!(matches!(
+            msg,
+            ServerToAgent::AgentReady {
+                nonce_pool: None,
+                grant_token: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_string(&msg).expect("serialises"),
+            ready,
+            "byte for byte"
+        );
+        let offer = r#"{"type":"sdp","session_id":"s","sdp_type":"offer","sdp":"v=0"}"#;
+        let msg: ServerToAgent = serde_json::from_str(offer).expect("old sdp parses");
+        assert!(matches!(msg, ServerToAgent::Sdp { proof: None, .. }));
+        assert_eq!(serde_json::to_string(&msg).expect("serialises"), offer);
+
+        // `proof` of any shape is carried, on an offer and (ignored by the agent) on an answer.
+        for (sdp_type, proof) in [
+            (
+                "offer",
+                r#"{"v":1,"admit":[{"kind":"future_kind","data":{"nested":[1,{"deeper":true}]}}]}"#,
+            ),
+            ("offer", r#"{"v":"one","sig":7}"#),
+            ("offer", r"[1,2,3]"),
+            ("offer", r#""a string""#),
+            ("answer", r#"{"v":1}"#),
+        ] {
+            let text = format!(
+                r#"{{"type":"sdp","session_id":"s","sdp_type":"{sdp_type}","sdp":"v=0","proof":{proof}}}"#
+            );
+            let msg: ServerToAgent =
+                serde_json::from_str(&text).expect("parses whatever the proof");
+            let ServerToAgent::Sdp { proof: got, .. } = msg else {
+                panic!("an sdp");
+            };
+            let expected: serde_json::Value = serde_json::from_str(proof).expect("json");
+            assert_eq!(got, Some(expected), "{text}");
+        }
+        // And `viewer_key` the same.
+        for key in [r#"{"spki":"x","kind":"telegram"}"#, r"[]", r"7"] {
+            let text = format!(
+                r#"{{"type":"pair_request","request_id":"r","telegram_user_id":7,"username":null,"first_name":null,"expires_at":1,"viewer_key":{key}}}"#
+            );
+            let msg: ServerToAgent = serde_json::from_str(&text).expect("parses whatever the key");
+            let ServerToAgent::PairRequest { viewer_key, .. } = msg else {
+                panic!("a pair_request");
+            };
+            let expected: serde_json::Value = serde_json::from_str(key).expect("json");
+            assert_eq!(viewer_key, Some(expected), "{text}");
+        }
+        // A `nonce_pc` not of a nonce's form is still a session_request: the form is the agent's.
+        let turn = r#""turn":{"urls":[],"username":"u","credential":"c"}"#;
+        let text = format!(
+            r#"{{"type":"session_request","session_id":"s","telegram_user_id":1,"username":null,{turn},"nonce_pc":"not a nonce"}}"#
+        );
+        let msg: ServerToAgent = serde_json::from_str(&text).expect("parses");
+        assert!(matches!(
+            msg,
+            ServerToAgent::SessionRequest { nonce_pc: Some(ref n), .. } if n == "not a nonce"
+        ));
+
+        // What the agent sends: `session_nonces` as the contract has it, `key_id` only when set.
+        let batch = AgentToServer::SessionNonces {
+            batch: 7,
+            nonces: vec!["AAAAAAAAAAAAAAAAAAAAAA".into()],
+        };
+        assert_eq!(
+            serde_json::to_string(&batch).expect("serialises"),
+            r#"{"type":"session_nonces","batch":7,"nonces":["AAAAAAAAAAAAAAAAAAAAAA"]}"#
+        );
+        assert!(!batch.is_final_report());
+        assert_eq!(batch.session_id(), None);
+        let approval = AgentToServer::PairResponse {
+            request_id: "r".into(),
+            accept: true,
+            name: None,
+            role: Some(BindingRole::Guest),
+            key_id: Some("k".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&approval).expect("serialises"),
+            r#"{"type":"pair_response","request_id":"r","accept":true,"role":"guest","key_id":"k"}"#
+        );
     }
 }

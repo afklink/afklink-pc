@@ -131,6 +131,10 @@ pub(crate) enum Response {
     Leave(GoodbyeReason),
     /// The reason for being away is over: reconnect (`why`, for the log).
     WelcomeBack(&'static str),
+    /// The system resumed from sleep: reconnect, as [`Self::WelcomeBack`], and the device keys'
+    /// nonce book starts over (spec §2.2: sleep stretched the numbers' age) — a signal of its own,
+    /// since a welcome back is also a cancelled shutdown, where no time was lost.
+    ResumedFromSleep,
 }
 
 /// The response to `event`; also notes a session end for [`exit_reason`].
@@ -149,7 +153,7 @@ pub(crate) fn respond(event: SystemEvent) -> Response {
             Response::WelcomeBack("Windows cancelled the end of the session")
         }
         SystemEvent::Suspending => Response::Goodbye(GoodbyeReason::Sleep),
-        SystemEvent::Resumed { .. } => Response::WelcomeBack("the system resumed from sleep"),
+        SystemEvent::Resumed { .. } => Response::ResumedFromSleep,
     }
 }
 
@@ -272,6 +276,16 @@ fn handle(event: SystemEvent) {
         }
         Response::WelcomeBack(why) => {
             control.welcome_back(why);
+        }
+        Response::ResumedFromSleep => {
+            // The nonce book first: the batch it sends goes on the connection the welcome back
+            // makes (or with the next connection's own).
+            let told = control.resumed_from_sleep();
+            tracing::debug!(
+                told,
+                "system events: resumed from sleep: the device keys' nonce book starts over"
+            );
+            control.welcome_back("the system resumed from sleep");
         }
     }
 }
@@ -483,7 +497,7 @@ mod tests {
         ] {
             let resumed = classify(WM_POWERBROADCAST, pbt, 0).expect("an event");
             assert_eq!(resumed, SystemEvent::Resumed { automatic });
-            assert!(matches!(respond(resumed), Response::WelcomeBack(_)));
+            assert_eq!(respond(resumed), Response::ResumedFromSleep);
         }
         // Battery and power-setting broadcasts, and any other message, are not ours.
         assert_eq!(classify(WM_POWERBROADCAST, 0x000A, 0), None);

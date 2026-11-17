@@ -33,5 +33,6 @@
   "beta_required": "fatal",
   "account_blocked": "fatal",
   "device_blocked": "fatal",
+  "account_mismatch": "fatal",
   "internal": "transient"
 }

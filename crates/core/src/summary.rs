@@ -457,6 +457,15 @@ struct State {
 /// Episodes: at most [`SUMMARY_EPISODES_MAX`](m::SUMMARY_EPISODES_MAX), in the order they began;
 /// past it each is counted in `episodes_dropped` (logged once). `at_ms` is from the session's
 /// start; an episode still going on at a report (a brake, a drain) carries its duration so far.
+/// A session's device-key verdict for its summary (spec §11.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyVerdict {
+    pub verdict: &'static str,
+    pub detail: Option<&'static str>,
+    pub admit: Option<&'static str>,
+    pub mode: afklink_protocol::viewer_keys::KeyMode,
+}
+
 pub struct SessionSummary {
     /// For log lines.
     session: String,
@@ -469,6 +478,9 @@ pub struct SessionSummary {
     /// The quality profile the session runs on (`"<id>.v<v>"`) and where it came from: fixed at the
     /// session's start ([`Self::with_quality_profile`]), so read without the lock.
     quality_profile: Option<(String, m::QualityProfileSource)>,
+    /// The session's device-key verdict (spec §11.1), fixed at its admission
+    /// ([`Self::with_key_verdict`]): `key_verdict`, `key_detail`, `key_admit`, `key_mode`.
+    key: Option<KeyVerdict>,
     state: Mutex<State>,
     /// A summary [`AgentSessionSummary::check`] refused has been warned about (once a session).
     refused_warned: AtomicBool,
@@ -491,6 +503,7 @@ impl SessionSummary {
             capture,
             reach_start_episodes: reach_start.episodes,
             quality_profile: None,
+            key: None,
             state: Mutex::new(State::default()),
             refused_warned: AtomicBool::new(false),
         }
@@ -501,6 +514,25 @@ impl SessionSummary {
     #[must_use]
     pub fn with_quality_profile(mut self, label: &str, source: m::QualityProfileSource) -> Self {
         self.quality_profile = Some((label.to_string(), source));
+        self
+    }
+
+    /// The session's device-key verdict as its admission decided it (spec §11.1).
+    #[must_use]
+    pub fn with_key_verdict(mut self, key: Option<KeyVerdict>) -> Self {
+        let Some(verdict) = key else {
+            tracing::trace!(session = %self.session, "session summary: no device-key verdict");
+            return self;
+        };
+        tracing::debug!(
+            session = %self.session,
+            verdict = verdict.verdict,
+            detail = verdict.detail.unwrap_or("-"),
+            admit = verdict.admit.unwrap_or("-"),
+            mode = ?verdict.mode,
+            "session summary: the device-key verdict"
+        );
+        self.key = Some(verdict);
         self
     }
 
@@ -814,6 +846,11 @@ impl SessionSummary {
             bytes_relay: self.socket.as_ref().map(|b| b.relay()),
             quality_profile: self.quality_profile.as_ref().map(|(l, _)| l.clone()),
             quality_profile_source: self.quality_profile.as_ref().map(|(_, s)| *s),
+            // Device keys (spec §11.1): the verdict its admission decided.
+            key_verdict: self.key.map(|k| k.verdict.to_string()),
+            key_detail: self.key.and_then(|k| k.detail).map(str::to_string),
+            key_admit: self.key.and_then(|k| k.admit).map(str::to_string),
+            key_mode: self.key.map(|k| k.mode),
         }
     }
 
@@ -1326,7 +1363,13 @@ mod tests {
             crate::game::CaptureMode::GameWindow { binding: None },
         ));
         let s = SessionSummary::new("s1", t0, Some(socket), Some(capture), InputReach::default())
-            .with_quality_profile("default.v1", m::QualityProfileSource::Server);
+            .with_quality_profile("default.v1", m::QualityProfileSource::Server)
+            .with_key_verdict(Some(KeyVerdict {
+                verdict: "admit_refused",
+                detail: Some("endorse_signer_revoked"),
+                admit: Some("endorse"),
+                mode: afklink_protocol::viewer_keys::KeyMode::Observe,
+            }));
         // 31.5 motion seconds at 1080p, the picture shown all along.
         for i in 1..=31u64 {
             s.second(at(i * 1_000), sec(30, Some(30)));
@@ -1429,7 +1472,11 @@ mod tests {
                 "bytes_socket": 5_650_000,
                 "bytes_relay": 2_100_000,
                 "quality_profile": "default.v1",
-                "quality_profile_source": "server"
+                "quality_profile_source": "server",
+                "key_verdict": "admit_refused",
+                "key_detail": "endorse_signer_revoked",
+                "key_admit": "endorse",
+                "key_mode": "observe",
             })
         );
         assert!(

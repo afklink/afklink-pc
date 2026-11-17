@@ -189,6 +189,7 @@ fn the_end_detail_and_the_final_flag_are_the_contracts() {
         "pair_local_kind",
         "pair_remote_kind",
         "relay_transport",
+        "key_mode",
     ] {
         assert_eq!(
             detail[code]["pattern"],
@@ -199,8 +200,8 @@ fn the_end_detail_and_the_final_flag_are_the_contracts() {
     assert_eq!(detail["dtls_after_ice_ms"]["maximum"], SESSION_MS_MAX);
     let fields = detail.as_object().expect("detail's properties").len();
     assert_eq!(
-        fields, 7,
-        "the detail grew a field: mirror it in SessionEndDetail"
+        fields, 8,
+        "the detail grew a field: mirror it in AgentSessionEndDetail or SessionEndDetail"
     );
 
     let stats = message_schema("session_stats");
@@ -338,9 +339,22 @@ fn the_summary_bounds_are_the_contracts() {
         ),
         sources
     );
+    // Device keys (§11.1): three patterned codes and the mode's enum.
+    for code in ["key_verdict", "key_detail", "key_admit"] {
+        assert_eq!(
+            summary[code]["pattern"],
+            format!("^[a-z0-9_:]{{1,{END_DETAIL_CODE_MAX}}}$"),
+            "{code}"
+        );
+    }
+    let key_modes: Vec<String> = afklink_protocol::KeyMode::ALL
+        .iter()
+        .map(|m| m.as_str().into())
+        .collect();
+    assert_eq!(schema_enum(&summary["key_mode"]), key_modes);
     let fields = summary.as_object().expect("the summary's properties").len();
     assert_eq!(
-        fields, 15,
+        fields, 19,
         "the summary grew a field: mirror it in AgentSessionSummary"
     );
 

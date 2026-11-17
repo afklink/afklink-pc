@@ -1,6 +1,12 @@
 import type { Locale, TranslationKey, Translator } from "@afklink/i18n/pc";
 
-import type { ClientDevice, JournalEnding, JournalEntryDto, JournalKind } from "../tauri";
+import type {
+  ClientDevice,
+  JournalEnding,
+  JournalEntryDto,
+  JournalKind,
+  TrustedJournalKind,
+} from "../tauri";
 
 /**
  * How the connection journal reads in the window: the device's name, the labels, the day headers and
@@ -47,10 +53,59 @@ const EVENTS: Record<Exclude<JournalKind, "session">, TranslationKey> = {
   invited: "app.journalInvited",
   revoked: "app.journalRevoked",
   paused: "app.journalPaused",
+  device_added: "app.journalDeviceAdded",
+  key_restored: "app.journalKeyRestored",
+  declined_no_key: "app.journalDeclinedNoKey",
+  declined_untrusted: "app.journalDeclinedUntrusted",
+  declined_unknown: "app.journalDeclinedUnknown",
+  trusted_on: "app.journalTrustedOn",
+  trusted_off: "app.journalTrustedOff",
+  device_untrusted: "app.journalUntrusted",
+  other_device_attempt: "app.journalOtherDeviceAttempt",
 };
 
-export function eventLabel(t: Translator, kind: Exclude<JournalKind, "session">): string {
-  return t(EVENTS[kind]);
+const TRUSTED_KINDS: readonly TrustedJournalKind[] = [
+  "device_added",
+  "key_restored",
+  "declined_no_key",
+  "declined_untrusted",
+  "declined_unknown",
+  "trusted_on",
+  "trusted_off",
+  "device_untrusted",
+  "other_device_attempt",
+];
+
+/** A trusted devices' entry (device keys milestone 1): its own two-line row. */
+export function isTrustedKind(kind: JournalKind): kind is TrustedJournalKind {
+  return (TRUSTED_KINDS as readonly string[]).includes(kind);
+}
+
+/** The mode switched on this PC: an entry about the PC, naming nobody. */
+export function namesNobody(kind: JournalKind): boolean {
+  return kind === "trusted_on" || kind === "trusted_off";
+}
+
+/**
+ * A refusal's words by its reason (`journal_view::JournalEntryDto::declined_reason`), in place of
+ * its kind's: a permission given before a removal, a listed device not confirmed.
+ */
+const DECLINED_REASONS: ReadonlyMap<string, TranslationKey> = new Map<string, TranslationKey>([
+  ["grant_stale", "app.journalDeclinedGrantStale"],
+  ["key_unconfirmed", "app.journalDeclinedUnconfirmed"],
+]);
+
+/**
+ * An event's words: its kind's, or a refusal's reason's when it has one this build knows — any
+ * other reason (a newer agent's) reads as the kind.
+ */
+export function eventLabel(
+  t: Translator,
+  kind: Exclude<JournalKind, "session">,
+  declinedReason?: string | null,
+): string {
+  const byReason = declinedReason ? DECLINED_REASONS.get(declinedReason) : undefined;
+  return t(byReason ?? EVENTS[kind]);
 }
 
 /**
@@ -123,7 +178,12 @@ export function journalRowParts(
 ): JournalRowParts {
   if (last === null) return { before: t("app.journalRowEmpty"), name: null, after: "" };
   if (last.kind !== "session") {
-    return { before: "", name: last.name, after: ` · ${eventLabel(t, last.kind)}` };
+    if (namesNobody(last.kind)) return { before: eventLabel(t, last.kind), name: null, after: "" };
+    return {
+      before: "",
+      name: last.name,
+      after: ` · ${eventLabel(t, last.kind, last.declined_reason)}`,
+    };
   }
   if (last.live) return { before: `${t("app.journalNow")} · `, name: last.name, after: "" };
   const day = dayTitle(t, locale, last.at_ms, now);

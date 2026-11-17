@@ -61,6 +61,7 @@ mod toast;
 mod toast_identity;
 mod tray_status;
 mod tray_theme;
+mod trusted;
 mod updater;
 mod webview_runtime;
 mod window_fit;
@@ -270,8 +271,13 @@ fn binding_dto(
 }
 
 /// A pairing request as the request window shows it, its names cleaned as the toasts' are;
-/// `step` at «consent» until `pair_prompt` says otherwise.
-fn pending_pair_dto(p: &afklink_core::agent::PendingPair) -> PendingPairDto {
+/// `step` at «consent» until `pair_prompt` says otherwise. `key`: what «Разрешить» does with its
+/// access key (device keys), when it is this request's.
+fn pending_pair_dto(
+    p: &afklink_core::agent::PendingPair,
+    key: Option<&afklink_core::agent::PairKeyView>,
+) -> PendingPairDto {
+    let key = key.filter(|k| k.request_id == p.request_id);
     PendingPairDto {
         request_id: p.request_id.clone(),
         display_name: p.display_name(),
@@ -279,10 +285,31 @@ fn pending_pair_dto(p: &afklink_core::agent::PendingPair) -> PendingPairDto {
         username: afklink_core::person_name::shown_username(p.username.as_deref()),
         telegram_user_id: p.telegram_user_id,
         expires_at: p.expires_at,
-        asks_role: p.asks_role(),
+        asks_role: p.asks_role_now(key),
         // Set by the caller, from `pair_prompt`, not under the state's lock.
         step: pair_prompt::PairStep::Consent.as_str(),
         link: p.link.as_str(),
+        device: key
+            .and_then(|k| k.device.as_ref())
+            .map(|(kind, platform)| trusted::device_ref_raw(kind, platform)),
+        // Strict mode and a tainted opening: nothing is written, whatever the key — one state for
+        // the window, never «Добавится без подтверждения» beside it.
+        key_state: key.map(|k| match k.key_state {
+            "valid" | "was_removed" if k.not_trusted_session => "not_trusted_session",
+            other => other,
+        }),
+        will_be_unconfirmed: key.map(|k| k.will_be_unconfirmed && !k.not_trusted_session),
+        removed_here_at: key.and_then(|k| k.removed_here_at),
+        via_pc_allow: key.map(|k| k.via_pc_allow),
+        allow_gives: key.map(|k| k.gives.as_str()),
+        allow_connects: key.map(|k| k.gives.connects()),
+        owner_here: key.map(|k| k.owner_here),
+        shown: key.map(|k| k.shown),
+        role: key
+            .and_then(|k| k.role)
+            .map(afklink_core::BindingRole::as_str),
+        needs_owner_step: key.map(|k| k.needs_owner_step),
+        device_line: key.map(|k| k.device_line.as_str()),
     }
 }
 
@@ -314,8 +341,9 @@ struct PendingPairDto {
     username: Option<String>,
     telegram_user_id: i64,
     expires_at: i64,
-    /// «Разрешить» leads to «Кто это?» («Владелец» / «Гость»): the PC has no owner
-    /// (`pair_request.has_owner = false`, `PendingPair::asks_role`).
+    /// «Разрешить» leads to «Кто это?» («Владелец» / «Гость»): the PC has no owner — the
+    /// server's `has_owner = false` and, with device keys, this PC derives no role for the person
+    /// (the core's `PairKeyView::ask_role`).
     asks_role: bool,
     /// Which step the prompt is at (`pair_prompt::PairStep`), kept in Rust so a reloaded request
     /// window comes back at it: `"consent"` — «Отклонить» / «Разрешить»; `"role"` — «Кто это?».
@@ -325,6 +353,57 @@ struct PendingPairDto {
     /// too): the buttons wait, disabled, and «Нет связи» stands by the countdown; `"rechecking"` — the
     /// link is back and the backend's re-send of it is awaited (a moment): the buttons still wait.
     link: &'static str,
+    /// The device the request's access key names (device keys): «Станет доверенным: …».
+    device: Option<trusted::TrustedDeviceRefDto>,
+    /// `"valid"` | `"absent"` | `"invalid"` | `"was_removed"` | `"not_trusted_session"` (strict
+    /// mode and a tainted opening: «Разрешить» writes no key); absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_state: Option<&'static str>,
+    /// A session that is not a confirmed owner's ran since the pairing panel opened: the key
+    /// lands unconfirmed («Добавится без подтверждения: …»).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    will_be_unconfirmed: Option<bool>,
+    /// When THIS request's key was removed at this PC (its removed record of origin `pc`), unix
+    /// ms (the core's `PairKeyView::removed_here_at`): a fact about the key, it gates nothing.
+    /// Absent otherwise (a `server` or `replaced` removal, a removal still pending, no key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed_here_at: Option<i64>,
+    /// «Разрешить» goes via `pc_allow` now (a non-owner's session is live; spec §5): it only asks
+    /// the owner. Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via_pc_allow: Option<bool>,
+    /// What «Разрешить» gives the person (the core's `PairKeyView::gives`): `"connects"`,
+    /// `"added"` (the same key listed for them already), `"no_key"` | `"session"` |
+    /// `"other_person"` | `"list_closed"` | `"listed_waiting"` — the window's lines say why when it is not
+    /// offered (`allow_connects`). Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_gives: Option<&'static str>,
+    /// The press lets the person connect (the core's `PairGives::connects`): the window offers
+    /// «Разрешить» exactly then. Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_connects: Option<bool>,
+    /// The requester is an owner on this PC (the core's `PairKeyView::owner_here`): with a device
+    /// line the window says «Это устройство получит доступ владельца», asks «Это моё устройство»
+    /// and sends the owner's role with that step; with no key, the owner's way to try again.
+    /// Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_here: Option<bool>,
+    /// What is on screen (the core's `PairKeyView::shown`): a consent holds only for the `shown`
+    /// and `role` it was given for, and the press sends it back. Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shown: Option<u64>,
+    /// The role the press carries when the PC derives it (`"owner"` / `"guest"`); absent when it
+    /// is chosen, or without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    /// «Разрешить» waits for «Это моё устройство» (the core's: the plan writes an owner-role
+    /// key). Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_owner_step: Option<bool>,
+    /// The device line (`PairDevice::as_str`): what the press does to the device, true in either
+    /// mode. Absent without device keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_line: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +473,9 @@ struct StatusDto {
     /// The main view's card — its rows «Управление в играх», «Только игра» and «Журнал» — the
     /// one-off autostart question, and what the zone under the hero shows, decided in Rust (`home`).
     home: home::HomeDto,
+    /// Bumped whenever the trusted devices' view changes — an installed change, a reopen, a repair,
+    /// the window token or `clean` — so the window reloads `get_trusted` (`trusted`).
+    trusted_rev: u64,
 }
 
 /// The language the window renders in, from what it passed (`"ru"`, `"en"`), else the one the app
@@ -467,7 +549,9 @@ fn get_status(
             s.paused,
             s.pairing_code.clone(),
             (s.pairing_panel.kind(), s.pairing_expires_at),
-            s.pending_pair.as_ref().map(pending_pair_dto),
+            s.pending_pair
+                .as_ref()
+                .map(|p| pending_pair_dto(p, s.pair_key.as_ref())),
             // Copied out: `access_cache.view` takes the cache's lock, never under this one (KB-4).
             s.bindings.clone(),
             s.bindings_known,
@@ -594,6 +678,12 @@ fn get_status(
         sessions,
         live_for,
         home,
+        // The window reads the list again when it moves: the list's own changes, and the keys of
+        // live sessions (`in_session`).
+        trusted_rev: control
+            .trusted_view()
+            .rev
+            .wrapping_add(control.live_key_ids().0),
     }
 }
 
@@ -658,13 +748,23 @@ fn cancel_pairing(
 /// `role`: the answer to «Кто это?» (`"owner"` or `"guest"`) when the prompt asked it
 /// (`PendingPairDto::asks_role`, after `allow_pair`); absent otherwise, and an approval then makes
 /// the person a guest (`afklink_core`'s `pair_role`).
+///
+/// `second_step`: the owner's explicit second step «Это моё устройство»
+/// (`PendingPairDto::needs_owner_step`); without it such an approval changes nothing (device
+/// keys, §5) and the window comes back for it.
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri hands managed state and each of the window's named arguments in as one"
+)]
 fn respond_pair(
     control: State<'_, AgentControl>,
     prompt: State<'_, pair_prompt::PairPrompt>,
     request_id: String,
     accept: bool,
     role: Option<String>,
+    second_step: Option<bool>,
+    shown: Option<u64>,
 ) {
     let role = match role.as_deref() {
         None => None,
@@ -698,23 +798,243 @@ fn respond_pair(
         );
         return;
     }
+    let second_step = second_step.unwrap_or(false);
     tracing::debug!(
         %request_id,
         accept,
+        second_step,
+        shown = shown.unwrap_or(0),
         role = role.map_or("-", afklink_core::BindingRole::as_str),
         step = prompt.step_for(&request_id).as_str(),
         "window: pairing prompt answered"
     );
-    prompt.answer(&request_id);
+    // Forget, tell the window, then send — in this order (`tell_press`).
+    tell_press(&control.state, &prompt, &request_id);
     send_command(
         &control,
         AgentCommand::RespondToPair {
             request_id,
             accept,
             role,
+            second_step,
+            shown,
         },
         "window",
     );
+}
+
+/// A press on the request window, in its order — the outcome kept for an earlier answer
+/// under its id is forgotten (`forget_earlier_outcome`) before the window is told of the press
+/// (`tell_window`: it closes, or stays for the step). The prompt thread's tick may run between
+/// the two; told first, it would read the earlier `second_step_required` as this press's and
+/// raise the just-answered request again (`pair_prompt::Router::step_again`). The two take
+/// their locks one after the other (`AgentState`, then the prompt's), never nested.
+/// The forget hands the window what it read with it (the core's next outcome
+/// generation): a tick's snapshot read before the forget is older than that.
+fn press_in_order<T>(forget_earlier_outcome: impl FnOnce() -> T, tell_window: impl FnOnce(T)) {
+    let read = forget_earlier_outcome();
+    tell_window(read);
+}
+
+/// A press on the request window before its command goes to the core
+/// (`respond_pair`): the outcome kept from an earlier answer under `request_id` is forgotten —
+/// it is not this press's; the prompt brings the request back only on this press's
+/// `second_step_required` — and the core's next outcome generation read with it; then the
+/// window hears the press and closes. `AgentState`'s lock, then the prompt's, never nested.
+fn tell_press(
+    state: &std::sync::Mutex<afklink_core::AgentState>,
+    prompt: &pair_prompt::PairPrompt,
+    request_id: &str,
+) {
+    press_in_order(
+        || {
+            let mut s = afklink_core::lock(state);
+            let forgot = s.pair_answers.forget(request_id);
+            let from = s.pair_answers.next_generation();
+            drop(s);
+            tracing::debug!(
+                %request_id,
+                forgot,
+                outcomes_from = from,
+                "window: an earlier answer's outcome under this id forgotten before the press"
+            );
+            from
+        },
+        |from| prompt.answer(request_id, from),
+    );
+}
+
+#[cfg(test)]
+mod respond_pair_tests {
+    use super::{press_in_order, tell_press};
+    use crate::pair_prompt::{Change, Router};
+
+    /// A press on a request the core answered
+    /// `second_step_required` before (the step now given, or a decline) forgets that outcome
+    /// before the window hears the press: the prompt thread's tick, running right after the
+    /// window closed, must not take the earlier outcome for this press's and raise the
+    /// just-answered request again.
+    #[test]
+    fn a_press_forgets_the_earlier_outcome_before_the_window_hears_it() {
+        use afklink_core::agent::{PairAnswer, PairAnswers};
+        use std::cell::{Cell, RefCell};
+        for (accept, second_step) in [(true, true), (false, false)] {
+            let router = RefCell::new(Router::default());
+            router.borrow_mut().update(Some("r1"));
+            let answers = RefCell::new(PairAnswers::default());
+            answers
+                .borrow_mut()
+                .note("r1", PairAnswer::SecondStepRequired);
+            let back = Cell::new(false);
+            press_in_order(
+                || {
+                    answers.borrow_mut().forget("r1");
+                    answers.borrow().next_generation()
+                },
+                |from| {
+                    let mut r = router.borrow_mut();
+                    r.answer("r1", from);
+                    // The prompt thread's tick, right after the answer.
+                    let required = answers
+                        .borrow()
+                        .get_noted("r1")
+                        .filter(|(a, _)| *a == PairAnswer::SecondStepRequired)
+                        .map(|(_, g)| g);
+                    back.set(r.step_again("r1", required));
+                },
+            );
+            assert!(
+                !back.get(),
+                "{accept}/{second_step}: an earlier outcome brought the answered request back"
+            );
+            assert!(matches!(
+                router.borrow_mut().update(Some("r1")),
+                Some(Change::Resolved {
+                    answered_here: true,
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// The prompt thread's tick: the `second_step_required` kept for `request_id` with its
+    /// generation, as it reads it under the state's lock.
+    fn tick_reads(state: &std::sync::Mutex<afklink_core::AgentState>, id: &str) -> Option<u64> {
+        use afklink_core::agent::PairAnswer;
+        afklink_core::lock(state)
+            .pair_answers
+            .get_noted(id)
+            .filter(|(a, _)| *a == PairAnswer::SecondStepRequired)
+            .map(|(_, g)| g)
+    }
+
+    /// The prompt thread's tick reads the core's earlier
+    /// `second_step_required` for the request, then a press (the step given, or a decline)
+    /// forgets it and closes the window, then the tick applies what it read: that snapshot is
+    /// older than the press and does not bring the just-answered request back. A
+    /// `second_step_required` the core keeps after the press does.
+    #[test]
+    fn a_tick_snapshot_read_before_the_press_does_not_bring_the_request_back() {
+        use afklink_core::agent::PairAnswer;
+        for (accept, second_step) in [(true, true), (false, false), (true, false)] {
+            let state = std::sync::Mutex::new(afklink_core::AgentState::default());
+            let (prompt, _woken) = crate::pair_prompt::PairPrompt::new();
+            prompt.with_router(|r| r.update(Some("r1")));
+            afklink_core::lock(&state)
+                .pair_answers
+                .note("r1", PairAnswer::SecondStepRequired);
+            let snapshot = tick_reads(&state, "r1");
+            assert!(snapshot.is_some());
+            tell_press(&state, &prompt, "r1");
+            assert_eq!(
+                afklink_core::lock(&state).pair_answers.get("r1"),
+                None,
+                "forgotten at the press"
+            );
+            assert!(
+                !prompt.with_router(|r| r.step_again("r1", snapshot)),
+                "{accept}/{second_step}: a snapshot read before the press brought the answered \
+                 request back"
+            );
+            assert!(matches!(
+                prompt.with_router(|r| r.update(Some("r1"))),
+                Some(Change::Resolved {
+                    answered_here: true,
+                    ..
+                })
+            ));
+            // The core answers this press `second_step_required`: the request comes back.
+            afklink_core::lock(&state)
+                .pair_answers
+                .note("r1", PairAnswer::SecondStepRequired);
+            let now = tick_reads(&state, "r1");
+            assert!(
+                prompt.with_router(|r| r.step_again("r1", now)),
+                "{accept}/{second_step}: this press's outcome brings it back"
+            );
+            assert!(matches!(
+                prompt.with_router(|r| r.update(Some("r1"))),
+                Some(Change::Raised { .. })
+            ));
+        }
+    }
+
+    /// The body of `fn <name>(` in lib.rs, code lines only (comments may name calls freely).
+    fn code_of(name: &str) -> String {
+        let lib: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let head = format!("\nfn {name}");
+        let at = lib
+            .find(&head)
+            .unwrap_or_else(|| panic!("fn {name} in lib.rs"));
+        let end = at + lib[at..].find("\n}\n").expect("the fn's end");
+        lib[at..end].to_string()
+    }
+
+    /// `respond_pair` tells the window of a press
+    /// through `tell_press` — which forgets the earlier outcome (and reads the next generation)
+    /// before the window hears the press, through `press_in_order` — and only then sends its
+    /// command: the core's `second_step_required` for this press can only come after the
+    /// forget, and no earlier one is taken for it. Fails if the command goes first, the forget
+    /// moves after the window, or `respond_pair` forgets or tells the window on its own.
+    #[test]
+    fn respond_pair_forgets_then_tells_the_window_then_sends() {
+        let respond = code_of("respond_pair(");
+        let at = |code: &str, needle: &str| {
+            let found: Vec<usize> = code.match_indices(needle).map(|(at, _)| at).collect();
+            assert_eq!(found.len(), 1, "`{needle}` once: {found:?}");
+            found[0]
+        };
+        assert!(
+            at(&respond, "tell_press(") < at(&respond, "send_command("),
+            "respond_pair: the window hears the press before the command goes"
+        );
+        for bypass in [".forget(", "prompt.answer(", "press_in_order("] {
+            assert!(
+                !respond.contains(bypass),
+                "respond_pair does `{bypass}` itself, past tell_press"
+            );
+        }
+        let tell = code_of("tell_press(");
+        let order = [
+            at(&tell, "press_in_order("),
+            at(&tell, ".forget(request_id)"),
+            at(&tell, ".next_generation()"),
+            at(&tell, "prompt.answer(request_id, from)"),
+        ];
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "tell_press: {order:?}"
+        );
+        let in_order = code_of("press_in_order<");
+        assert!(
+            at(&in_order, "forget_earlier_outcome()") < at(&in_order, "tell_window("),
+            "press_in_order: the forget first"
+        );
+    }
 }
 
 /// «Отвязать» on a person (after its confirmation). A guest's access goes at once; the owner's waits
@@ -2026,6 +2346,10 @@ pub fn run() {
     // log level, read by the window («Журнал»).
     let journal = Arc::new(Journal::open_default(afklink_core::journal::now_ms()));
     let agent = agent.with_journal(Arc::clone(&journal));
+    // The PC's trusted devices beside config.json (`afklink_core::viewer_keys`): read now, on this
+    // thread before the runtime, as config.json is; a damaged list opens damaged (every key denied,
+    // repaired from the window) and never stops the app.
+    let agent = agent.with_trust_store(afklink_core::viewer_keys::TrustStore::open_default());
     // Subscribed before the agent runs, so the updater's health watcher cannot miss the first
     // connection to the server — what a new version on probation reports to the watchdog.
     let update_events = control.subscribe();
@@ -2336,6 +2660,24 @@ pub fn run() {
             // whether the main window is open or not. After the toasts' name is
             // registered above; the events wait in the channel until then.
             guest_toast::spawn(app.handle().clone(), locale, guest_events);
+            // Device keys (spec §3.4 «Органы доверия»): the trust windows for the guard on
+            // AFKLink's own windows. Here in `setup`, on the main thread, where `hwnd()` answers
+            // at once.
+            #[cfg(windows)]
+            {
+                let hwnd_of = |label: &str| {
+                    app.get_webview_window(label)
+                        .and_then(|w| w.hwnd().ok())
+                        .map_or(0, |h| h.0 as usize)
+                };
+                let (pair, main) = (hwnd_of(pair_prompt::WINDOW), hwnd_of("main"));
+                tracing::debug!(
+                    pair_request = pair != 0,
+                    main = main != 0,
+                    "trust windows: the pairing request window and the main window registered"
+                );
+                app.state::<AgentControl>().set_trust_windows(pair, main);
+            }
 
             // An update or a rollback started by the watchdog while the window was hidden (in the
             // tray) keeps it hidden: an update at night leaves nothing on the desktop.
@@ -2464,7 +2806,15 @@ pub fn run() {
             updater::get_update_status,
             updater::check_for_updates,
             updater::apply_update,
-            updater::set_auto_update
+            updater::set_auto_update,
+            trusted::get_trusted,
+            trusted::set_trusted_mode,
+            trusted::remove_trusted_device,
+            trusted::remove_person,
+            trusted::confirm_trusted_device,
+            trusted::attempt_allow,
+            trusted::attempt_hide,
+            trusted::repair_trusted
         ])
         .build(tauri::generate_context!())
         .expect("error while building AFKLink")
@@ -2507,8 +2857,19 @@ pub fn run() {
                 }
                 // Sessions going on end with the process: «Приложение закрыто» in the journal, now
                 // rather than at the next start.
+                // The journal's file work is on its own writer thread: the exit waits for
+                // it here, on the main thread with no lock held, at most `journal::DRAIN_LIMIT`;
+                // what is left past it is said at warn (the next start closes those sessions).
                 match app.try_state::<Arc<Journal>>() {
-                    Some(journal) => journal.app_closing(afklink_core::journal::now_ms()),
+                    Some(journal) => {
+                        journal.app_closing(afklink_core::journal::now_ms());
+                        let drained = journal.drain(afklink_core::journal::DRAIN_LIMIT);
+                        tracing::debug!(
+                            drained,
+                            limit_ms = afklink_core::journal::DRAIN_LIMIT.as_millis() as u64,
+                            "exit: the connection journal's writer drained"
+                        );
+                    }
                     None => tracing::warn!("no connection journal to close at exit"),
                 }
                 // A change of the access list in the watcher's last half second, or a write the
@@ -2791,16 +3152,16 @@ mod name_dto_tests {
     /// the toast's does.
     #[test]
     fn the_request_windows_names_are_cleaned() {
-        let dto = pending_pair_dto(&request(
-            Some("\u{202E}амаМ\u{200B} "),
-            Some(" @ma\u{2060}ma "),
-        ));
+        let dto = pending_pair_dto(
+            &request(Some("\u{202E}амаМ\u{200B} "), Some(" @ma\u{2060}ma ")),
+            None,
+        );
         assert_eq!(dto.first_name.as_deref(), Some("амаМ"));
         assert_eq!(dto.username.as_deref(), Some("mama"));
         assert_eq!(dto.display_name, "амаМ (@mama)");
 
         // «Мама» with no @username: the window shows `#id` beside it (the UI), so no handle here.
-        let dto = pending_pair_dto(&request(Some("Мама"), None));
+        let dto = pending_pair_dto(&request(Some("Мама"), None), None);
         assert_eq!(
             (dto.first_name.as_deref(), dto.username),
             (Some("Мама"), None)
@@ -2808,9 +3169,79 @@ mod name_dto_tests {
         assert_eq!(dto.telegram_user_id, 5_000_000_001);
 
         // Fillers only: no first name, no username — the label is the id.
-        let dto = pending_pair_dto(&request(Some("\u{3164}\u{115F}"), Some("\u{200B}")));
+        let dto = pending_pair_dto(&request(Some("\u{3164}\u{115F}"), Some("\u{200B}")), None);
         assert_eq!((dto.first_name, dto.username), (None, None));
         assert_eq!(dto.display_name, "#5000000001");
+    }
+
+    /// Device keys: the request's key line — its device, its state and whether it lands
+    /// unconfirmed — only for the request it was taken for; nothing of it without device keys.
+    #[test]
+    fn the_request_windows_key_line_is_this_requests() {
+        let req = request(Some("Вера"), None);
+        let key = afklink_core::agent::PairKeyView {
+            request_id: req.request_id.clone(),
+            device: Some(("telegram".into(), "iphone".into())),
+            key_state: "was_removed",
+            will_be_unconfirmed: true,
+            not_trusted_session: false,
+            removed_here_at: Some(1_790_000_000_000),
+            via_pc_allow: false,
+            gives: afklink_core::admission::PairGives::Connects,
+            owner_here: true,
+            shown: 1,
+            ask_role: false,
+            role: None,
+            needs_owner_step: false,
+            device_line: afklink_core::admission::PairDevice::Trusted { again: false },
+        };
+        let json = serde_json::to_value(pending_pair_dto(&req, Some(&key))).expect("json");
+        // The person's latest removal here: one fact.
+        assert_eq!(json["removed_here_at"], 1_790_000_000_000_i64);
+        assert_eq!(json.get("mark_id"), None);
+        assert_eq!(
+            json["device"],
+            serde_json::json!({"kind": "telegram", "platform": "iphone"})
+        );
+        assert_eq!(json["key_state"], "was_removed");
+        assert_eq!(json["will_be_unconfirmed"], true);
+        assert_eq!(json["via_pc_allow"], false);
+        assert_eq!(json["allow_gives"], "connects");
+        assert_eq!(json["allow_connects"], true);
+        assert_eq!(json["owner_here"], true);
+        // The core's one reading: what is shown, the role question and the owner step, the line.
+        assert_eq!(json["shown"], 1);
+        assert_eq!(
+            json["asks_role"], false,
+            "the core's reading, not the server's word"
+        );
+        assert_eq!(json["needs_owner_step"], false);
+        assert_eq!(json["device_line"], "trusted");
+        let other = afklink_core::agent::PairKeyView {
+            request_id: "another".into(),
+            ..key
+        };
+        let json = serde_json::to_value(pending_pair_dto(&req, Some(&other))).expect("json");
+        assert_eq!(json["device"], serde_json::Value::Null);
+        assert!(json.get("key_state").is_none() && json.get("will_be_unconfirmed").is_none());
+        // Strict mode and a tainted opening: one state, never «Добавится без подтверждения».
+        let strict = afklink_core::agent::PairKeyView {
+            request_id: req.request_id.clone(),
+            not_trusted_session: true,
+            ..other
+        };
+        let json = serde_json::to_value(pending_pair_dto(&req, Some(&strict))).expect("json");
+        assert_eq!(json["key_state"], "not_trusted_session");
+        assert_eq!(json["will_be_unconfirmed"], false);
+        let absent = afklink_core::agent::PairKeyView {
+            key_state: "absent",
+            ..strict
+        };
+        let json = serde_json::to_value(pending_pair_dto(&req, Some(&absent))).expect("json");
+        assert_eq!(
+            json["key_state"], "absent",
+            "no key: nothing to say about the session"
+        );
     }
 
     /// «Доступ»: the same cleaning for every row, the role and the id as they were.

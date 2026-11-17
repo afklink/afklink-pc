@@ -66,6 +66,16 @@ pub const AGENT_SENT: &[&str] = &[
     UNBOUND,
     AGENT_DISCONNECTED,
     AGENT_ENDED,
+    // Device keys (spec §11, `crate::viewer_keys::KeyEndReason`).
+    "nonce_stale",
+    "key_required",
+    "key_unknown",
+    "key_unconfirmed",
+    "admit_refused",
+    "key_revoked",
+    "proof_invalid",
+    "fingerprint_changed",
+    "key_list_damaged",
 ];
 
 /// Received from the backend and acted on, never sent by the agent: the backend does not have a

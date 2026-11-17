@@ -8,7 +8,8 @@
  *      clean, and under GitHub Actions the pushed tag is that tag. The version's CHANGELOG section must exist: it becomes the release notes.
  *      `--dry-run` builds whatever HEAD is, under a name no updater accepts as a release.
  *   2. Refused before the build: a signing secret in the environment (this job must have none),
- *      another server address (`AFKLINK_SERVER_URL`), the test build's broken address, an update
+ *      another server address (`AFKLINK_SERVER_URL`), another Telegram bot (`AFKLINK_TG_BOT_ID`
+ *      other than `PROD_TG_BOT_ID`), the test build's broken address, an update
  *      key file with no key or the same key in both key files, a missing NASM (OpenH264 would be
  *      built without its assembly) or Tauri CLI 2.
  *   3. `cargo tauri build --no-bundle -- --profile dist` with no cargo features (never
@@ -28,6 +29,7 @@ import { versionNotes } from "./lib/changelog";
 import {
   assertCargoTauri,
   assertWritable,
+  botIdOverrideRefusal,
   buildDesktopApp,
   CHANGELOG,
   DIST,
@@ -146,6 +148,8 @@ function assertCleanEnvironment(env: Record<string, string | undefined>): void {
       `AFKLINK_SERVER_URL=${server}: a release is always built with ${PROD_SERVER_URL}`,
     );
   }
+  const botId = botIdOverrideRefusal(env);
+  if (botId !== null) throw new Failure(botId);
   const broken = env[BREAK_VAR]?.trim();
   if (broken !== undefined && broken !== "") {
     throw new Failure(`${BREAK_VAR} is set: that is a test build's breakage, never a release's`);

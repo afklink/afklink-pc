@@ -61,7 +61,11 @@ pub const POPUP_WIDTH: u32 = 380;
 
 /// Heights the page may ask for, CSS px: one line of title up to three, plus room for nothing odd.
 const POPUP_MIN_HEIGHT: u32 = 96;
-const POPUP_MAX_HEIGHT: u32 = 360;
+/// The tallest real request — an owner's: a name cut at two lines with its @, the key line with
+/// both its hints, the owner's line and «Это моё устройство», the countdown and the buttons —
+/// measures 414 at Windows' 150 % text; 432 keeps a little room over it and, drawn at 150 % (the
+/// display scale or the text size), still fits a 768 px tall screen with its margins.
+const POPUP_MAX_HEIGHT: u32 = 432;
 
 /// Before the page has reported a height for «Отклонить» / «Разрешить»: its tallest. Measured in the
 /// window's own page at 100, 125 and 150 %, which change nothing in CSS px: 144 for a title
@@ -156,12 +160,60 @@ pub struct Router {
     /// A request answered, while the orchestrator may still hold it: it counts as gone, so the
     /// window closes at once. Forgotten when the pending request is another one.
     answered: Option<String>,
+    /// The first generation of the core's kept outcomes (`PairAnswers::next_generation`
+    /// at the press) that is the answer's: an older outcome is no answer to it.
+    answered_from: u64,
 }
 
 impl Router {
-    /// The owner answered `request_id`.
-    pub fn answer(&mut self, request_id: &str) {
+    /// The owner answered `request_id`. `outcomes_from` — the core's next outcome generation at
+    /// the press, read after the earlier outcome was forgotten (`press_in_order`).
+    pub fn answer(&mut self, request_id: &str, outcomes_from: u64) {
         self.answered = Some(request_id.to_string());
+        self.answered_from = outcomes_from;
+    }
+
+    /// Whether the core answered the press on `request_id` `second_step_required`
+    /// (`required`: the generation of that outcome kept for the id, `AgentState::pair_answers` —
+    /// forgotten at each press). Nothing was sent and the request still waits, so a request
+    /// answered here is not gone: it is shown again, whatever the press was. Whether it came
+    /// back. Only an outcome of this press's or later ([`Self::answer`]'s
+    /// `outcomes_from`) — a snapshot read before the press (the tick's, applied after it) is an
+    /// earlier answer's and changes nothing.
+    pub fn step_again(&mut self, request_id: &str, required: Option<u64>) -> bool {
+        let here = self.answered.as_deref() == Some(request_id);
+        if here {
+            if let Some(generation) = required.filter(|g| *g < self.answered_from) {
+                tracing::debug!(
+                    %request_id,
+                    generation,
+                    answered_from = self.answered_from,
+                    "pairing prompt: a second_step_required read before the press is an earlier \
+                     answer's; the request stays answered"
+                );
+            }
+        }
+        let back = here && required.is_some_and(|g| g >= self.answered_from);
+        if back {
+            self.answered = None;
+        }
+        back
+    }
+
+    /// One tick's snapshot of the core ([`read_core`]) applied in the tick's order —
+    /// [`Self::step_again`], then [`Self::update`] — under the prompt's lock. `step_again` is for
+    /// `pending`'s id.
+    pub fn apply_tick(&mut self, pending: Option<&str>, step_again: Option<u64>) -> Option<Change> {
+        if let Some(id) = pending {
+            if self.step_again(id, step_again) {
+                tracing::debug!(
+                    request_id = %id,
+                    "pairing prompt: the core answered the press second_step_required: the \
+                     request still waits, shown again"
+                );
+            }
+        }
+        self.update(pending)
     }
 
     /// Whether `request_id` is the one shown.
@@ -609,14 +661,16 @@ pub fn scaled(css_px: u32, scale: f64) -> u32 {
 struct Inner {
     router: Router,
     popup: Popup,
-    /// The request whose «Разрешить» was pressed on a PC with no owner: it shows «Кто это?» until
-    /// it is answered or goes ([`PairPrompt::allow`]).
-    role_step: Option<String>,
+    /// The request whose «Разрешить» was pressed on a PC with no owner, with the generation it
+    /// was pressed on (`PairKeyView::shown`): it shows «Кто это?» until it is answered or goes, or
+    /// the core's reading stops asking the role, or another request is placed under its id
+    /// ([`PairPrompt::allow`], `tick`).
+    role_step: Option<(String, Option<u64>)>,
 }
 
 impl Inner {
     fn step_for(&self, request_id: &str) -> PairStep {
-        if self.role_step.as_deref() == Some(request_id) {
+        if self.role_step.as_ref().map(|(id, _)| id.as_str()) == Some(request_id) {
             PairStep::Role
         } else {
             PairStep::Consent
@@ -651,20 +705,29 @@ impl PairPrompt {
         }
     }
 
-    /// The owner answered `request_id`: the window closes at once.
-    pub fn answer(&self, request_id: &str) {
+    /// The owner answered `request_id`: the window closes at once; the core's
+    /// `second_step_required` for this press brings it back ([`Router::step_again`]).
+    /// `outcomes_from` — see [`Router::answer`].
+    pub fn answer(&self, request_id: &str, outcomes_from: u64) {
         let shown = {
             let mut inner = afklink_core::lock(&self.inner);
             let shown = inner.router.is_shown(request_id);
-            inner.router.answer(request_id);
+            inner.router.answer(request_id, outcomes_from);
             shown
         };
         tracing::debug!(
             %request_id,
             shown,
+            outcomes_from,
             "pairing prompt answered: closing the request window"
         );
         self.wake("answered");
+    }
+
+    /// The router, for a test of a press's order.
+    #[cfg(test)]
+    pub fn with_router<R>(&self, f: impl FnOnce(&mut Router) -> R) -> R {
+        f(&mut afklink_core::lock(&self.inner).router)
     }
 
     /// The step `request_id` is at, for `PendingPairDto::step`: «Кто это?» once «Разрешить» was
@@ -676,11 +739,12 @@ impl PairPrompt {
     /// «Разрешить» on a prompt that asks «Кто это?»: the request turns into the question, and
     /// nothing goes to the server until a role is chosen (`respond_pair`). True when it was not at
     /// that step already.
-    pub fn allow(&self, request_id: &str) -> bool {
+    pub fn allow(&self, request_id: &str, generation: Option<u64>) -> bool {
         let (changed, shown) = {
             let mut inner = afklink_core::lock(&self.inner);
-            let changed = inner.role_step.as_deref() != Some(request_id);
-            inner.role_step = Some(request_id.to_string());
+            let at = Some((request_id.to_string(), generation));
+            let changed = inner.role_step != at;
+            inner.role_step = at;
             (changed, inner.router.is_shown(request_id))
         };
         tracing::debug!(
@@ -755,11 +819,10 @@ pub fn allow_pair(
     prompt: State<'_, PairPrompt>,
     request_id: String,
 ) -> bool {
-    let asks = afklink_core::lock(&control.state)
-        .pending_pair
-        .as_ref()
-        .filter(|p| p.request_id == request_id)
-        .map(afklink_core::agent::PendingPair::asks_role);
+    let (asks, generation) = {
+        let s = afklink_core::lock(&control.state);
+        (s.pair_asks_role(&request_id), s.pair_shown(&request_id))
+    };
     match asks {
         Some(true) => {}
         Some(false) => {
@@ -779,7 +842,7 @@ pub fn allow_pair(
             return false;
         }
     }
-    prompt.allow(&request_id);
+    prompt.allow(&request_id, generation);
     let payload = PromptEvent {
         request_id: &request_id,
         shown: true,
@@ -1013,6 +1076,54 @@ struct PromptEvent<'a> {
     shown: bool,
 }
 
+/// What one tick reads of the core, under the `AgentState` lock (taken by the caller, released
+/// before the prompt's).
+pub(crate) struct CoreRead {
+    /// The pending request (the orchestrator's) and its requester's name.
+    pub pending: Option<(String, PersonName)>,
+    /// Whether the core answered the press on it `second_step_required` (the outcome kept
+    /// for its id), with that outcome's generation.
+    pub step_again: Option<u64>,
+    /// Whether «Разрешить» on it asks «Кто это?» now (`AgentState::pair_asks_role`), and the
+    /// generation on screen (`AgentState::pair_shown`): «Кто это?» stays only while both hold.
+    pub role_now: (bool, Option<u64>),
+}
+
+/// The tick's snapshot of the core ([`CoreRead`]).
+/// Whether «Кто это?» stays for `at` (the request and the generation «Разрешить» was pressed on):
+/// that request is still on screen, the same generation of it, and the core still asks its role.
+/// Otherwise the window is back at the consent, the consent given before dropped with the
+/// generation or the role (the window's own rule).
+fn role_step_stays(
+    at: &(String, Option<u64>),
+    pending: Option<&str>,
+    asks_now: bool,
+    shown_now: Option<u64>,
+) -> bool {
+    pending == Some(at.0.as_str()) && asks_now && at.1 == shown_now
+}
+
+pub(crate) fn read_core(s: &afklink_core::AgentState) -> CoreRead {
+    let pending = s
+        .pending_pair
+        .as_ref()
+        .map(|p| (p.request_id.clone(), p.name()));
+    let step_again = pending.as_ref().and_then(|(id, _)| {
+        s.pair_answers
+            .get_noted(id)
+            .filter(|(a, _)| a.waits_for_window())
+            .map(|(_, generation)| generation)
+    });
+    let role_now = pending.as_ref().map_or((false, None), |(id, _)| {
+        (s.pair_asks_role(id).unwrap_or(false), s.pair_shown(id))
+    });
+    CoreRead {
+        pending,
+        step_again,
+        role_now,
+    }
+}
+
 fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
     let (Some(control), Some(prompt)) = (
         app.try_state::<AgentControl>(),
@@ -1020,17 +1131,30 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
     ) else {
         return;
     };
-    let pending: Option<(String, PersonName)> = afklink_core::lock(&control.state)
-        .pending_pair
-        .as_ref()
-        .map(|p| (p.request_id.clone(), p.name()));
+    // Read here, applied below under the prompt's lock: a press may come between
+    // (`Router::apply_tick` tells).
+    let CoreRead {
+        pending,
+        step_again,
+        role_now: (asks_now, shown_now),
+    } = read_core(&afklink_core::lock(&control.state));
     let (showing, forgot_role) = {
         let mut inner = afklink_core::lock(&prompt.inner);
-        // The request at «Кто это?» is gone (answered, withdrawn, expired): its step with it.
-        let forgot_role = match (&inner.role_step, &pending) {
-            (Some(at_role), Some((id, _))) if at_role == id => None,
-            (Some(_), _) => inner.role_step.take(),
-            (None, _) => None,
+        // The request at «Кто это?» is gone (answered, withdrawn, expired), another one is placed
+        // under its id, or the core does not ask its role now (the requester is an owner on this PC
+        // now, or the PC derives a role): its step goes, and the window is at the consent again.
+        let stays = inner.role_step.as_ref().is_none_or(|at| {
+            role_step_stays(
+                at,
+                pending.as_ref().map(|(id, _)| id.as_str()),
+                asks_now,
+                shown_now,
+            )
+        });
+        let forgot_role = if stays {
+            None
+        } else {
+            inner.role_step.take().map(|(id, _)| id)
         };
         (inner.router.shown().is_some(), forgot_role)
     };
@@ -1038,7 +1162,8 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
         tracing::debug!(
             %request_id,
             "pairing prompt: the request that was at «Кто это?» is gone (answered, withdrawn or \
-             expired); its step is forgotten"
+             expired), replaced under its id, or its role is no longer asked; its step is \
+             forgotten, the window is at the consent"
         );
     }
     if pending.is_none() && !showing {
@@ -1049,7 +1174,7 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
         let mut inner = afklink_core::lock(&prompt.inner);
         let change = inner
             .router
-            .update(pending.as_ref().map(|(id, _)| id.as_str()));
+            .apply_tick(pending.as_ref().map(|(id, _)| id.as_str()), step_again);
         if let Some(change) = &change {
             match change.shown() {
                 Some(id) => {
@@ -1560,7 +1685,7 @@ mod tests {
     fn an_answer_closes_it_at_once() {
         let mut r = Router::default();
         r.update(Some("r1"));
-        r.answer("r1");
+        r.answer("r1", 0);
         // The orchestrator has not cleared the request yet: it is gone all the same.
         assert_eq!(
             r.update(Some("r1")),
@@ -1609,9 +1734,89 @@ mod tests {
     #[test]
     fn an_answer_for_another_request_is_forgotten() {
         let mut r = Router::default();
-        r.answer("old");
+        r.answer("old", 0);
         assert!(matches!(r.update(Some("r1")), Some(Change::Raised { .. })));
         assert!(r.is_shown("r1"));
+    }
+
+    /// «Разрешить» closes the request window, but the core answered `second_step_required` (the
+    /// owner's step missing): the request still waits. Its kept outcome brings the window back
+    /// for the step; another request's outcome, or none, does not.
+    #[test]
+    fn a_second_step_the_core_asks_for_brings_the_request_back() {
+        let mut r = Router::default();
+        r.update(Some("r1"));
+        r.answer("r1", 0);
+        assert!(matches!(
+            r.update(Some("r1")),
+            Some(Change::Resolved {
+                answered_here: true,
+                ..
+            })
+        ));
+        assert!(!r.step_again("r1", None), "no outcome yet: still gone");
+        assert_eq!(r.update(Some("r1")), None);
+        assert!(
+            r.step_again("r1", Some(0)),
+            "the core kept second_step_required for it"
+        );
+        assert!(matches!(r.update(Some("r1")), Some(Change::Raised { .. })));
+        assert!(r.is_shown("r1"));
+        assert!(
+            !r.step_again("r1", Some(0)),
+            "shown: nothing more to bring back"
+        );
+        // Another request's outcome changes nothing.
+        let mut r = Router::default();
+        r.update(Some("r1"));
+        r.answer("r1", 0);
+        assert!(!r.step_again("r2", Some(0)));
+        assert!(matches!(
+            r.update(Some("r1")),
+            Some(Change::Resolved { .. })
+        ));
+    }
+
+    /// «Разрешить» without the step closed the window, the core
+    /// answered `second_step_required`, and the server re-sent the request (a reconnect) before
+    /// the tick: the core keeps the outcome across a retransmit of a request that still waits
+    /// (agent.rs `a_retransmit_of_a_waiting_request_keeps_its_second_step_outcome`), so the tick
+    /// brings the request back for the step; the request stays the same one on screen.
+    #[test]
+    fn a_request_re_sent_after_the_core_asked_for_the_step_comes_back() {
+        use afklink_core::agent::{PairAnswer, PairAnswers};
+        let mut r = Router::default();
+        let mut answers = PairAnswers::default();
+        r.update(Some("r1"));
+        r.answer("r1", 0);
+        assert!(matches!(
+            r.update(Some("r1")),
+            Some(Change::Resolved {
+                answered_here: true,
+                ..
+            })
+        ));
+        answers.note("r1", PairAnswer::SecondStepRequired);
+        // The retransmit: pending is still `r1`, the outcome kept (the core's side).
+        let required = answers
+            .get_noted("r1")
+            .filter(|(a, _)| *a == PairAnswer::SecondStepRequired)
+            .map(|(_, g)| g);
+        assert!(r.step_again("r1", required), "the tick brings it back");
+        assert!(matches!(r.update(Some("r1")), Some(Change::Raised { .. })));
+        assert!(r.is_shown("r1"));
+        // Had the retransmit forgotten it, the window would stay hidden while the request waits.
+        let mut r = Router::default();
+        r.update(Some("r1"));
+        r.answer("r1", 0);
+        r.update(Some("r1"));
+        assert!(answers.forget("r1"));
+        let required = answers
+            .get_noted("r1")
+            .filter(|(a, _)| *a == PairAnswer::SecondStepRequired)
+            .map(|(_, g)| g);
+        assert!(!r.step_again("r1", required));
+        assert_eq!(r.update(Some("r1")), None, "hidden");
     }
 
     // ---- The request window: shown once drawn, re-placed on a new height ----
@@ -1899,6 +2104,8 @@ mod tests {
             }
         }
         const { assert!(POPUP_ROLE_DEFAULT_HEIGHT <= POPUP_MAX_HEIGHT) };
+        // The tallest a page may ask for fits that screen too.
+        assert!(scaled(POPUP_MAX_HEIGHT, 1.5) + scaled(POPUP_MARGIN, 1.5) * 2 <= 768);
         // The window's size before any placement (tauri.conf.json, logical px, which Windows scales
         // by DPI alone) is where a window that could not be placed stays: it holds both steps too.
         let conf: serde_json::Value =
@@ -2140,13 +2347,32 @@ mod tests {
     fn allow_puts_the_request_at_the_role_question() {
         let (prompt, _woken) = PairPrompt::new();
         assert_eq!(prompt.step_for("r1"), PairStep::Consent);
-        assert!(prompt.allow("r1"));
-        assert!(!prompt.allow("r1"), "once");
+        assert!(prompt.allow("r1", Some(1)));
+        assert!(!prompt.allow("r1", Some(1)), "once");
         assert_eq!(prompt.step_for("r1"), PairStep::Role);
         assert_eq!(
             prompt.step_for("r2"),
             PairStep::Consent,
             "another request starts at the first step"
         );
+    }
+
+    /// «Кто это?» stays only for the request and generation it was pressed on while the core
+    /// still asks the role: the requester turned owner on this PC, or the request placed again
+    /// under its id, brings the window back to the consent — never stuck at the question.
+    #[test]
+    fn the_role_question_follows_the_cores_reading() {
+        let at = ("r1".to_string(), Some(3));
+        assert!(role_step_stays(&at, Some("r1"), true, Some(3)));
+        assert!(
+            !role_step_stays(&at, Some("r1"), false, Some(3)),
+            "the role is derived now (an owner on this PC): back to the consent"
+        );
+        assert!(
+            !role_step_stays(&at, Some("r1"), true, Some(4)),
+            "another request under the same id"
+        );
+        assert!(!role_step_stays(&at, Some("r2"), true, Some(3)));
+        assert!(!role_step_stays(&at, None, true, None), "gone");
     }
 }

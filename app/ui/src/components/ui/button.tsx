@@ -22,7 +22,9 @@ import { cn } from "../../lib/utils";
  * the border with the fill, so a disabled button read as a different, borderless shape, and a
  * disabled primary as a murky lime). `aria-disabled` looks the same and is what a button in
  * flight uses: it keeps focus where it is, which a disabled button would lose; the handler drops
- * the press itself.
+ * the press itself. The Rule border is the shape a variant already has, so `ghost`, which has
+ * none, keeps none: its disabled look is the disabled ink alone (a border drew a pill around a
+ * card's text action that its normal look never had).
  *
  * Focus is the window's one focus outline (`styles.css`), not a box-shadow ring: an outline with
  * an offset leaves a transparent gap on any surface, and Windows Contrast themes keep outlines but
@@ -39,7 +41,8 @@ const buttonVariants = cva(
         secondary: "border-line bg-panel text-ink hover:border-line-strong hover:bg-panel-raised",
         primary:
           "border-transparent bg-accent font-semibold text-accent-ink hover:bg-accent-strong active:bg-accent-pressed",
-        ghost: "border-transparent bg-transparent text-muted hover:bg-white/6 hover:text-ink",
+        ghost:
+          "border-transparent bg-transparent text-muted hover:bg-white/6 hover:text-ink disabled:border-transparent aria-disabled:border-transparent",
         destructive:
           "border-danger/35 bg-danger-dim font-semibold text-danger hover:border-danger/55 hover:bg-danger/15",
         dangerQuiet:

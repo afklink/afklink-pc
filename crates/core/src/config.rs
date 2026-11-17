@@ -779,7 +779,7 @@ fn remove_leftovers(path: &Path) {
 /// Whatever fails leaves `path` as it was and removes the temporary file; every failure is in the
 /// error, a replace that took more than one try is logged, and so is a temporary file that cannot be
 /// removed. Leftovers of a crashed save are removed first ([`remove_leftovers`]).
-fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     remove_leftovers(path);
     let name = path

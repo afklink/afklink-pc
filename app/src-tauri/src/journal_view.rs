@@ -24,8 +24,9 @@ const DAY_MS: i64 = 86_400_000;
 pub(crate) struct JournalEntryDto {
     /// The session's id, or the event's own.
     pub(crate) id: String,
-    /// `"session"`, `"granted"`, `"invited"` (a guest the owner let in by his invite), `"revoked"`
-    /// or `"paused"`.
+    /// `"session"`, `"granted"`, `"invited"` (a guest the owner let in by his invite), `"revoked"`,
+    /// `"paused"`, `"trusted_on"` / `"trusted_off"` (the switch: user 0, an empty name) or
+    /// `"device_untrusted"`.
     pub(crate) kind: &'static str,
     pub(crate) telegram_user_id: i64,
     /// First name, else `@username`, else `#id`, as of the entry.
@@ -47,6 +48,45 @@ pub(crate) struct JournalEntryDto {
     /// Sessions: its log is still kept (younger than `SESSION_MAX_AGE_DAYS`), so «Отправить логи»
     /// can carry it first.
     pub(crate) logs: bool,
+    /// `"device_untrusted"`: the device it is about — `kind` (`None` for one this build does not
+    /// know), `platform` (raw) and `source` as the trusted devices' window names it. Absent
+    /// elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) trusted_device: Option<JournalTrustedDeviceDto>,
+    /// `"device_added"`: a new device of a guest the PC already had (spec §7, a guest's new
+    /// device), not a new person. Absent (false) elsewhere.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) guest_new_device: bool,
+    /// `"device_added"`: the device that vouched for it (`endorse.by` / `grant.by`), as
+    /// `trusted_device`. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) by_device: Option<JournalTrustedDeviceDto>,
+    /// `"declined_*"`: why the connection was refused, as the entry has it (`grant_stale`,
+    /// `key_unconfirmed`, or a word this build does not know — the window reads
+    /// that as the kind). Absent for a refusal without one and elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) declined_reason: Option<String>,
+}
+
+/// A trusted device as a journal entry names it.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JournalTrustedDeviceDto {
+    pub(crate) kind: Option<&'static str>,
+    pub(crate) platform: Option<String>,
+    pub(crate) source: &'static str,
+}
+
+fn trusted_device_dto(d: &afklink_core::journal::TrustedDevice) -> JournalTrustedDeviceDto {
+    JournalTrustedDeviceDto {
+        kind: match d.kind.as_str() {
+            "telegram" => Some("telegram"),
+            "telegram_desktop" => Some("telegram_desktop"),
+            "browser" => Some("browser"),
+            _ => None,
+        },
+        platform: (!d.platform.is_empty()).then(|| d.platform.clone()),
+        source: crate::trusted::source_name(&d.source),
+    }
 }
 
 /// The «Журнал» screen.
@@ -82,6 +122,15 @@ pub(crate) fn entry_dto(view: &View, locale: Locale, now_ms: i64) -> JournalEntr
         game_only: e.game_only,
         weak: e.weak,
         logs: session && now_ms.saturating_sub(e.at) < SESSION_MAX_AGE_DAYS * DAY_MS,
+        trusted_device: e.trusted_device.as_ref().map(trusted_device_dto),
+        guest_new_device: e.guest_new_device,
+        by_device: e.by_device.as_ref().map(trusted_device_dto),
+        declined_reason: matches!(
+            e.kind,
+            Kind::DeclinedNoKey | Kind::DeclinedUntrusted | Kind::DeclinedUnknown
+        )
+        .then(|| e.reason.clone())
+        .flatten(),
     }
 }
 
@@ -201,5 +250,48 @@ mod tests {
         assert_eq!(e.ending, None);
         assert!(!e.live);
         assert!(!e.logs);
+    }
+
+    /// A refusal's reason reaches the window as the entry has it — a word this build does not
+    /// know too (the window reads it as the kind); a refusal without one has none, and a
+    /// session's end reason never passes as one.
+    #[test]
+    fn a_refusals_reason_reaches_the_window() {
+        let vera = || Person {
+            user: 7,
+            name: "Вера",
+            username: None,
+        };
+        let j = Journal::open(None, T0);
+        j.declined(Kind::DeclinedUnknown, vera(), Some("grant_stale"), T0);
+        let e = entry_dto(&j.last().expect("event"), Locale::Ru, T0);
+        assert_eq!(e.kind, "declined_unknown");
+        assert_eq!(e.declined_reason.as_deref(), Some("grant_stale"));
+        j.declined(
+            Kind::DeclinedUnknown,
+            vera(),
+            Some("a_newer_reason"),
+            T0 + 1,
+        );
+        let e = entry_dto(&j.last().expect("event"), Locale::Ru, T0 + 1);
+        assert_eq!(e.declined_reason.as_deref(), Some("a_newer_reason"));
+        j.declined(Kind::DeclinedNoKey, vera(), None, T0 + 2);
+        let e = entry_dto(&j.last().expect("event"), Locale::Ru, T0 + 2);
+        assert_eq!(e.declined_reason, None);
+
+        let j = Journal::open(None, T0);
+        j.session_started(
+            &SessionStart {
+                session_id: "s1",
+                user: 7,
+                name: "Вера",
+                username: None,
+                game_only: false,
+            },
+            T0,
+        );
+        j.session_ended("s1", "ice_timeout", T0 + 60_000);
+        let s = entry_dto(&j.last().expect("done"), Locale::Ru, T0 + 60_000);
+        assert_eq!(s.declined_reason, None);
     }
 }

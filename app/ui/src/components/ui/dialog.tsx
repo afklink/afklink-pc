@@ -34,7 +34,9 @@ export function Dialog({
   onClose,
   wide,
   title,
+  titleWraps = false,
   initialFocus,
+  footer,
 }: {
   children: ReactNode;
   /** Absent: nothing closes the dialog (no ✕, no Escape, no press outside) — e.g. while it waits. */
@@ -42,8 +44,18 @@ export function Dialog({
   wide?: boolean;
   /** The dialog's visible title, which also names it. */
   title: string;
+  /**
+   * The title takes a second line rather than an ellipsis: a question that must be read whole
+   * (the trusted devices' switch question). Off: one line, cut at its end, as before.
+   */
+  titleWraps?: boolean;
   /** What takes focus when the dialog opens; the panel when absent or not rendered. */
   initialFocus?: RefObject<HTMLElement | null> | undefined;
+  /**
+   * Kept whole under the content however tall it grows (a question's status line and its
+   * buttons): the content scrolls between the title and it. Absent: the whole panel scrolls.
+   */
+  footer?: ReactNode;
 }) {
   const t = useT();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -59,7 +71,9 @@ export function Dialog({
     const active = document.activeElement;
     const opener = active instanceof HTMLElement && active !== document.body ? active : null;
     if (root) root.inert = true;
-    (initialFocus?.current ?? panel)?.focus();
+    // Without scrolling: a dialog taller than the window opens at its top (its title and the
+    // question), not at the buttons the focus goes to.
+    (initialFocus?.current ?? panel)?.focus({ preventScroll: true });
     return () => {
       if (root) root.inert = false;
       const now = document.activeElement;
@@ -98,13 +112,20 @@ export function Dialog({
         // Holds focus when the dialog opens, so no control starts focused; not a Tab stop.
         tabIndex={-1}
         className={cn(
-          "max-h-full w-full animate-zoom-in overflow-y-auto rounded-card border border-line-strong bg-panel p-5 shadow-dialog outline-none",
+          "max-h-full w-full animate-zoom-in rounded-card border border-line-strong bg-panel p-5 shadow-dialog outline-none",
+          footer === undefined ? "overflow-y-auto" : "flex flex-col overflow-hidden",
           wide ? "max-w-[360px]" : "max-w-[320px]",
         )}
       >
         {/* As tall with the ✕ as without it: a dialog that drops the ✕ while it waits does not jump. */}
         <header className="mb-4 flex min-h-7 items-center justify-between gap-3">
-          <h2 id={titleId} className="truncate text-heading font-semibold text-ink">
+          <h2
+            id={titleId}
+            className={cn(
+              "text-heading font-semibold text-ink",
+              titleWraps ? "text-balance break-words" : "truncate",
+            )}
+          >
             {title}
           </h2>
           {onClose ? (
@@ -127,7 +148,15 @@ export function Dialog({
             </button>
           ) : null}
         </header>
-        {children}
+        {footer === undefined ? (
+          children
+        ) : (
+          <>
+            {/* The scroll reaches the panel's edges, so its bar sits by the border, not in the text. */}
+            <div className="-mx-5 min-h-0 flex-1 overflow-y-auto px-5">{children}</div>
+            <div className="shrink-0 pt-4">{footer}</div>
+          </>
+        )}
       </div>
     </div>,
     document.body,

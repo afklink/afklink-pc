@@ -363,6 +363,48 @@ impl SessionEndDetail {
     }
 }
 
+/// The agent's `session_end.detail` (`agentSessionEndDetailSchema`): [`SessionEndDetail`] and
+/// `key_mode`, the PC's «Доверенные устройства» mode at the moment the agent ended the session —
+/// a word of `KEY_MODES` ([`crate::KeyMode::as_str`]). Only on the agent's own ends with a reason of
+/// device keys ([`crate::KeyEndReason`]): observe ends sessions with those reasons too, so the
+/// reason alone does not tell the server's copy of the mode which one the PC is in. A patterned code
+/// on the wire, like the rest of `detail`: a word the server does not know costs that field, never
+/// the end. The viewer's `session_end` never carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionEndDetail {
+    #[serde(flatten)]
+    pub base: SessionEndDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_mode: Option<String>,
+}
+
+impl AgentSessionEndDetail {
+    /// Nothing in it: sent as no `detail` at all.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// [`SessionEndDetail::keep_valid`], and `key_mode` left out when it is not of the wire's shape.
+    pub fn keep_valid(self) -> (Self, Vec<&'static str>) {
+        let (base, mut dropped) = self.base.keep_valid();
+        let mut key_mode = self.key_mode;
+        if key_mode.as_deref().is_some_and(|c| !is_end_detail_code(c)) {
+            key_mode = None;
+            dropped.push("key_mode");
+        }
+        (Self { base, key_mode }, dropped)
+    }
+}
+
+impl From<SessionEndDetail> for AgentSessionEndDetail {
+    fn from(base: SessionEndDetail) -> Self {
+        Self {
+            base,
+            key_mode: None,
+        }
+    }
+}
+
 /* --- the agent's summary of a session ------------------------------------------------------ */
 
 /// What happened during a session (`SESSION_EPISODE_KINDS`).
@@ -529,6 +571,22 @@ pub struct AgentSessionSummary {
     /// Where that profile came from (`QUALITY_PROFILE_SOURCES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_profile_source: Option<QualityProfileSource>,
+    /// Viewer device keys (spec §11.1): the session's verdict — `signed`,
+    /// [`crate::viewer_keys::KEY_VERDICT_UNSIGNED`] (no `proof`) or a
+    /// [`crate::viewer_keys::KeyEndReason`] — as a patterned code (`END_DETAIL_CODE_PATTERN`), like
+    /// `session_end.detail`: the server keeps the ones on its list. Absent from an older agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_verdict: Option<String>,
+    /// The verdict's `ended_detail`, a patterned code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_detail: Option<String>,
+    /// The base that added the key in this session ([`crate::viewer_keys::KeyAdmit`]'s word), a
+    /// patterned code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_admit: Option<String>,
+    /// The PC's mode (`KEY_MODES`): an enum on the wire, the server knowing every mode first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_mode: Option<crate::viewer_keys::KeyMode>,
 }
 
 /// Where a session's quality profile came from (`QUALITY_PROFILE_SOURCES`): the server's
@@ -621,6 +679,15 @@ impl AgentSessionSummary {
             .is_some_and(|l| l.chars().count() > QUALITY_PROFILE_LABEL_MAX)
         {
             return err("summary.quality_profile");
+        }
+        for (name, code) in [
+            ("summary.key_verdict", &self.key_verdict),
+            ("summary.key_detail", &self.key_detail),
+            ("summary.key_admit", &self.key_admit),
+        ] {
+            if code.as_deref().is_some_and(|c| !is_end_detail_code(c)) {
+                return err(name);
+            }
         }
         Ok(())
     }
@@ -1098,6 +1165,40 @@ mod tests {
             }),
             Err("summary.episodes.code")
         );
+        // Device keys: the three codes hold to the end-detail pattern; the mode is an enum.
+        let keyed = AgentSessionSummary {
+            key_verdict: Some("admit_refused".into()),
+            key_detail: Some("endorse_signer_revoked".into()),
+            key_admit: Some("endorse".into()),
+            key_mode: Some(crate::viewer_keys::KeyMode::Strict),
+            ..good.clone()
+        };
+        assert_eq!(keyed.check(), Ok(()));
+        for (name, bad) in [
+            (
+                "summary.key_verdict",
+                AgentSessionSummary {
+                    key_verdict: Some("Admit Refused".into()),
+                    ..keyed.clone()
+                },
+            ),
+            (
+                "summary.key_detail",
+                AgentSessionSummary {
+                    key_detail: Some("x".repeat(END_DETAIL_CODE_MAX + 1)),
+                    ..keyed.clone()
+                },
+            ),
+            (
+                "summary.key_admit",
+                AgentSessionSummary {
+                    key_admit: Some(String::new()),
+                    ..keyed.clone()
+                },
+            ),
+        ] {
+            assert_eq!(field(bad), Err(name));
+        }
         assert_eq!(
             field(AgentSessionSummary {
                 encode_ms_p95: Some(60_001.0),
@@ -1175,5 +1276,42 @@ mod tests {
             serde_json::to_value(SessionEndDetail::default()).expect("serialises"),
             serde_json::json!({})
         );
+    }
+
+    /// The agent's `key_mode` sits beside the shared fields on the wire, is kept when it is of the
+    /// wire's shape and costs only itself when it is not.
+    #[test]
+    fn the_agents_key_mode_is_kept_or_left_out_alone() {
+        let detail = AgentSessionEndDetail {
+            base: SessionEndDetail {
+                ended_detail: Some("endorse_spent".into()),
+                ..Default::default()
+            },
+            key_mode: Some(crate::KeyMode::Observe.as_str().into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&detail).expect("serialises"),
+            serde_json::json!({ "ended_detail": "endorse_spent", "key_mode": "observe" })
+        );
+        let (kept, dropped) = detail.clone().keep_valid();
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(kept, detail);
+
+        let bad = AgentSessionEndDetail {
+            key_mode: Some("Strict!".into()),
+            ..detail
+        };
+        let (kept, dropped) = bad.keep_valid();
+        assert_eq!(dropped, ["key_mode"]);
+        assert_eq!(kept.key_mode, None);
+        assert_eq!(kept.base.ended_detail.as_deref(), Some("endorse_spent"));
+
+        let parsed: AgentSessionEndDetail =
+            serde_json::from_value(serde_json::json!({ "stage": "dtls", "key_mode": "strict" }))
+                .expect("parses");
+        assert_eq!(parsed.base.stage.as_deref(), Some("dtls"));
+        assert_eq!(parsed.key_mode.as_deref(), Some("strict"));
+        assert!(AgentSessionEndDetail::default().is_empty());
+        assert!(!AgentSessionEndDetail::from(parsed.base).is_empty());
     }
 }

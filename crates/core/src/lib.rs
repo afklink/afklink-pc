@@ -5,6 +5,7 @@
 //! `input`) and are injected via [`agent::Backends`], so this crate carries no
 //! Windows-only dependencies and can be checked/run in isolation.
 
+pub mod admission;
 pub mod agent;
 pub mod agent_events;
 pub mod bg_hold;
@@ -44,7 +45,9 @@ pub mod step_watch;
 pub mod summary;
 pub mod sync;
 pub mod traits;
+pub mod trusted;
 pub mod types;
+pub mod viewer_keys;
 pub mod viewer_report;
 
 pub use agent::{

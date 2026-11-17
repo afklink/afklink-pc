@@ -1,5 +1,5 @@
 import type { TranslationKey } from "@afklink/i18n/pc";
-import { Crown, Link2, Unlink } from "lucide-react";
+import { Crown, Link2, Trash2, Unlink } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { useT } from "../i18n";
@@ -13,9 +13,24 @@ import {
   type OwnerRequestDto,
   type OwnerRequestOutcome,
   type SessionDto,
+  type TrustedAttemptDto,
+  type TrustedDeviceDto,
+  type TrustedDto,
+  type TrustedPersonDto,
   unbind,
 } from "../tauri";
 import { formatCountdown, useCountdown } from "../useAgentStatus";
+import {
+  type AttemptNote,
+  devicesOf,
+  PersonAttempts,
+  PersonDevices,
+  personOf,
+  TrustedDamaged,
+  TrustedLayers,
+  TrustLine,
+  useTrustedQuestions,
+} from "./TrustedDevices";
 import { Button } from "./ui/button";
 
 /** Whether a person is on the screen right now: video up, asked for, or neither. */
@@ -39,7 +54,25 @@ interface Person {
   role: BindingRole | null;
   /** The PC's request to the owner on this row: in flight, or how it just ended. */
   request: OwnerRequestDto | null;
+  /**
+   * The person's trusted devices (`get_trusted`); null when the agent keeps no list (today's look),
+   * and for the newcomer's row.
+   */
+  devices: TrustedDeviceDto[] | null;
+  /**
+   * Keys in the trusted list but no binding (`TrustedDto.people` beyond the access list): a row of
+   * their own, «Доступа к этому ПК больше нет…», their devices and «Удалить все устройства» (in
+   * both modes: with the mode off the removal counts once it goes on).
+   */
+  noAccess: boolean;
+  /** Devices not in the list that tried to connect as this person (§10.2), newest first. */
+  attempts: TrustedAttemptDto[];
+  /** The role of the person's own keys here (`TrustedPersonDto.role`): the owner's attempts ask more. */
+  keysOwner: boolean;
 }
+
+/** A row before the trusted list's attempts are added to it (`withTrust`). */
+type BarePerson = Omit<Person, "attempts" | "keysOwner">;
 
 /**
  * The «Доступ» screen, behind the main view's row of that name: everyone who can connect, and
@@ -89,6 +122,8 @@ export function AccessScreen({
   bindings,
   heldPair,
   ownerRequestBusy,
+  trusted = null,
+  onTrustedChanged,
   onChanged,
   onShowCode,
 }: {
@@ -98,6 +133,13 @@ export function AccessScreen({
   heldPair: HeldPairDto | null;
   /** A request to the owner is in flight on this PC (`StatusDto.owner_request_busy`). */
   ownerRequestBusy: boolean;
+  /**
+   * The PC's trusted devices (`get_trusted`, device keys milestone 1): the layers block and every
+   * person's devices. Null — an agent that keeps no list — is today's screen, unchanged.
+   */
+  trusted?: TrustedDto | null;
+  /** Re-read the trusted devices after a change from here. */
+  onTrustedChanged?: () => void;
   /** Re-read the status now, after a revoke or a request, rather than at the next poll. */
   onChanged: () => void;
   onShowCode: () => void;
@@ -108,14 +150,43 @@ export function AccessScreen({
   const listRef = useRef<HTMLUListElement>(null);
   const rowButtons = useRef(new Map<number, HTMLButtonElement>());
 
-  const people = listPeople(bindings, sessions, heldPair);
+  const people = listPeople(bindings, sessions, heldPair, trusted);
   useRequestLog(people);
   useWatchLog(people);
+  const trustChanged = () => {
+    onTrustedChanged?.();
+    onChanged();
+  };
+  const questions = useTrustedQuestions(
+    trusted,
+    {
+      names: new Map(people.map((p) => [p.id, p.name])),
+      bound: people.filter((p) => p.bound).map((p) => p.id),
+      unbinds: people.filter(unbindShown).map((p) => p.id),
+      owners: people.filter((p) => p.bound && p.role === "owner").map((p) => p.id),
+    },
+    trustChanged,
+  );
+  const mode = trusted?.trusted_mode ?? false;
+  const locked = trusted !== null && !trusted.clean;
 
   const toggle = (id: number) => {
     setConfirming(null);
+    const p = open === id ? null : people.find((x) => x.id === id);
+    if (p?.devices) {
+      const unconfirmed = p.devices.filter((d) => d.unconfirmed).length;
+      // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+      console.debug(
+        `[access] row #${id} opened: ${p.devices.length} device(s), ${unconfirmed} unconfirmed, ${p.attempts.length} attempt(s), mode ${mode ? "on" : "off"}${p.noAccess ? ", no access left" : ""}${p.devices.length === 0 && mode && p.bound ? " — «Добавить доверенное устройство» offered" : ""}`,
+      );
+    }
     setOpen((was) => (was === id ? null : id));
   };
+
+  const layers =
+    trusted === null ? null : (
+      <TrustedBlock trusted={trusted} questions={questions} mode={mode} locked={locked} />
+    );
 
   const cancel = (id: number) => {
     setConfirming(null);
@@ -124,13 +195,20 @@ export function AccessScreen({
   };
 
   return (
-    <div className="flex min-h-full flex-col">
+    // `shrink-0`: an item of the scrolling box's column with `min-h-full` may otherwise shrink to
+    // the box's height while its content overflows it, and the box's bottom padding then lands
+    // under that height, not under «Начать привязку».
+    <div className="flex min-h-full shrink-0 flex-col">
+      {layers}
       {people.length > 0 ? (
         <ul
           ref={listRef}
           tabIndex={-1}
           aria-label={t("app.access")}
-          className="overflow-hidden rounded-card border border-line bg-panel outline-none"
+          // `shrink-0`: the screen is at least the box's height (`min-h-full`), and a list taller than
+          // that (open rows with their devices) would otherwise be squeezed into it and clipped
+          // (`overflow-hidden` lets a flex item shrink below its content); the box scrolls instead.
+          className="shrink-0 overflow-hidden rounded-card border border-line bg-panel outline-none"
         >
           {people.map((p) => (
             <PersonRow
@@ -154,6 +232,24 @@ export function AccessScreen({
               onSent={() =>
                 p.held ? listRef.current?.focus() : rowButtons.current.get(p.id)?.focus()
               }
+              mode={mode}
+              locked={locked}
+              onRemoveDevice={(d) => questions.askRemove(p.id, d)}
+              onConfirmDevice={(d) => questions.askConfirm(p.id, d)}
+              onRemovePerson={() => questions.askRemovePerson(p.id)}
+              notes={questions.attemptNotes.filter((n) => n.userId === p.id)}
+              busy={questions.busy}
+              full={questions.full}
+              onAllow={(a) => questions.pressAllow(p.id, a)}
+              onHide={(a) => questions.pressHide(p.id, a)}
+              onRemoveAttempts={() => questions.askRemoveAttempts(p.id)}
+              onAddDevice={() => {
+                // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+                console.debug(
+                  `[access] «Добавить доверенное устройство» on #${p.id}: the pairing dialog`,
+                );
+                onShowCode();
+              }}
               buttonRef={(el) => {
                 if (el) rowButtons.current.set(p.id, el);
                 else rowButtons.current.delete(p.id);
@@ -168,6 +264,49 @@ export function AccessScreen({
           {t("app.showCode")}
         </Button>
       </div>
+      {questions.dialog}
+    </div>
+  );
+}
+
+/**
+ * The trust layers over the list: a damaged list's block, the layers, and under them what holds the
+ * changes or is full — the session lock, a full list and the last command's notice.
+ */
+function TrustedBlock({
+  trusted,
+  questions,
+  mode,
+  locked,
+}: {
+  trusted: TrustedDto;
+  questions: ReturnType<typeof useTrustedQuestions>;
+  mode: boolean;
+  locked: boolean;
+}) {
+  const t = useT();
+  return (
+    <div className="mb-4 flex shrink-0 flex-col gap-3">
+      {trusted.state === "damaged" ? (
+        <TrustedDamaged
+          damage={trusted.damage}
+          busy={questions.repairing}
+          locked={locked}
+          notice={questions.repairNotice}
+          mode={mode}
+          onRepair={questions.pressRepair}
+        />
+      ) : null}
+      <TrustedLayers trusted={trusted} onAskMode={questions.askMode} />
+      {trusted.full || questions.notice !== null || (locked && trusted.state !== "damaged") ? (
+        <div role="status" className="-mt-1 flex flex-col gap-0.5 px-1 text-hint">
+          {locked && trusted.state !== "damaged" ? (
+            <p className="text-muted">{t("app.trustedLockedSession")}</p>
+          ) : null}
+          {trusted.full ? <p className="text-attention">{t("app.trustedFull")}</p> : null}
+          {questions.notice !== null ? <p className="text-muted">{questions.notice}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -200,6 +339,18 @@ function PersonRow({
   onRevoked,
   onChanged,
   onSent,
+  mode,
+  locked,
+  onRemoveDevice,
+  onConfirmDevice,
+  onRemovePerson,
+  onAddDevice,
+  notes,
+  busy,
+  full,
+  onAllow,
+  onHide,
+  onRemoveAttempts,
   buttonRef,
 }: {
   person: Person;
@@ -213,14 +364,28 @@ function PersonRow({
   onChanged: () => void;
   /** A request (or its withdrawal) was sent from this row. */
   onSent: () => void;
+  /** «Доверенные устройства» is on. */
+  mode: boolean;
+  locked: boolean;
+  onRemoveDevice: (device: TrustedDeviceDto) => void;
+  onConfirmDevice: (device: TrustedDeviceDto) => void;
+  onRemovePerson: () => void;
+  onAddDevice: () => void;
+  /** What the last presses on this person's attempts left to say. */
+  notes: AttemptNote[];
+  /** A trust command runs: the one-press actions wait. */
+  busy: boolean;
+  /** The list is full: «Разрешить» on an attempt is not offered. */
+  full: boolean;
+  onAllow: (attempt: TrustedAttemptDto) => void;
+  onHide: (attempt: TrustedAttemptDto) => void;
+  onRemoveAttempts: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
 }) {
   const owner = p.role === "owner";
-  const lines = <PersonLines person={p} />;
+  const lines = <PersonLines person={p} mode={mode} />;
 
-  // Nothing to do from a row without a binding — but the newcomer's, while the owner is asked:
-  // «Отменить запрос».
-  if (!p.bound && !(p.held && ownerAsked(p.request))) {
+  if (!opens(p)) {
     return <li className="border-t border-line px-4 py-2.5 first:border-t-0">{lines}</li>;
   }
 
@@ -250,16 +415,35 @@ function PersonRow({
       {open ? (
         // `pb-2.5`: the block's bottom as far under the buttons as its top is over the name.
         <div className="animate-slide-up px-4 pb-2.5">
-          {confirming ? (
+          {confirming ? null : (
+            <RowTrust
+              person={p}
+              mode={mode}
+              locked={locked}
+              notes={notes}
+              busy={busy}
+              full={full}
+              onRemoveDevice={onRemoveDevice}
+              onConfirmDevice={onConfirmDevice}
+              onAddDevice={onAddDevice}
+              onAllow={onAllow}
+              onHide={onHide}
+              onRemoveAttempts={onRemoveAttempts}
+            />
+          )}
+          {keysOnly(p) ? (
+            // Nothing but attempts: their own «Удалить попытки» says it.
+            attemptsOnly(p) ? null : (
+              <RemovePersonButton locked={locked} onPress={onRemovePerson} />
+            )
+          ) : confirming ? (
             <RevokeConfirm
               telegramUserId={p.id}
               owner={owner}
               onCancel={onCancelRevoke}
               onRevoked={onRevoked}
             />
-          ) : ownerAsked(p.request) ? (
-            <CancelRequest request={p.request} onChanged={onChanged} onSent={onSent} />
-          ) : (
+          ) : unbindShown(p) ? (
             <RowActions
               person={p}
               ownerRequestBusy={ownerRequestBusy}
@@ -267,6 +451,8 @@ function PersonRow({
               onChanged={onChanged}
               onSent={onSent}
             />
+          ) : (
+            <CancelRequest request={p.request} onChanged={onChanged} onSent={onSent} />
           )}
         </div>
       ) : null}
@@ -275,10 +461,121 @@ function PersonRow({
 }
 
 /**
+ * An open row's trust part: the devices (none and no binding: nothing about adding one — the
+ * attempts alone), then the attempts with what the last presses left on them.
+ */
+function RowTrust({
+  person: p,
+  mode,
+  locked,
+  notes,
+  busy,
+  full,
+  onRemoveDevice,
+  onConfirmDevice,
+  onAddDevice,
+  onAllow,
+  onHide,
+  onRemoveAttempts,
+}: {
+  person: Person;
+  mode: boolean;
+  locked: boolean;
+  notes: AttemptNote[];
+  busy: boolean;
+  full: boolean;
+  onRemoveDevice: (device: TrustedDeviceDto) => void;
+  onConfirmDevice: (device: TrustedDeviceDto) => void;
+  onAddDevice: () => void;
+  onAllow: (attempt: TrustedAttemptDto) => void;
+  onHide: (attempt: TrustedAttemptDto) => void;
+  onRemoveAttempts: () => void;
+}) {
+  return (
+    <>
+      {p.devices !== null && (p.bound || p.devices.length > 0) ? (
+        <PersonDevices
+          devices={p.devices}
+          mode={mode}
+          locked={locked}
+          onRemove={onRemoveDevice}
+          onConfirm={onConfirmDevice}
+          onAddDevice={onAddDevice}
+        />
+      ) : null}
+      <PersonAttempts
+        attempts={p.attempts}
+        notes={notes}
+        locked={locked}
+        busy={busy}
+        full={full}
+        removable={attemptsOnly(p) && p.role !== "owner" && !p.keysOwner}
+        onAllow={onAllow}
+        onHide={onHide}
+        onRemoveAttempts={onRemoveAttempts}
+      />
+    </>
+  );
+}
+
+/** What decides a row's buttons. */
+type RowFacts = Pick<Person, "bound" | "noAccess" | "held" | "request">;
+
+/**
+ * Whether a row opens. Nothing to do from a row without a binding — but the newcomer's, while the
+ * owner is asked («Отменить запрос»), and one whose devices are still in the trusted list.
+ */
+function opens(p: RowFacts): boolean {
+  return p.bound || p.noAccess || (p.held && ownerAsked(p.request));
+}
+
+/** Devices in the trusted list and no binding: nothing to revoke, the devices only. */
+function keysOnly(p: RowFacts): boolean {
+  return p.noAccess && !p.bound;
+}
+
+/**
+ * Whether the person's open row draws «Отвязать» (`RowActions`): a row that opens, with a binding to
+ * revoke, and no request put to the owner on it (that row has «Отменить запрос» in its place). The
+ * one reading for the row and for «Удалить из доверенных?», whose line `app.trustedUntrustCutOff`
+ * names this button (`TrustedPeopleView.unbinds`, `untrustLines`). The row's own inline «Отвязать?»
+ * (`confirming`) needs no case: it hides the devices, so that question cannot open beside it.
+ */
+export function unbindShown(p: RowFacts): boolean {
+  return opens(p) && !keysOnly(p) && !ownerAsked(p.request);
+}
+
+/** Attempts and no device in the list: «Удалить попытки» rather than «Удалить все устройства». */
+function attemptsOnly(p: Person): boolean {
+  return p.attempts.length > 0 && (p.devices?.length ?? 0) === 0;
+}
+
+/**
+ * «Удалить все устройства» on a row with no access left — in both modes, as «Удалить из
+ * доверенных» (with the mode off the removal counts once it goes on).
+ */
+function RemovePersonButton({ locked, onPress }: { locked: boolean; onPress: () => void }) {
+  const t = useT();
+  return (
+    <Button
+      size="sm"
+      className="w-full text-danger"
+      aria-haspopup="dialog"
+      disabled={locked}
+      aria-disabled={locked || undefined}
+      onClick={() => !locked && onPress()}
+    >
+      <Trash2 aria-hidden="true" />
+      {t("app.trustedRemovePerson")}
+    </Button>
+  );
+}
+
+/**
  * A row's lines: the dot, the name and the @handle under it (the #id without one), «Владелец» at
  * the end of the owner's row, and the request's line under them while there is one.
  */
-function PersonLines({ person: p }: { person: Person }) {
+function PersonLines({ person: p, mode }: { person: Person; mode: boolean }) {
   const t = useT();
   return (
     <>
@@ -299,6 +596,13 @@ function PersonLines({ person: p }: { person: Person }) {
         ) : null}
       </span>
       {p.request ? <RequestLine request={p.request} className="mt-0.5 pl-5" /> : null}
+      {keysOnly(p) ? (
+        <span className="block text-balance text-hint text-faint pl-5">
+          {attemptsOnly(p) ? t("app.trustedOnAttempts") : t("app.trustedNoAccess")}
+        </span>
+      ) : p.devices !== null ? (
+        <TrustLine devices={p.devices} mode={mode} className="pl-5" />
+      ) : null}
     </>
   );
 }
@@ -755,12 +1059,13 @@ function whoUnder(username: string | null | undefined, id: number): string {
  * Everyone with access, in the agent's order, each once, with whether they are watching and their
  * role; then the newcomer of a pairing held for the owner (`held`), where their binding will be once
  * he allows; then anyone watching without a binding (a session can outlive its revoke by a poll), not
- * revocable.
+ * revocable; then whoever has devices in the trusted list but no binding (`noAccess`).
  */
 function listPeople(
   bindings: BindingDto[],
   sessions: SessionDto[],
   held: HeldPairDto | null,
+  trusted: TrustedDto | null,
 ): Person[] {
   const watch = new Map<number, Watch>();
   for (const s of sessions) {
@@ -769,7 +1074,7 @@ function listPeople(
       watch.set(s.telegram_user_id, s.connected ? "live" : "connecting");
     }
   }
-  const people: Person[] = bindings.map((b) => ({
+  const people: BarePerson[] = bindings.map((b) => ({
     id: b.telegram_user_id,
     name: b.first_name ?? (b.username ? `@${b.username}` : `#${b.telegram_user_id}`),
     // A second line only under a first name: without one, the handle or the id is the title.
@@ -779,6 +1084,8 @@ function listPeople(
     held: false,
     role: b.role ?? null,
     request: b.owner_request ?? null,
+    devices: devicesOf(trusted, b.telegram_user_id),
+    noAccess: false,
   }));
   const bound = new Set(bindings.map((b) => b.telegram_user_id));
   // Rust leaves it out once the list has the newcomer (`held_pair_dto`); the same rule here, so a
@@ -794,11 +1101,45 @@ function listPeople(
       held: true,
       role: null,
       request: held.owner_request,
+      devices: null,
+      noAccess: false,
     });
   }
+  const keyed = new Map((trusted?.people ?? []).map((p) => [p.telegram_user_id, p]));
+  people.push(...unboundRows(sessions, watch, keyed, bound));
+  return people.map((p) => withTrust(p, trusted));
+}
+
+/**
+ * A row with what the trusted list says beside its devices: the attempts; none on the newcomer's
+ * row.
+ */
+function withTrust(p: BarePerson, trusted: TrustedDto | null): Person {
+  if (p.held) return { ...p, attempts: [], keysOwner: false };
+  const own = personOf(trusted, p.id);
+  return {
+    ...p,
+    attempts: own?.attempts ?? [],
+    keysOwner: own?.role === "owner",
+  };
+}
+
+/**
+ * The rows with no binding: anyone watching without one (a session can outlive its revoke by a
+ * poll) — with their devices while the list still has them — then whoever has devices in the
+ * trusted list and no binding at all, named as a binding's row is. `bound` grows with each.
+ */
+function unboundRows(
+  sessions: SessionDto[],
+  watch: Map<number, Watch>,
+  keyed: Map<number, TrustedPersonDto>,
+  bound: Set<number>,
+): BarePerson[] {
+  const people: BarePerson[] = [];
   for (const s of sessions) {
     if (bound.has(s.telegram_user_id)) continue;
     bound.add(s.telegram_user_id);
+    const own = keyed.get(s.telegram_user_id);
     // `display_name` is the first name, else the @handle, else the #id: a second line only under the
     // first name.
     const titled =
@@ -812,6 +1153,26 @@ function listPeople(
       held: false,
       role: null,
       request: null,
+      // A session outliving its binding: its devices, when the list still has them.
+      devices: own?.devices ?? null,
+      noAccess: own !== undefined,
+    });
+  }
+  // Keys with no binding left: their own rows, named as a binding's row is.
+  for (const k of keyed.values()) {
+    if (bound.has(k.telegram_user_id)) continue;
+    bound.add(k.telegram_user_id);
+    people.push({
+      id: k.telegram_user_id,
+      name: k.first_name ?? (k.username ? `@${k.username}` : `#${k.telegram_user_id}`),
+      handle: k.first_name ? whoUnder(k.username, k.telegram_user_id) : undefined,
+      watch: null,
+      bound: false,
+      held: false,
+      role: null,
+      request: null,
+      devices: k.devices,
+      noAccess: true,
     });
   }
   return people;

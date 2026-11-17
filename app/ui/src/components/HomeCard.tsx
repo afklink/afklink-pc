@@ -14,9 +14,11 @@ import {
   type StatusDto,
   setGameOnly,
   setGameWindow,
+  type TrustedDto,
 } from "../tauri";
 import { MaintenanceDialog, useDriverMaintenance } from "./DriverMaintenance";
 import { WindowPicker } from "./GamePicker";
+import { homeAccessLine } from "./TrustedDevices";
 import { Button } from "./ui/button";
 import { MiddleEllipsis } from "./ui/middle-ellipsis";
 import { Switch } from "./ui/switch";
@@ -45,11 +47,18 @@ export type HomeRow = "driver" | "game" | "access" | "journal";
  */
 export function HomeCard({
   status,
+  trusted = null,
   onOpen,
   onChanged,
   rowRef,
 }: {
   status: StatusDto;
+  /**
+   * The PC's trusted devices (device keys milestone 1): the «Доступ» row's line names the
+   * topmost layer in force — «Вход: Telegram-аккаунт» / «Вход: доверенное устройство». Null (an
+   * agent without them): no line, today's row.
+   */
+  trusted?: TrustedDto | null;
   onOpen: (row: HomeRow) => void;
   /** Re-read the status now, after an action, rather than at the next poll. */
   onChanged: () => void;
@@ -60,6 +69,7 @@ export function HomeCard({
   const { locale } = useLanguage();
   const home = status.home;
 
+  const accessLine = trusted ? homeAccessLine(t, trusted) : null;
   return (
     <div className="overflow-hidden rounded-card border border-line bg-panel">
       <DriverRowView
@@ -77,6 +87,9 @@ export function HomeCard({
       />
       <CardRow
         title={t("app.access")}
+        sub={accessLine ? <HomeAccessLine line={accessLine} /> : undefined}
+        // The damaged line is what to do: read whole, never cut.
+        subWraps={accessLine?.attention === true}
         onOpen={() => onOpen("access")}
         buttonRef={(el) => rowRef("access", el)}
         trailing={
@@ -127,7 +140,7 @@ function useJournalLineLog(line: JournalRowParts) {
     // biome-ignore lint/suspicious/noConsole: once per change of the row's entry
     console.debug(
       line.name === null
-        ? "[home] journal row: nothing to name («Пока пусто»)"
+        ? `[home] journal row: nothing to name («${line.before}»)`
         : `[home] journal row: the name (${Array.from(line.name).length} characters) gives way first; «${line.before}…${line.after}» stays whole`,
     );
   }, [key, line]);
@@ -408,4 +421,14 @@ function CardRow({
       {control ? <div className="relative z-10 flex shrink-0 items-center">{control}</div> : null}
     </div>
   );
+}
+
+/** The «Доступ» row's line: amber when nobody can connect (a damaged list with the mode on). */
+function HomeAccessLine({ line }: { line: { text: string; attention: boolean } }) {
+  useEffect(() => {
+    if (!line.attention) return;
+    // biome-ignore lint/suspicious/noConsole: once per change to the damaged line
+    console.debug("[access] home: the list is damaged and the mode is on — «Доступ» line in amber");
+  }, [line.attention]);
+  return <span className={line.attention ? "text-attention" : undefined}>{line.text}</span>;
 }

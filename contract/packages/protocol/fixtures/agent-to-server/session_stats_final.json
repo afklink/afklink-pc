@@ -66,7 +66,11 @@
       "bytes_socket": 5650000,
       "bytes_relay": 2100000,
       "quality_profile": "default.v1",
-      "quality_profile_source": "server"
+      "quality_profile_source": "server",
+      "key_verdict": "admit_refused",
+      "key_detail": "endorse_signer_revoked",
+      "key_admit": "endorse",
+      "key_mode": "observe"
     }
   }
 }

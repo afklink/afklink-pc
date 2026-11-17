@@ -144,12 +144,30 @@ impl ViewerRole {
 /// One live session's viewer role as last decided here, for what follows the role beyond game-only:
 /// the guard that keeps a guest off AFKLink's own windows (`crate::own_windows`). Set at the
 /// session's start and at every re-evaluation; read for every input event — one atomic load.
+///
+/// Besides the role, whether the session is **signed by a confirmed owner key** (device keys, spec
+/// §3.4 «Органы доверия»): only such a session's input reaches the trust windows (the pairing
+/// request window, the pairing panel), whatever the server says its role is.
 #[derive(Debug)]
 pub struct RoleCell(AtomicU8);
+
+/// The bit of [`RoleCell`] that says «signed by a confirmed owner key».
+const OWNER_KEY: u8 = 0x80;
 
 impl RoleCell {
     fn new(role: ViewerRole) -> Self {
         Self(AtomicU8::new(role.code()))
+    }
+
+    fn with_key(role: ViewerRole, owner_key: bool) -> Self {
+        Self(AtomicU8::new(
+            role.code() | if owner_key { OWNER_KEY } else { 0 },
+        ))
+    }
+
+    /// The session is signed by a confirmed owner key (fixed at its start).
+    pub fn owner_key(&self) -> bool {
+        self.0.load(Ordering::Relaxed) & OWNER_KEY != 0
     }
 
     /// A cell for a session no decision was made for: no role, so not the owner (the safe side).
@@ -159,17 +177,25 @@ impl RoleCell {
 
     /// The role now.
     pub fn get(&self) -> ViewerRole {
-        ViewerRole::from_code(self.0.load(Ordering::Relaxed))
+        ViewerRole::from_code(self.0.load(Ordering::Relaxed) & !OWNER_KEY)
     }
 
     fn set(&self, role: ViewerRole) {
-        self.0.store(role.code(), Ordering::Relaxed);
+        // The owner-key bit is the session's for its whole life: kept.
+        let key = self.0.load(Ordering::Relaxed) & OWNER_KEY;
+        self.0.store(role.code() | key, Ordering::Relaxed);
     }
 
     /// A cell holding `role`, for the tests of what reads it.
     #[cfg(test)]
     pub fn fixed(role: ViewerRole) -> Self {
         Self::new(role)
+    }
+
+    /// A cell holding `role` and the owner-key bit, for the tests of what reads it.
+    #[cfg(test)]
+    pub fn fixed_key(role: ViewerRole, owner_key: bool) -> Self {
+        Self::with_key(role, owner_key)
     }
 
     /// Put `role` in it, for the tests of what reads it.
@@ -238,6 +264,17 @@ struct Entry {
     cell: Arc<CaptureModeCell>,
     /// `role`, for the session's guard on AFKLink's own windows ([`GameAccess::role_cell`]).
     role_cell: Arc<RoleCell>,
+    /// A signed session's role from its key record (spec §3.4 step 10): the server's roles never
+    /// move it. `None`: the server's word, as before device keys.
+    pinned: Option<ViewerRole>,
+}
+
+/// A signed session's role from its key record ([`GameAccess::open_pinned`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pin {
+    pub role: ViewerRole,
+    /// Signed by a confirmed owner key: its input reaches the trust windows.
+    pub owner_key: bool,
 }
 
 /// The live sessions as the game helper's signal reads them: one look, under one lock — the counts
@@ -377,6 +414,18 @@ impl GameAccess {
         telegram_user_id: i64,
         bindings: &[BindingInfo],
     ) -> Arc<CaptureModeCell> {
+        self.open_pinned(session_id, telegram_user_id, bindings, None)
+    }
+
+    /// [`Self::open`], with a signed session's role from its key record (`pin`): the server's
+    /// roles ([`Self::set_roles`]) never move it (spec §3.4 step 10).
+    pub fn open_pinned(
+        &self,
+        session_id: &str,
+        telegram_user_id: i64,
+        bindings: &[BindingInfo],
+        pin: Option<Pin>,
+    ) -> Arc<CaptureModeCell> {
         let mut inner = lock(&self.inner);
         if roles_of(&inner.bindings) != roles_of(bindings) {
             tracing::debug!(
@@ -385,13 +434,18 @@ impl GameAccess {
             );
             Self::take_roles(&mut inner, bindings, "a session's start");
         }
-        let role = ViewerRole::of(&inner.bindings, telegram_user_id);
+        let role = pin.map_or_else(
+            || ViewerRole::of(&inner.bindings, telegram_user_id),
+            |p| p.role,
+        );
         let decision = decide(inner.policy.game_only, inner.policy.for_guests, role);
         let mode = inner.policy.mode(decision.applies);
         tracing::debug!(
             session = session_id,
             telegram_user_id,
             role = role.as_str(),
+            pinned = pin.is_some(),
+            owner_key = pin.is_some_and(|p| p.owner_key),
             game_only = inner.policy.game_only,
             for_guests = inner.policy.for_guests,
             applies = decision.applies,
@@ -408,7 +462,8 @@ impl GameAccess {
                 applies: decision.applies,
                 connected: false,
                 cell: cell.clone(),
-                role_cell: Arc::new(RoleCell::new(role)),
+                role_cell: Arc::new(RoleCell::with_key(role, pin.is_some_and(|p| p.owner_key))),
+                pinned: pin.map(|p| p.role),
             },
         );
         if replaced.is_some() {
@@ -541,13 +596,17 @@ impl GameAccess {
         }
         let mut moved = 0usize;
         for (id, e) in sessions.iter_mut() {
-            let role = ViewerRole::of(bindings, e.telegram_user_id);
+            // A signed session keeps its key record's role (spec §3.4 step 10).
+            let role = e
+                .pinned
+                .unwrap_or_else(|| ViewerRole::of(bindings, e.telegram_user_id));
             let decision = decide(policy.game_only, policy.for_guests, role);
             tracing::debug!(
                 session = %id,
                 telegram_user_id = e.telegram_user_id,
                 role = role.as_str(),
                 was_role = e.role.as_str(),
+                pinned = e.pinned.is_some(),
                 game_only = policy.game_only,
                 for_guests = policy.for_guests,
                 applies = decision.applies,

@@ -5,10 +5,12 @@ import { join, resolve } from "node:path";
 import {
   AGENT,
   assertTargetInCheckout,
+  botIdOverrideRefusal,
   buildEnv,
   DOWNLOAD_BASE_URL,
   isWithin,
   PROD_SERVER_URL,
+  PROD_TG_BOT_ID,
   run,
   runVisible,
   SIGNING_ENV_VARS,
@@ -83,6 +85,35 @@ describe("the server and download addresses", () => {
     expect(rustConst(join("app", "src-tauri", "src", "updater.rs"), "ENDPOINT")).toBe(
       `${DOWNLOAD_BASE_URL}latest.json`,
     );
+  });
+});
+
+// The production bot's id: what a build without AFKLINK_TG_BOT_ID checks Telegram attestations for,
+// and the only one a release may carry.
+describe("the production Telegram bot id", () => {
+  test("is 8807488817, here and in the agent", () => {
+    expect(PROD_TG_BOT_ID).toBe("8807488817");
+    const rust = readFileSync(
+      join(AGENT, "crates", "core", "src", "viewer_keys", "telegram.rs"),
+      "utf8",
+    );
+    expect(/^pub const PROD_TG_BOT_ID: u64 = (\d+);$/m.exec(rust)?.[1]).toBe(PROD_TG_BOT_ID);
+  });
+
+  test("a release refuses another bot, takes none or the production one", () => {
+    for (const env of [{}, { AFKLINK_TG_BOT_ID: "" }, { AFKLINK_TG_BOT_ID: " 8807488817 " }]) {
+      expect(botIdOverrideRefusal(env)).toBeNull();
+    }
+    for (const other of ["7342037359", "88074888170", "abc"]) {
+      expect(botIdOverrideRefusal({ AFKLINK_TG_BOT_ID: other })).toContain(other);
+    }
+  });
+
+  test("both release scripts refuse it before the build", () => {
+    for (const file of ["official-build.ts", "release-build.ts"]) {
+      const text = readFileSync(join(AGENT, "scripts", file), "utf8");
+      expect(text).toMatch(/botIdOverrideRefusal\((?:env|process\.env)\)/);
+    }
   });
 });
 

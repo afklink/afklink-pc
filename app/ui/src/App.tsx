@@ -1,3 +1,4 @@
+import type { TranslationKey } from "@afklink/i18n/pc";
 import {
   ArrowLeft,
   ChevronRight,
@@ -18,6 +19,7 @@ import { PairingDialog } from "./components/PairingDialog";
 import { type SettingsFocus, SettingsView } from "./components/SettingsView";
 import { StatusHero } from "./components/StatusHero";
 import { StepsCard } from "./components/Steps";
+import { useTrusted } from "./components/TrustedDevices";
 import { Button } from "./components/ui/button";
 import { Spinner } from "./components/ui/spinner";
 import { useLanguage, useT } from "./i18n";
@@ -31,6 +33,7 @@ import {
   retryConnection,
   type StatusDto,
   showPairRequest,
+  type TrustedDto,
   type Zone,
 } from "./tauri";
 import { useAgentStatus } from "./useAgentStatus";
@@ -92,6 +95,9 @@ export function App() {
   const { ready } = useLanguage();
   const { status, loaded, refresh } = useAgentStatus();
   const [view, setView] = useState<View>("main");
+  // Trusted devices (device keys milestone 1): read again when the view changes and when the agent
+  // says the list moved (`trusted_rev`); null keeps today's look.
+  const { trusted, reload: reloadTrusted } = useTrusted(`${view}#${status?.trusted_rev ?? "-"}`);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | null>(null);
   const [wantPairing, setWantPairing] = useState(false);
   const panel = status?.pairing_panel ?? "closed";
@@ -209,6 +215,7 @@ export function App() {
       {view === "main" ? (
         <MainView
           status={status}
+          trusted={trusted}
           onChanged={refresh}
           onShowCode={openPairing}
           onOpenRow={openRow}
@@ -217,41 +224,74 @@ export function App() {
           rowRef={rowRef}
         />
       ) : (
-        <Screen
-          title={
-            view === "settings"
-              ? t("app.settings")
-              : view === "access"
-                ? t("app.access")
-                : t("app.journal")
-          }
-          onBack={back}
-          backRef={backRef}
-        >
-          {view === "settings" ? (
-            <SettingsView status={status} onRefresh={refresh} focus={settingsFocus} />
-          ) : view === "access" ? (
-            <AccessScreen
-              sessions={status.sessions}
-              bindings={status.bindings}
-              heldPair={status.held_pair ?? null}
-              ownerRequestBusy={status.owner_request_busy}
-              onChanged={refresh}
-              onShowCode={openPairing}
-            />
-          ) : (
-            <JournalScreen
-              bindings={status.bindings}
-              ownerRequestBusy={status.owner_request_busy}
-              onChanged={refresh}
-            />
-          )}
+        <Screen title={t(SCREEN_TITLE[view])} onBack={back} backRef={backRef}>
+          <ScreenBody
+            view={view}
+            status={status}
+            trusted={trusted}
+            settingsFocus={settingsFocus}
+            onRefresh={refresh}
+            onTrustedChanged={reloadTrusted}
+            onShowCode={openPairing}
+          />
         </Screen>
       )}
 
       {wantPairing ? <PairingDialog status={status} onClose={closePairing} /> : null}
     </div>
   );
+}
+
+/** Each screen's title in its top row. */
+const SCREEN_TITLE: Record<Exclude<View, "main">, TranslationKey> = {
+  settings: "app.settings",
+  access: "app.access",
+  journal: "app.journal",
+};
+
+/** What a screen behind the main view shows under its top row. */
+function ScreenBody({
+  view,
+  status,
+  trusted,
+  settingsFocus,
+  onRefresh,
+  onTrustedChanged,
+  onShowCode,
+}: {
+  view: Exclude<View, "main">;
+  status: StatusDto;
+  trusted: TrustedDto | null;
+  settingsFocus: SettingsFocus | null;
+  onRefresh: () => void;
+  onTrustedChanged: () => void;
+  onShowCode: () => void;
+}) {
+  switch (view) {
+    case "settings":
+      return <SettingsView status={status} onRefresh={onRefresh} focus={settingsFocus} />;
+    case "access":
+      return (
+        <AccessScreen
+          sessions={status.sessions}
+          bindings={status.bindings}
+          heldPair={status.held_pair ?? null}
+          ownerRequestBusy={status.owner_request_busy}
+          trusted={trusted}
+          onTrustedChanged={onTrustedChanged}
+          onChanged={onRefresh}
+          onShowCode={onShowCode}
+        />
+      );
+    case "journal":
+      return (
+        <JournalScreen
+          bindings={status.bindings}
+          ownerRequestBusy={status.owner_request_busy}
+          onChanged={onRefresh}
+        />
+      );
+  }
 }
 
 /**
@@ -299,6 +339,7 @@ function Screen({
 /** The main view: the hero, the zone under it, and the footer. */
 function MainView({
   status,
+  trusted,
   onChanged,
   onShowCode,
   onOpenRow,
@@ -307,6 +348,7 @@ function MainView({
   rowRef,
 }: {
   status: StatusDto;
+  trusted: TrustedDto | null;
   onChanged: () => void;
   onShowCode: () => void;
   onOpenRow: (row: HomeRow) => void;
@@ -336,6 +378,7 @@ function MainView({
         />
         <BottomZone
           status={status}
+          trusted={trusted}
           onChanged={onChanged}
           onShowCode={onShowCode}
           onOpenRow={onOpenRow}
@@ -401,12 +444,14 @@ const RETRY_SPIN_MS = 2500;
  */
 function BottomZone({
   status,
+  trusted,
   onChanged,
   onShowCode,
   onOpenRow,
   rowRef,
 }: {
   status: StatusDto;
+  trusted: TrustedDto | null;
   onChanged: () => void;
   onShowCode: () => void;
   onOpenRow: (row: HomeRow) => void;
@@ -514,7 +559,13 @@ function BottomZone({
         <AutostartCard onAnswered={onChanged} />
       </div>
       <div {...layer("card")}>
-        <HomeCard status={status} onOpen={onOpenRow} onChanged={onChanged} rowRef={rowRef} />
+        <HomeCard
+          status={status}
+          trusted={trusted}
+          onOpen={onOpenRow}
+          onChanged={onChanged}
+          rowRef={rowRef}
+        />
       </div>
     </div>
   );

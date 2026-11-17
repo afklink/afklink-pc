@@ -35,8 +35,32 @@
           "variant": "pair_response"
         },
         {
+          "file": "agent-to-server/pair_response_key.json",
+          "variant": "pair_response"
+        },
+        {
+          "file": "agent-to-server/session_nonces.json",
+          "variant": "session_nonces"
+        },
+        {
           "file": "agent-to-server/device_name.json",
           "variant": "device_name"
+        },
+        {
+          "file": "agent-to-server/key_mode.json",
+          "variant": "key_mode"
+        },
+        {
+          "file": "agent-to-server/key_mode_observe.json",
+          "variant": "key_mode"
+        },
+        {
+          "file": "agent-to-server/grant_token.json",
+          "variant": "grant_token"
+        },
+        {
+          "file": "agent-to-server/grant_token_empty.json",
+          "variant": "grant_token"
         },
         {
           "file": "agent-to-server/unbind.json",
@@ -60,6 +84,10 @@
         },
         {
           "file": "agent-to-server/session_end.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "agent-to-server/session_end_key.json",
           "variant": "session_end"
         },
         {
@@ -118,11 +146,23 @@
           "variant": "agent_ready"
         },
         {
+          "file": "server-to-agent/agent_ready_nonce_pool.json",
+          "variant": "agent_ready"
+        },
+        {
+          "file": "server-to-agent/agent_ready_grant_token.json",
+          "variant": "agent_ready"
+        },
+        {
           "file": "server-to-agent/pairing_code.json",
           "variant": "pairing_code"
         },
         {
           "file": "server-to-agent/pair_request.json",
+          "variant": "pair_request"
+        },
+        {
+          "file": "server-to-agent/pair_request_key.json",
           "variant": "pair_request"
         },
         {
@@ -178,7 +218,15 @@
           "variant": "session_request"
         },
         {
+          "file": "server-to-agent/session_request_nonce.json",
+          "variant": "session_request"
+        },
+        {
           "file": "server-to-agent/sdp.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "server-to-agent/sdp_proof.json",
           "variant": "sdp"
         },
         {
@@ -229,6 +277,38 @@
           "variant": "sdp"
         },
         {
+          "file": "viewer-to-server/sdp_proof.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "viewer-to-server/device_add_open.json",
+          "variant": "device_add_open"
+        },
+        {
+          "file": "viewer-to-server/device_add_open_sas.json",
+          "variant": "device_add_open"
+        },
+        {
+          "file": "viewer-to-server/device_add_join.json",
+          "variant": "device_add_join"
+        },
+        {
+          "file": "viewer-to-server/device_add_join_sas.json",
+          "variant": "device_add_join"
+        },
+        {
+          "file": "viewer-to-server/device_add_send.json",
+          "variant": "device_add_send"
+        },
+        {
+          "file": "viewer-to-server/device_add_resume.json",
+          "variant": "device_add_resume"
+        },
+        {
+          "file": "viewer-to-server/device_add_close.json",
+          "variant": "device_add_close"
+        },
+        {
           "file": "viewer-to-server/ice.json",
           "variant": "ice"
         },
@@ -275,6 +355,14 @@
         {
           "file": "viewer-to-server/pong.json",
           "variant": "pong"
+        },
+        {
+          "file": "viewer-to-server/viewer_visibility_hidden.json",
+          "variant": "viewer_visibility"
+        },
+        {
+          "file": "viewer-to-server/viewer_visibility_shown.json",
+          "variant": "viewer_visibility"
         }
       ]
     },
@@ -288,11 +376,19 @@
           "variant": "viewer_ready"
         },
         {
+          "file": "server-to-viewer/viewer_ready_device_keys.json",
+          "variant": "viewer_ready"
+        },
+        {
           "file": "server-to-viewer/session_created.json",
           "variant": "session_created"
         },
         {
           "file": "server-to-viewer/session_created_turn_only.json",
+          "variant": "session_created"
+        },
+        {
+          "file": "server-to-viewer/session_created_nonce.json",
           "variant": "session_created"
         },
         {
@@ -308,7 +404,15 @@
           "variant": "session_end"
         },
         {
+          "file": "server-to-viewer/session_end_detail.json",
+          "variant": "session_end"
+        },
+        {
           "file": "server-to-viewer/pair_accepted.json",
+          "variant": "pair_accepted"
+        },
+        {
+          "file": "server-to-viewer/pair_accepted_grant.json",
           "variant": "pair_accepted"
         },
         {
@@ -342,6 +446,38 @@
         {
           "file": "server-to-viewer/owner_requests_changed.json",
           "variant": "owner_requests_changed"
+        },
+        {
+          "file": "server-to-viewer/device_add_opened.json",
+          "variant": "device_add_opened"
+        },
+        {
+          "file": "server-to-viewer/device_add_joined.json",
+          "variant": "device_add_joined"
+        },
+        {
+          "file": "server-to-viewer/device_add_joined_opener.json",
+          "variant": "device_add_joined"
+        },
+        {
+          "file": "server-to-viewer/device_add_msg.json",
+          "variant": "device_add_msg"
+        },
+        {
+          "file": "server-to-viewer/device_add_closed.json",
+          "variant": "device_add_closed"
+        },
+        {
+          "file": "server-to-viewer/device_add_closed_role_mismatch.json",
+          "variant": "device_add_closed"
+        },
+        {
+          "file": "server-to-viewer/device_add_closed_none_waiting.json",
+          "variant": "device_add_closed"
+        },
+        {
+          "file": "server-to-viewer/device_add_closed_busy.json",
+          "variant": "device_add_closed"
         },
         {
           "file": "server-to-viewer/ping.json",
@@ -532,6 +668,14 @@
         {
           "file": "agent-to-viewer/clipboard_ack_refused.json",
           "variant": "cb_ack"
+        },
+        {
+          "file": "agent-to-viewer/ks.json",
+          "variant": "ks"
+        },
+        {
+          "file": "agent-to-viewer/ks_refused.json",
+          "variant": "ks"
         }
       ]
     },
@@ -696,6 +840,10 @@
           "variant": null
         },
         {
+          "file": "rest/pair_request_key.json",
+          "variant": null
+        },
+        {
           "file": "rest/pair_pending_response.json",
           "variant": null
         },
@@ -709,6 +857,14 @@
         },
         {
           "file": "rest/devices_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/devices_response_grant.json",
+          "variant": null
+        },
+        {
+          "file": "rest/device_keys_response.json",
           "variant": null
         },
         {
@@ -816,7 +972,19 @@
           "variant": null
         },
         {
+          "file": "rest/owner_requests_response_keys.json",
+          "variant": null
+        },
+        {
+          "file": "rest/owner_requests_response_new_device.json",
+          "variant": null
+        },
+        {
           "file": "rest/owner_request_answer_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/owner_request_answer_request_grant.json",
           "variant": null
         },
         {
@@ -829,6 +997,18 @@
         },
         {
           "file": "rest/invite_token_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_create_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_claim_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_claim_request_plain.json",
           "variant": null
         },
         {
@@ -853,6 +1033,14 @@
         },
         {
           "file": "rest/guest_remove_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/device_invites_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/invite_close_response.json",
           "variant": null
         },
         {

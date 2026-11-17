@@ -65,6 +65,29 @@ export function testKeyBuildEnv(features: readonly string[]): Record<string, str
 export const PROD_SERVER_URL = "wss://api.afklink.app/ws/agent";
 
 /**
+ * The production Telegram bot's numeric id (public: the part of its token before `:`). A build
+ * without `AFKLINK_TG_BOT_ID` checks Telegram attestations for this bot (`PROD_TG_BOT_ID` in
+ * `afklink_core::viewer_keys`, which must say the same; a test below checks); only a development
+ * build may name another, and a release-channel build that does fails to compile.
+ */
+export const PROD_TG_BOT_ID = "8807488817";
+
+/** The build variable that overrides the bot id in a development build. */
+export const TG_BOT_ID_VAR = "AFKLINK_TG_BOT_ID";
+
+/**
+ * Why a release must not be built in `env`: `AFKLINK_TG_BOT_ID` names another bot than the
+ * production one (`null`: unset, empty, or the production id itself). The release scripts refuse
+ * before the build, as for `AFKLINK_SERVER_URL`; the agent's own compile-time check would fail the
+ * build later anyway.
+ */
+export function botIdOverrideRefusal(env: Record<string, string | undefined>): string | null {
+  const raw = env[TG_BOT_ID_VAR]?.trim();
+  if (raw === undefined || raw === "" || raw === PROD_TG_BOT_ID) return null;
+  return `${TG_BOT_ID_VAR}=${raw}: a release always checks Telegram attestations for the production bot ${PROD_TG_BOT_ID}`;
+}
+
+/**
  * Where releases are downloaded from: the agents' hostname's `/download/` (latest.json, the exe,
  * .sig) — the updater's one endpoint, and the base of the exe URL inside latest.json. `release.yml`'s
  * `PUBLIC_BASE` and the updater's `ENDPOINT` must say the same (a scripts test checks). People

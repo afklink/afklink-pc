@@ -230,8 +230,8 @@ pub struct Heartbeat {
 
 /// Everything the agent sends the viewer over a DataChannel. The discriminant is `t`.
 ///
-/// The heartbeat and the cursor go on `cursor`; the clipboard's three on `input`, which must
-/// deliver them (see [`crate::clipboard`]).
+/// The heartbeat and the cursor go on `cursor`; the clipboard's three and the device key's `ks` on
+/// `input`, which must deliver them (see [`crate::clipboard`], [`crate::viewer_keys`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum AgentDataMessage {
@@ -250,6 +250,11 @@ pub enum AgentDataMessage {
     /// The answer to one whole `cb_set` text.
     #[serde(rename = "cb_ack")]
     ClipboardAck(crate::clipboard::ClipboardAck),
+    /// What the PC decided about the viewer's device key, once, when `input` opened after the first
+    /// offer, and only to a session whose offer carried a `proof` (device keys, spec §3.7). An older
+    /// viewer ignores a `t` it does not know.
+    #[serde(rename = "ks")]
+    KeyStatus(crate::viewer_keys::KeyStatus),
 }
 
 impl AgentDataMessage {

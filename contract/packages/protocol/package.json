@@ -13,7 +13,8 @@
   },
   "scripts": {
     "emit": "bun run scripts/emit.ts",
-    "typecheck": "tsc --noEmit",
+    "vectors:viewer-keys": "bun run scripts/viewer-keys-vectors.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.dom.json",
     "test": "bun test"
   },
   "dependencies": {

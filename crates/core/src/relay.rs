@@ -131,7 +131,23 @@ pub(crate) fn class(msg: &AgentToServer) -> Class {
         // itself), nor does the goodbye (`afklink_transport::GoodbyeHandle`, `crate::goodbye`),
         // which belongs to the connection it closes: on the next one it would say the opposite of
         // what that connection means.
+        //
+        // A batch of one-time numbers (device keys, spec §2.2) belongs to its connection too: the
+        // server keeps a batch at the socket it came on, and a new socket starts with an empty pool
+        // that the batch sent after its `agent_ready` fills. Held, an old batch would reach the new
+        // socket after that fresh one and replace it with numbers that much closer to expiry.
+        //
+        // The PC's key mode (spec §12) is kept by the server per connection: each `agent_ready`
+        // resets it, and `announce_after_connect` sends the current mode after it. Held, an old mode
+        // switched offline would reach the new socket after that fresh one and contradict it.
+        //
+        // The grant token (spec §7 «Токен выдачи») is sent after each connection's `key_mode`: the
+        // current one, read from the file then. Held, an older token would reach the new socket
+        // after that fresh one and the owner would sign grants the PC refuses `grant_stale`.
         AgentToServer::AgentEvent(_)
+        | AgentToServer::SessionNonces { .. }
+        | AgentToServer::KeyMode { .. }
+        | AgentToServer::GrantToken { .. }
         | AgentToServer::SessionStats { .. }
         | AgentToServer::Pong
         | AgentToServer::RequestPairing
@@ -806,6 +822,7 @@ mod tests {
                 accept: true,
                 name: Some("PC".into()),
                 role: Some(afklink_protocol::BindingRole::Guest),
+                key_id: None,
             },
             AgentToServer::Unbind {
                 telegram_user_id: 7,
@@ -1092,6 +1109,31 @@ mod tests {
                 accept: true,
                 name: None,
                 role: None,
+                key_id: None,
+            }),
+            Class::Drop
+        );
+        // A batch of nonces belongs to its connection: the next one gets a fresh batch after its
+        // `agent_ready`, which an old one carried over would replace.
+        assert_eq!(
+            class(&AgentToServer::SessionNonces {
+                batch: 1,
+                nonces: vec!["AAAAAAAAAAAAAAAAAAAAAA".into(); 4],
+            }),
+            Class::Drop
+        );
+        // The key mode is per connection too: the next one gets the current mode after its
+        // `agent_ready`.
+        assert_eq!(
+            class(&AgentToServer::KeyMode {
+                mode: afklink_protocol::viewer_keys::KeyMode::Strict,
+            }),
+            Class::Drop
+        );
+        // So is the grant token: the next connection gets the current one after its `key_mode`.
+        assert_eq!(
+            class(&AgentToServer::GrantToken {
+                token: afklink_protocol::agent_ws::GrantTokenText("AQEBAQEBAQEBAQEBAQEBAQ".into()),
             }),
             Class::Drop
         );

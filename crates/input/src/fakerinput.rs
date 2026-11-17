@@ -3107,26 +3107,30 @@ impl InputInjector for SessionInputBackend {
             driver_open: false,
             now: Instant::now(),
         };
-        let (pid, no_activate) = match target {
+        let (pid, no_activate, hwnd) = match target {
             WindowTarget::Foreground => match host.foreground() {
-                0 => (0, false),
-                window => (host.window_pid(window), false),
+                0 => (0, false, 0),
+                window => (host.window_pid(window), false, window),
             },
             WindowTarget::UnderPress => {
                 let (x, y) = host.press_target()?;
                 match host.window_at(x, y) {
                     // The top-level window's process: WebView2 draws our windows' content in a
                     // child window of its own process, and that child is ours.
-                    Ok(at) if at.root_pid != 0 => (at.root_pid, never_activates(at.root)),
-                    Ok(at) => (at.pid, never_activates(at.hwnd)),
+                    Ok(at) if at.root_pid != 0 => (at.root_pid, never_activates(at.root), at.root),
+                    Ok(at) => (at.pid, never_activates(at.hwnd), at.hwnd),
                     Err(why) => {
                         tracing::trace!(x, y, "window owner: nothing read under the press: {why}");
-                        (0, false)
+                        (0, false, 0)
                     }
                 }
             }
         };
-        (pid != 0).then_some(WindowOwner { pid, no_activate })
+        (pid != 0).then_some(WindowOwner {
+            pid,
+            no_activate,
+            hwnd,
+        })
     }
 
     /// Mouse Keys (`SPI_GETMOUSEKEYS`, `MKF_MOUSEKEYSON`): one `SystemParametersInfoW`.

@@ -23,6 +23,22 @@ pub enum NativeText {
     DurationMinutes,
     /// «меньше минуты»
     DurationUnderMinute,
+    /// «Браузер на {platform}»
+    NotifyDeviceBrowser,
+    /// «Браузер»
+    NotifyDeviceBrowserAny,
+    /// «Telegram Desktop на {os}»
+    NotifyDeviceDesktop,
+    /// «{user}: новое устройство\n{device} · Подтверждено с „{by}“»
+    NotifyDeviceEndorsed,
+    /// «{user}: новое устройство\n{device} · Подтверждено с другого устройства»
+    NotifyDeviceEndorsedUnknown,
+    /// «{user}: новое устройство\n{device} · Разрешил владелец»
+    NotifyDeviceOwnerAllowed,
+    /// «Telegram на {platform}»
+    NotifyDeviceTelegram,
+    /// «Неизвестное устройство»
+    NotifyDeviceUnknown,
     /// «Управление не доходит до игры\nУстанови драйвер в окне AFKLink»
     NotifyDriverNeeded,
     /// «Новый гость: {user}\nПо ссылке владельца»
@@ -79,6 +95,14 @@ impl NativeText {
             Self::DurationHours => "duration.hours.native",
             Self::DurationMinutes => "duration.minutes.native",
             Self::DurationUnderMinute => "duration.underMinute.native",
+            Self::NotifyDeviceBrowser => "notify.deviceBrowser.native",
+            Self::NotifyDeviceBrowserAny => "notify.deviceBrowserAny.native",
+            Self::NotifyDeviceDesktop => "notify.deviceDesktop.native",
+            Self::NotifyDeviceEndorsed => "notify.deviceEndorsed.native",
+            Self::NotifyDeviceEndorsedUnknown => "notify.deviceEndorsedUnknown.native",
+            Self::NotifyDeviceOwnerAllowed => "notify.deviceOwnerAllowed.native",
+            Self::NotifyDeviceTelegram => "notify.deviceTelegram.native",
+            Self::NotifyDeviceUnknown => "notify.deviceUnknown.native",
             Self::NotifyDriverNeeded => "notify.driverNeeded.native",
             Self::NotifyGuestInvited => "notify.guestInvited.native",
             Self::NotifyPairRequestBody => "notify.pairRequestBody.native",
@@ -117,6 +141,22 @@ impl NativeText {
             (Self::DurationMinutes, Locale::En) => "{minutes} min",
             (Self::DurationUnderMinute, Locale::Ru) => "меньше минуты",
             (Self::DurationUnderMinute, Locale::En) => "under a minute",
+            (Self::NotifyDeviceBrowser, Locale::Ru) => "Браузер на {platform}",
+            (Self::NotifyDeviceBrowser, Locale::En) => "Browser on {platform}",
+            (Self::NotifyDeviceBrowserAny, Locale::Ru) => "Браузер",
+            (Self::NotifyDeviceBrowserAny, Locale::En) => "Browser",
+            (Self::NotifyDeviceDesktop, Locale::Ru) => "Telegram Desktop на {os}",
+            (Self::NotifyDeviceDesktop, Locale::En) => "Telegram Desktop on {os}",
+            (Self::NotifyDeviceEndorsed, Locale::Ru) => "{user}: новое устройство\n{device} · Подтверждено с «{by}»",
+            (Self::NotifyDeviceEndorsed, Locale::En) => "{user}: new device\n{device} · Confirmed from “{by}”",
+            (Self::NotifyDeviceEndorsedUnknown, Locale::Ru) => "{user}: новое устройство\n{device} · Подтверждено с другого устройства",
+            (Self::NotifyDeviceEndorsedUnknown, Locale::En) => "{user}: new device\n{device} · Confirmed from another device",
+            (Self::NotifyDeviceOwnerAllowed, Locale::Ru) => "{user}: новое устройство\n{device} · Разрешил владелец",
+            (Self::NotifyDeviceOwnerAllowed, Locale::En) => "{user}: new device\n{device} · Allowed by the owner",
+            (Self::NotifyDeviceTelegram, Locale::Ru) => "Telegram на {platform}",
+            (Self::NotifyDeviceTelegram, Locale::En) => "Telegram on {platform}",
+            (Self::NotifyDeviceUnknown, Locale::Ru) => "Неизвестное устройство",
+            (Self::NotifyDeviceUnknown, Locale::En) => "Unknown device",
             (Self::NotifyDriverNeeded, Locale::Ru) => "Управление не доходит до игры\nУстанови драйвер в окне AFKLink",
             (Self::NotifyDriverNeeded, Locale::En) => "Controls aren't reaching the game\nInstall the driver in the AFKLink window",
             (Self::NotifyGuestInvited, Locale::Ru) => "Новый гость: {user}\nПо ссылке владельца",
@@ -167,12 +207,20 @@ impl NativeText {
 
 /// Every native string, for tests that walk the set.
 #[rustfmt::skip]
-pub const ALL_NATIVE_TEXT: [NativeText; 27] = [
+pub const ALL_NATIVE_TEXT: [NativeText; 35] = [
     NativeText::DialogGameLaunchFilter,
     NativeText::DialogGameLaunchTitle,
     NativeText::DurationHours,
     NativeText::DurationMinutes,
     NativeText::DurationUnderMinute,
+    NativeText::NotifyDeviceBrowser,
+    NativeText::NotifyDeviceBrowserAny,
+    NativeText::NotifyDeviceDesktop,
+    NativeText::NotifyDeviceEndorsed,
+    NativeText::NotifyDeviceEndorsedUnknown,
+    NativeText::NotifyDeviceOwnerAllowed,
+    NativeText::NotifyDeviceTelegram,
+    NativeText::NotifyDeviceUnknown,
     NativeText::NotifyDriverNeeded,
     NativeText::NotifyGuestInvited,
     NativeText::NotifyPairRequestBody,
@@ -204,6 +252,14 @@ pub const KEY_DIALOG_GAME_LAUNCH_TITLE: &str = "dialog.gameLaunchTitle.native";
 pub const KEY_DURATION_HOURS: &str = "duration.hours.native";
 pub const KEY_DURATION_MINUTES: &str = "duration.minutes.native";
 pub const KEY_DURATION_UNDER_MINUTE: &str = "duration.underMinute.native";
+pub const KEY_NOTIFY_DEVICE_BROWSER: &str = "notify.deviceBrowser.native";
+pub const KEY_NOTIFY_DEVICE_BROWSER_ANY: &str = "notify.deviceBrowserAny.native";
+pub const KEY_NOTIFY_DEVICE_DESKTOP: &str = "notify.deviceDesktop.native";
+pub const KEY_NOTIFY_DEVICE_ENDORSED: &str = "notify.deviceEndorsed.native";
+pub const KEY_NOTIFY_DEVICE_ENDORSED_UNKNOWN: &str = "notify.deviceEndorsedUnknown.native";
+pub const KEY_NOTIFY_DEVICE_OWNER_ALLOWED: &str = "notify.deviceOwnerAllowed.native";
+pub const KEY_NOTIFY_DEVICE_TELEGRAM: &str = "notify.deviceTelegram.native";
+pub const KEY_NOTIFY_DEVICE_UNKNOWN: &str = "notify.deviceUnknown.native";
 pub const KEY_NOTIFY_DRIVER_NEEDED: &str = "notify.driverNeeded.native";
 pub const KEY_NOTIFY_GUEST_INVITED: &str = "notify.guestInvited.native";
 pub const KEY_NOTIFY_PAIR_REQUEST_BODY: &str = "notify.pairRequestBody.native";

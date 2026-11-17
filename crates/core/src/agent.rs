@@ -101,8 +101,9 @@ pub struct PendingPair {
     pub expires_at: i64,
     /// Whether the PC had an owner as the request went up (`pair_request.has_owner`):
     /// `Some(false)` — after «Разрешить» the prompt asks «Кто это?» ([`Self::asks_role`]);
-    /// `Some(true)` — no question, the person becomes a guest; `None` — a server older than roles,
-    /// no question either.
+    /// `Some(true)` — the server says the PC has an owner: no «Кто это?»; the role is decided by
+    /// the «owner on this PC» reading ([`crate::admission::press_role`]: the owner's for an owner
+    /// on this PC, else a guest's); `None` — a server older than roles, no question either.
     pub has_owner: Option<bool>,
     /// Where it stands with the signaling link its answer goes over: kept across a break of the
     /// link (the backend keeps it too, and re-sends it), its answer waiting until it is `Live`
@@ -115,6 +116,14 @@ impl PendingPair {
     /// answer: only on a PC the server says has no owner.
     pub fn asks_role(&self) -> bool {
         self.has_owner == Some(false)
+    }
+
+    /// Whether «Разрешить» on this request asks «Кто это?» now: the core's reading with device
+    /// keys (`key`, when it is this request's: [`PairKeyView::ask_role`]), the server's word
+    /// without them ([`Self::asks_role`]). The one reading the prompt and the window's DTO take.
+    pub fn asks_role_now(&self, key: Option<&PairKeyView>) -> bool {
+        key.filter(|k| k.request_id == self.request_id)
+            .map_or_else(|| self.asks_role(), |k| k.ask_role)
     }
 
     /// Whether an answer can go now: the request is on a live link. While the link is down, or back
@@ -137,6 +146,266 @@ impl PendingPair {
             self.first_name.as_deref(),
             self.username.as_deref(),
         )
+    }
+}
+
+/// What the core made of an answer to a pairing request (`AgentCommand::RespondToPair`),
+/// told by request id ([`PairAnswers`]) so the terminal says the real outcome of its own press —
+/// not one guessed from the request leaving the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairAnswer {
+    /// The `pair_response` went, as `accept` says. `via_pc_allow`: the approval only asked the
+    /// owner (§5).
+    Sent { accept: bool, via_pc_allow: bool },
+    /// «Разрешить» waits for its key's write (at most the write's limit); then [`Self::Sent`].
+    Held,
+    /// The approval went without a key id while its key's write had not landed (past the
+    /// write's limit, `slow`, or at the exit): whether the key is written is not known yet. The
+    /// write's own landing then makes it [`Self::Sent`].
+    SentKeyPending,
+    /// The approval went without a key id (as pressed) and its key's write then ended
+    /// without the key in the list — refused or another key: the
+    /// server may bind the person, but this device's key was not added. Never «approved» as if
+    /// the key were in. `why` — what the write ended in, for the terminal's line.
+    SentKeyNotWritten { why: KeyNotWritten },
+    /// An owner on this PC without «Это моё устройство» (§5): nothing was sent, the request still
+    /// waits.
+    SecondStepRequired,
+    /// §5: the press named another role than the one this PC derives for the person now (the
+    /// window read an owner that moved since): nothing was sent, the request still waits and the
+    /// window reads the role again.
+    RoleRefused,
+    /// The request was not waiting (answered, cancelled, expired or forgotten at the bound):
+    /// nothing was sent.
+    NotWaiting,
+    /// The request's link is down (kept across a break): nothing was sent, the request stays.
+    LinkDown,
+}
+
+impl PairAnswer {
+    /// Nothing was sent and the request still waits for the window — shown again for it.
+    pub fn waits_for_window(self) -> bool {
+        matches!(self, Self::SecondStepRequired | Self::RoleRefused)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent { accept: true, .. } => "sent_accept",
+            Self::Sent { accept: false, .. } => "sent_decline",
+            Self::Held => "held",
+            Self::SentKeyPending => "sent_key_pending",
+            Self::SentKeyNotWritten { .. } => "sent_key_not_written",
+            Self::SecondStepRequired => "second_step_required",
+            Self::RoleRefused => "role_refused",
+            Self::NotWaiting => "not_waiting",
+            Self::LinkDown => "link_down",
+        }
+    }
+}
+
+/// Why an approval's device key was not added ([`PairAnswer::SentKeyNotWritten`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyNotWritten {
+    /// The write was refused (the key was removed, the list is damaged …).
+    Refused,
+    /// The write ended without this request's key (another key took the panel's one key).
+    AnotherKey,
+}
+
+impl KeyNotWritten {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::AnotherKey => "another_key",
+        }
+    }
+
+    /// What the key's write `result` (of `key_id`) says: `None` when the key is in the list.
+    fn of(
+        result: &Result<crate::admission::LandedOutcome, crate::viewer_keys::StoreError>,
+        key_id: &crate::viewer_keys::KeyId,
+    ) -> Option<Self> {
+        match result {
+            Ok(crate::admission::LandedOutcome::Added(a)) if a.key_id == *key_id => None,
+            Ok(_) => Some(Self::AnotherKey),
+            Err(_) => Some(Self::Refused),
+        }
+    }
+}
+
+/// The last [`PairAnswer`] per request id, the newest [`PAIR_ANSWERS_MAX`] kept. A new
+/// `pair_request` with an id whose earlier request ended forgets that id's outcome (a stale one
+/// says nothing of it).
+///
+/// Each outcome noted has its own generation ([`Self::note`]): a later step of the same
+/// answer (the key's write landing after the approval went) replaces it only while it still
+/// stands ([`Self::note_over`]) — not once it was forgotten (a new press) or superseded.
+#[derive(Debug, Clone, Default)]
+pub struct PairAnswers {
+    answers: std::collections::VecDeque<(String, PairAnswer, u64)>,
+    /// The generation the next [`Self::note`] gets.
+    next: u64,
+}
+
+/// How many answered request ids [`PairAnswers`] keeps.
+pub const PAIR_ANSWERS_MAX: usize = 16;
+
+impl PairAnswers {
+    /// The last outcome of an answer to `request_id`, if any is kept.
+    pub fn get(&self, request_id: &str) -> Option<PairAnswer> {
+        self.answers
+            .iter()
+            .rev()
+            .find(|(id, _, _)| id == request_id)
+            .map(|(_, a, _)| *a)
+    }
+
+    /// `request_id`'s answer came to `answer`; the oldest id goes past the bound. The outcome's
+    /// generation, for [`Self::note_over`].
+    pub fn note(&mut self, request_id: &str, answer: PairAnswer) -> u64 {
+        self.answers.retain(|(id, _, _)| id != request_id);
+        if self.answers.len() >= PAIR_ANSWERS_MAX {
+            self.answers.pop_front();
+        }
+        let generation = self.next;
+        self.next += 1;
+        self.answers
+            .push_back((request_id.to_string(), answer, generation));
+        generation
+    }
+
+    /// `request_id`'s outcome of `generation` came to `answer` — only while that outcome
+    /// still stands (not forgotten, not superseded by a newer one, not gone at the bound): the
+    /// new generation, or `None` when nothing was replaced.
+    pub fn note_over(
+        &mut self,
+        request_id: &str,
+        generation: u64,
+        answer: PairAnswer,
+    ) -> Option<u64> {
+        let stands = self
+            .answers
+            .iter()
+            .any(|(id, _, g)| id == request_id && *g == generation);
+        stands.then(|| self.note(request_id, answer))
+    }
+
+    /// `request_id`'s last outcome with its generation ([`Self::note`]) — a reader that
+    /// acts on it later (the window's tick) can tell whether it is older than a press.
+    pub fn get_noted(&self, request_id: &str) -> Option<(PairAnswer, u64)> {
+        self.answers
+            .iter()
+            .rev()
+            .find(|(id, _, _)| id == request_id)
+            .map(|(_, a, g)| (*a, *g))
+    }
+
+    /// The generation the next outcome noted gets: every outcome noted from now on has
+    /// this one or a later one, every outcome kept now an earlier one.
+    pub fn next_generation(&self) -> u64 {
+        self.next
+    }
+
+    /// Forget `request_id`'s outcome: whether one was kept.
+    pub fn forget(&mut self, request_id: &str) -> bool {
+        let before = self.answers.len();
+        self.answers.retain(|(id, _, _)| id != request_id);
+        self.answers.len() != before
+    }
+}
+
+/// What a pairing request's access key (`pair_request.viewer_key`, spec §5) will do on
+/// «Разрешить», as the request window says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairKeyView {
+    pub request_id: String,
+    /// The device its signed key card names (display only): `(kind, platform)`, raw.
+    pub device: Option<(String, String)>,
+    /// `valid` — «Разрешить» trusts it; `was_removed` — a valid key removed from the list earlier
+    /// (it comes back); `absent` — no key, or one this panel opening does not take; `invalid` — a
+    /// key card that does not check.
+    pub key_state: &'static str,
+    /// A session that is not a confirmed owner's ran since the pairing panel opened: the key
+    /// lands unconfirmed (§10.1).
+    pub will_be_unconfirmed: bool,
+    /// Strict mode and such a session: «Разрешить» writes no key at all (strict never adds an
+    /// unconfirmed one, and a `pc_allow` key is forgotten at `BindingAdded`) — the window says so
+    /// instead of «Добавится без подтверждения».
+    pub not_trusted_session: bool,
+    /// The time (unix ms, the PC's clock) of the removed record of THIS request's key when that
+    /// removal was made at this PC (origin `pc`, spec §5, §10 «Одно правило возврата»); a
+    /// `server` or `replaced` removal, a removal still pending, no key: none. A fact about the
+    /// key for the window: it gates nothing. Read once with the key line (it does not change
+    /// while the window is open).
+    pub removed_here_at: Option<i64>,
+    /// Spec §5, the `pc_allow` bullet: «Разрешить» now goes through `pc_allow` — a session
+    /// of someone who is not the owner is live, so the press only asks the owner. Kept current
+    /// every turn.
+    pub via_pc_allow: bool,
+    /// What «Разрешить» gives the person ([`crate::admission::PairPlan::gives`], the press's own
+    /// reading): the window offers it only at `Connects` and says why otherwise. Kept current
+    /// every turn.
+    pub gives: crate::admission::PairGives,
+    /// The requester is an owner on this PC ([`crate::trusted::Trusted::owner_on_pc`], §5):
+    /// the press gives the owner's role; with no key, the owner's own way to try again. Kept
+    /// current every turn.
+    pub owner_here: bool,
+    /// What is on screen, for the window's consents (§5): a generation of the request in the
+    /// window's slot — a new one each time a request is placed there (a new id, the same id
+    /// received again after the earlier one ended or was cancelled, another request after it);
+    /// never for a re-send of the request already on screen. A tick («Это моё устройство») holds
+    /// only for the generation and role it was given for, and a press carrying another generation
+    /// changes nothing.
+    pub shown: u64,
+    /// «Разрешить» asks «Кто это?»: the server says the PC has no owner AND this PC's own reading
+    /// derives no role for the person ([`crate::trusted::Trusted::pair_role`] is `None`). Kept
+    /// current every turn.
+    pub ask_role: bool,
+    /// The role the press carries when it is derived for the person
+    /// ([`crate::admission::press_role`]: the owner's for an owner on this PC, else a guest's —
+    /// on a PC with an owner, or via `pc_allow`); `None` when it is chosen at the PC («Кто это?»).
+    pub role: Option<afklink_protocol::BindingRole>,
+    /// «Разрешить» waits for «Это моё устройство»: the plan writes an owner-role key (§5). Kept
+    /// current every turn.
+    pub needs_owner_step: bool,
+    /// What the press does to the device ([`crate::admission::PairPlan::device`]), in either
+    /// mode. Kept current every turn.
+    pub device_line: crate::admission::PairDevice,
+}
+
+/// The request window's reading of «Разрешить» on the request on screen, all from one plan
+/// ([`Agent::pair_reading`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairReading {
+    gives: crate::admission::PairGives,
+    owner_here: bool,
+    ask_role: bool,
+    role: Option<afklink_protocol::BindingRole>,
+    needs_owner_step: bool,
+    device_line: crate::admission::PairDevice,
+}
+
+impl AgentState {
+    /// Whether «Разрешить» on the request on screen under `request_id` asks «Кто это?»
+    /// ([`PendingPair::asks_role_now`]). `None`: no such request on screen.
+    pub fn pair_asks_role(&self, request_id: &str) -> Option<bool> {
+        let p = self
+            .pending_pair
+            .as_ref()
+            .filter(|p| p.request_id == request_id)?;
+        Some(p.asks_role_now(self.pair_key.as_ref()))
+    }
+
+    /// The generation of the request on screen under `request_id` ([`PairKeyView::shown`]);
+    /// `None` without device keys or with no such request on screen.
+    pub fn pair_shown(&self, request_id: &str) -> Option<u64> {
+        self.pending_pair
+            .as_ref()
+            .filter(|p| p.request_id == request_id)?;
+        self.pair_key
+            .as_ref()
+            .filter(|k| k.request_id == request_id)
+            .map(|k| k.shown)
     }
 }
 
@@ -165,6 +434,13 @@ pub struct AgentState {
     pub pairing_link: Option<crate::qr::LinkTarget>,
     /// Set while a confirmation prompt should be on screen.
     pub pending_pair: Option<PendingPair>,
+    /// What «Разрешить» does with the access key of the request on screen (device keys, spec §5),
+    /// for the request window; matched to [`Self::pending_pair`] by its request id. `None`: no
+    /// device keys (the CLI's tests) or no request yet.
+    pub pair_key: Option<PairKeyView>,
+    /// What the core made of each recent answer, by request id (the terminal waits for
+    /// its own press's outcome here; [`PairAnswer::NotWaiting`] among them).
+    pub pair_answers: PairAnswers,
     pub bindings: Vec<BindingInfo>,
     /// Set by the first signaling handshake of this run, never cleared: `bindings` is the backend's
     /// list from then on (the last one it sent, while offline), and empty before it only because
@@ -206,10 +482,19 @@ pub enum AgentCommand {
     /// The owner's answer to a pending pairing request. `role`: the answer to «Кто это?» when the
     /// prompt asked it ([`PendingPair::asks_role`]); `None` — not asked (or a front end that does
     /// not ask, the CLI's `y`), and an approval then makes the person a guest.
+    ///
+    /// `second_step`: the owner's explicit second step «Это моё устройство» (device keys, spec §5,
+    /// `PairKeyView::needs_owner_step`). Without it «Разрешить» for an owner on this PC changes
+    /// nothing and no answer goes: the request still waits.
     RespondToPair {
         request_id: String,
         accept: bool,
         role: Option<afklink_protocol::BindingRole>,
+        second_step: bool,
+        /// The generation of the request the window showed ([`PairKeyView::shown`]); `None` from
+        /// a front end that shows none (the terminal). Another one on screen now: an approval
+        /// changes nothing and the request still waits.
+        shown: Option<u64>,
     },
     /// «Отвязать» on a person. A guest's binding goes at once (`unbind`); the owner's waits for the
     /// owner's confirmation in Telegram (`owner_request` `unbind_owner`), as the roles in
@@ -245,6 +530,12 @@ pub enum AgentCommand {
         budget: Duration,
         done: std::sync::mpsc::SyncSender<ExitEnding>,
     },
+    /// A change to the PC's trusted devices from the window (`crate::trusted`), answered on the
+    /// request's channel. Served offline too: the list is the PC's own.
+    Trusted(crate::trusted::TrustedRequest),
+    /// The system resumed from sleep (not a cancelled shutdown): the device keys' nonce book
+    /// starts over and a new batch goes out (spec §2.2). Served offline too.
+    ResumedFromSleep,
 }
 
 impl AgentCommand {
@@ -262,6 +553,8 @@ impl AgentCommand {
             Self::SetName(_) => "set_name",
             Self::Retry => "retry",
             Self::EndForExit { .. } => "end_for_exit",
+            Self::Trusted(_) => "trusted",
+            Self::ResumedFromSleep => "resumed_from_sleep",
         }
     }
 }
@@ -379,6 +672,60 @@ pub enum AgentEvent {
         telegram_user_id: i64,
         name: crate::PersonName,
     },
+    /// A person's new device joined the PC's trusted devices without anyone at the PC asked
+    /// (device keys, spec §7, §3.4 step 9), told after its key is in the list's file: vouched for
+    /// by another of the person's devices, or a known guest's new device by the owner's grant.
+    /// The desktop app's toast «{user}: новое устройство» over «{device} · …». `name` and the
+    /// devices from the key records; `device.source` is the ground (`endorse`, `grant`).
+    NewTrustedDevice {
+        telegram_user_id: i64,
+        name: crate::PersonName,
+        device: crate::journal::TrustedDevice,
+        how: NewDeviceHow,
+    },
+}
+
+/// How a person's new device got in ([`AgentEvent::NewTrustedDevice`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewDeviceHow {
+    /// Vouched for by another of the person's devices (`endorse`): that device, while it is in
+    /// the list.
+    Endorsed {
+        by: Option<crate::journal::TrustedDevice>,
+    },
+    /// The owner let a guest he has already let in use one more device (`grant`, spec §7).
+    OwnerAllowed,
+}
+
+/// A `pair_response` whose key is being written ([`Agent::held_pairs`]): sent with the key's id
+/// once the write lands, without it on a refusal, `slow`, or past `until`.
+/// An approval that went before its key's write landed ([`Agent::answers_unlanded`]).
+#[derive(Debug)]
+struct Unlanded {
+    /// The admission's change of the key.
+    ticket: u64,
+    request_id: String,
+    key_id: crate::viewer_keys::KeyId,
+    /// The generation of its kept outcome `SentKeyPending` ([`PairAnswers::note`]).
+    generation: u64,
+}
+
+struct HeldPair {
+    /// The admission's change of the key.
+    ticket: u64,
+    request_id: String,
+    /// The person asking (the request's): a re-send of this request by them while the answer is
+    /// held gets nothing more (§5).
+    telegram_user_id: Option<i64>,
+    key_id: crate::viewer_keys::KeyId,
+    /// The answer, `key_id` none yet.
+    response: AgentToServer,
+    until: Instant,
+    /// §5: the person and what the press saw (its role, read again at the write).
+    press: Option<(i64, crate::admission::PressSeen)>,
+    /// The generation of its kept outcome `held` ([`PairAnswers::note`]): what the answer
+    /// comes to replaces it only while it stands ([`PairAnswers::note_over`]).
+    generation: u64,
 }
 
 /// How many [`AgentEvent`]s a slow subscriber may fall behind before it misses some.
@@ -388,6 +735,11 @@ pub const EVENT_CAPACITY: usize = 64;
 /// (`crate::pairing::tick`): its waits are seconds long, so half a second is precise enough, and the
 /// look is a lock and a comparison.
 const PAIRING_TICK: Duration = Duration::from_millis(500);
+
+/// How long a `session_request` may wait for its offer (device keys spec §3.4): a Pending
+/// request counts against the trust windows, so a server could hold them shut with requests
+/// alone. Past this the agent ends it, `no_session_request`; checked on the pairing tick.
+const PENDING_OFFER_LIMIT: Duration = Duration::from_secs(30);
 
 /// The pairing tick of one serving or waiting loop; a tick missed while the loop was busy is not
 /// made up.
@@ -430,9 +782,42 @@ pub struct AgentControl {
     /// The goodbye to the backend and the hold on reconnecting after it (`crate::goodbye`); see
     /// [`Self::goodbye_blocking`].
     goodbyes: Arc<crate::goodbye::Goodbyes>,
+    /// The trusted devices as the orchestrator last published them (`crate::trusted`).
+    trusted: tokio::sync::watch::Receiver<Arc<crate::trusted::TrustedView>>,
+    /// The keys live sessions are signed with, for the window's «сеанс с него прервётся».
+    live_keys: Arc<Mutex<LiveKeys>>,
+}
+
+/// The keys live sessions are signed with (full `key_id`s), and a generation that moves with each
+/// change: the window reads the list again when it moves. The lock is held to copy or replace only.
+#[derive(Debug, Default)]
+struct LiveKeys {
+    generation: u64,
+    keys: std::collections::BTreeSet<String>,
 }
 
 impl AgentControl {
+    /// The keys live sessions are signed with, and their generation ([`LiveKeys`]). Never waits
+    /// on the orchestrator: a copy under a lock held for the copy.
+    pub fn live_key_ids(&self) -> (u64, std::collections::BTreeSet<String>) {
+        let k = lock(&self.live_keys);
+        (k.generation, k.keys.clone())
+    }
+
+    /// The trusted devices as last published: never waits on the orchestrator or a write.
+    pub fn trusted_view(&self) -> Arc<crate::trusted::TrustedView> {
+        Arc::clone(&self.trusted.borrow())
+    }
+
+    /// Ask the orchestrator for a change to the trusted devices; the answer within
+    /// [`crate::trusted::REPLY_LIMIT`], else `slow` (`crate::trusted::ask`).
+    pub async fn ask_trusted(
+        &self,
+        ask: crate::trusted::TrustedAsk,
+    ) -> crate::trusted::TrustedReply {
+        crate::trusted::ask(&self.commands, ask).await
+    }
+
     /// Tell the backend this agent is leaving (`agent_goodbye` with `reason`, then a normal close)
     /// and stop reconnecting until [`Self::welcome_back`] — or the owner's retry, or the hold's
     /// limit (`crate::goodbye::hold_limit`). Waits at most `budget`
@@ -472,6 +857,26 @@ impl AgentControl {
     /// cancelled the shutdown): reconnect now. Whether a goodbye was holding it.
     pub fn welcome_back(&self, why: &str) -> bool {
         self.goodbyes.lift(why)
+    }
+
+    /// AFKLink's trust windows by their `HWND` (0: unknown): the pairing request window, and the
+    /// main window (a trust window while the pairing panel is open). Remote input reaches them only
+    /// from a session signed by a confirmed owner key (`crate::own_windows`, spec §3.4).
+    pub fn set_trust_windows(&self, pair_request: usize, main: usize) {
+        let windows = crate::own_windows::TrustWindows::global();
+        windows.set_pair_request(pair_request);
+        windows.set_main(main);
+    }
+
+    /// The system resumed from sleep: the device keys' nonce book starts over (spec §2.2) — sleep
+    /// stretched the numbers' age. Whether the orchestrator was told (it is gone otherwise).
+    pub fn resumed_from_sleep(&self) -> bool {
+        let told = self.commands.send(AgentCommand::ResumedFromSleep).is_ok();
+        tracing::debug!(
+            told,
+            "device keys: resumed from sleep; the nonce book starts over"
+        );
+        told
     }
 
     /// The pause («Прервать все сеансы», [`AgentState::paused`]) written to config.json now, on this
@@ -819,6 +1224,9 @@ enum SessionSignal {
         id: String,
         reason: &'static str,
     },
+    /// A trusted devices' file job ended (`crate::trusted`): not a session's, but taken in on the
+    /// same channel so both of the orchestrator's loops serve it.
+    Trusted(Box<crate::trusted::TrustedDone>),
 }
 
 impl SessionSignal {
@@ -828,6 +1236,7 @@ impl SessionSignal {
             Self::Connected(id) => ("connected", id),
             Self::Closed { id, .. } => ("closed", id),
             Self::PipelineFailed { id, .. } => ("pipeline_failed", id),
+            Self::Trusted(done) => (done.kind(), "-"),
         }
     }
 }
@@ -1285,6 +1694,8 @@ struct Pending {
     /// The quality policy the session will run on, chosen at its `session_request` (the server's
     /// profile or the fallback, `crate::quality_policy::SessionPolicy::for_session`).
     policy: crate::quality_policy::SessionPolicy,
+    /// When the request came: one with no offer past [`PENDING_OFFER_LIMIT`] is ended.
+    since: Instant,
 }
 
 /// What a session opens on before its controller exists, all from its policy: the start rung, the
@@ -1494,6 +1905,57 @@ struct ApprovedHere {
 const APPROVED_HERE_FOR: Duration =
     Duration::from_millis(afklink_protocol::PAIR_CONFIRM_TIMEOUT_MS);
 
+/// At most this many of one comparison's changes are journaled and
+/// announced; the rest are counted in one log line. A relay's flood would otherwise push the
+/// owner's real history out past the journal's bound.
+/// The bound is for each side on its own — this many gone bindings and this many new
+/// ones — so a flood of gone people cannot hide a real invite (its entry and toast) or a new
+/// owner's warning; and the comparison's entries are ONE journal write, off the orchestrator
+/// ([`Agent::journal_batch`]).
+const AWAY_JOURNAL_MAX: usize = 64;
+
+/// A test agent's scratch folder, removed when dropped — only a folder named as the test
+/// helper names its own (`afklink-core-test-<uuid>` in the temp dir); never anything else.
+#[cfg(test)]
+#[derive(Debug)]
+struct TestScratch(std::path::PathBuf);
+
+#[cfg(test)]
+impl TestScratch {
+    /// A fresh folder of a test's own (`afklink-core-test-<what>-<uuid>` in the temp
+    /// dir), made with `create_dir` — never one that is there already, an earlier run's or
+    /// anyone else's.
+    fn fresh(what: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("afklink-core-test-{what}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).expect("a fresh test dir");
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestScratch {
+    fn drop(&mut self) {
+        let own = self.0.parent() == Some(std::env::temp_dir().as_path())
+            && self
+                .0
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("afklink-core-test-"));
+        if !own {
+            tracing::warn!(dir = %self.0.display(), "test scratch: not the helper's own; kept");
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            tracing::debug!(dir = %self.0.display(), "test scratch: not removed: {e}");
+        }
+    }
+}
+
 /// How a binding list differs from an earlier one, by Telegram id: who is gone, who is new —
 /// each in the order of the list it is in.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1503,19 +1965,33 @@ struct BindingChanges {
 }
 
 fn binding_changes(previous: &[BindingInfo], now: &[BindingInfo]) -> BindingChanges {
-    let listed = |list: &[BindingInfo], id: i64| list.iter().any(|b| b.telegram_user_id == id);
-    BindingChanges {
-        gone: previous
-            .iter()
-            .filter(|b| !listed(now, b.telegram_user_id))
+    // By sets — linear in the two lists (a relay's `agent_ready` may name any number;
+    // comparing each with each stalled the orchestrator), and each id once (its first entry).
+    let ids = |list: &[BindingInfo]| {
+        list.iter()
+            .map(|b| b.telegram_user_id)
+            .collect::<std::collections::HashSet<i64>>()
+    };
+    let (in_previous, in_now) = (ids(previous), ids(now));
+    let only_in = |list: &[BindingInfo], other: &std::collections::HashSet<i64>| {
+        let mut seen = std::collections::HashSet::new();
+        list.iter()
+            .filter(|b| !other.contains(&b.telegram_user_id) && seen.insert(b.telegram_user_id))
             .cloned()
-            .collect(),
-        added: now
-            .iter()
-            .filter(|b| !listed(previous, b.telegram_user_id))
-            .cloned()
-            .collect(),
-    }
+            .collect::<Vec<_>>()
+    };
+    let changes = BindingChanges {
+        gone: only_in(previous, &in_now),
+        added: only_in(now, &in_previous),
+    };
+    tracing::debug!(
+        previous = previous.len(),
+        now = now.len(),
+        gone = changes.gone.len(),
+        added = changes.added.len(),
+        "access: two binding lists compared by id"
+    );
+    changes
 }
 
 /// Why «Новый гость: {user}» does not go out for a binding by the owner's invite, or `None` when it
@@ -1913,6 +2389,136 @@ pub struct Agent {
     /// A new session's start is refused at once when this many jobs are stuck on the input
     /// driver or past their error bound ([`START_REFUSE_STUCK`]; changed in tests).
     start_refuse_stuck: usize,
+    /// The PC's trusted devices: the list, its change queue, the window's view and token
+    /// (`crate::trusted`). No list until [`Agent::with_trust_store`].
+    trusted: crate::trusted::Trusted,
+    /// Session admission by device keys (`crate::admission`, spec §2–§11): its decisions, on this
+    /// loop, synchronously.
+    admission: crate::admission::Admission,
+    /// The sessions the admission was told of (`session_requested`): told of their end when they
+    /// leave `pending` and `sessions` ([`Agent::reconcile_admission`]).
+    admission_ids: std::collections::HashSet<String>,
+    /// What the admission decided for each admitted (or write-waiting) session ([`Keyed`]).
+    keyed: HashMap<String, Keyed>,
+    /// First offers waiting for their key's write (spec §3.4 step 9), by session.
+    offers_waiting: HashMap<String, String>,
+    /// Sessions whose key's write landed and admitted them: started by the serving loop.
+    admitted_ready: Vec<String>,
+    /// «Разрешить»'s answers held until their key's write lands (spec §5: the server hears a
+    /// `key_id` only for a written key), at most the list's write limit each
+    /// ([`crate::trusted::WRITE_LIMIT`]).
+    held_pairs: Vec<HeldPair>,
+    /// Approvals sent without a key id while their key's write had not landed (past the
+    /// limit, `slow`, the exit), until the write's own landing tells the kept outcome
+    /// ([`PairAnswer::SentKeyPending`]); the newest [`PAIR_ANSWERS_MAX`]. Each tied to its
+    /// outcome's generation — dropped when another outcome of its id is noted here, and its
+    /// landing changes nothing once the outcome was forgotten or superseded elsewhere.
+    answers_unlanded: Vec<Unlanded>,
+    /// A test's hold on peers: an admitted offer stays a request (in `pending`), as while its peer
+    /// is being created — the admission's tests use a test SDP no peer can be made from.
+    #[cfg(test)]
+    hold_peers: bool,
+    /// A test agent's own scratch folder (config.json, identity.json), removed with the
+    /// agent ([`TestScratch`]).
+    #[cfg(test)]
+    test_scratch: Option<TestScratch>,
+    /// This connection's `agent_ready.nonce_pool`: `session_nonces` go only on such a one.
+    nonce_pool: bool,
+    /// The key mode last sent on this connection (`key_mode`, spec §12; `None`: none yet — each
+    /// `agent_ready` resets the server's to unknown).
+    key_mode_sent: Option<bool>,
+    /// This connection's `agent_ready.grant_token`: `grant_token` goes only on such a one.
+    grant_token_on: bool,
+    /// The grant token last sent on this connection (spec §7 «Токен выдачи»; `None`: none yet).
+    grant_token_sent: Option<crate::viewer_keys::GrantToken>,
+    /// When the last nonce batch went out, and a refill put off to the end of its 2 s window.
+    nonce_sent_at: Option<Instant>,
+    nonce_deferred: Option<Instant>,
+    /// The first `agent_ready` of this process was seen (the `first_use` snapshot, spec §9).
+    first_ready_seen: bool,
+    /// The mode the admission decides in, as last seen ([`Agent::admission_strict`]; `None`: not
+    /// read yet).
+    mode_strict: Option<bool>,
+    /// The pairing panel as last told to the admission and the trust windows.
+    panel_told: bool,
+    /// The keys live sessions are signed with, shared with [`AgentControl::live_key_ids`].
+    live_keys: Arc<Mutex<LiveKeys>>,
+    /// When the journal last had a refusal of each person, kind and reason ([`declined_reason`];
+    /// device keys): at most one an hour each, however often a viewer retries
+    /// ([`DECLINED_JOURNAL_EVERY`]). Only people bound now or named by a verified key record get
+    /// an entry, and at most [`DECLINED_JOURNALED_MAX`] are kept.
+    declined_journaled: HashMap<(i64, &'static str, Option<&'static str>), Instant>,
+    /// When the journal had its refusals (device keys) in the last hour, for everyone together:
+    /// at most [`DECLINED_JOURNAL_PER_HOUR`].
+    declined_hour: std::collections::VecDeque<Instant>,
+    /// Remote candidates of first offers waiting for their key's write (`offers_waiting`), by
+    /// session, in order: handed to the peer once it exists, dropped with a refusal. At most
+    /// [`ICE_WAITING_MAX`] each, and how many past it were dropped.
+    ice_waiting: HashMap<String, (Vec<afklink_protocol::IceCandidate>, usize)>,
+    /// The window token the pairing panel opened with (told to the admission at once, when
+    /// «Привязать» is handled): a request's key lands unconfirmed when the window is not clean
+    /// since (`AgentState::pair_key`'s `will_be_unconfirmed`). `None` while it is closed.
+    panel_token: Option<u64>,
+    /// The token of the panel opening whose key the pairing request on screen took
+    /// (`AgentState::pair_key`), by request id.
+    pair_key_token: Option<(String, u64)>,
+    /// The generation of the request placed in the window's slot last ([`PairKeyView::shown`]).
+    pair_shown: u64,
+}
+
+/// A person's refusals of one kind and reason go into the journal at most this often.
+const DECLINED_JOURNAL_EVERY: Duration = Duration::from_secs(3600);
+/// Refusals (device keys) in the journal an hour, everyone together: a flood of offers under
+/// fresh names — which the server can invent — does not bury the owner's journal.
+const DECLINED_JOURNAL_PER_HOUR: usize = 30;
+/// People-kinds-and-reasons remembered for [`DECLINED_JOURNAL_EVERY`] at most.
+const DECLINED_JOURNALED_MAX: usize = 256;
+/// Remote candidates kept for a first offer waiting for its key's write (at most 2 s): a viewer
+/// trickles a handful; more is not a viewer's.
+const ICE_WAITING_MAX: usize = 32;
+
+/// What the admission decided for a session (device keys), kept beside it until it ends.
+#[derive(Debug, Clone)]
+struct Keyed {
+    /// The `ks` for the viewer, sent once its `input` channel opens (spec §3.7).
+    ks: Option<String>,
+    /// The summary's verdict (spec §11.1).
+    summary: crate::summary::KeyVerdict,
+    /// The key the session is signed with: its removal ends the session.
+    kid: Option<crate::viewer_keys::KeyId>,
+    /// The session's identity from the key record (spec §3.4 step 10), when signed.
+    identity: Option<crate::admission::SessionIdentity>,
+}
+
+/// `session_nonces` every minute while a connection lives (spec §2.2 (b)).
+const NONCE_ROTATE: Duration =
+    Duration::from_millis(afklink_protocol::viewer_keys::NONCE_ROTATE_MS);
+
+/// A refill asked by a `session_request` at most this often (spec §2.2 (c)).
+const NONCE_REFILL_MIN: Duration =
+    Duration::from_millis(afklink_protocol::viewer_keys::NONCE_REFILL_MIN_MS);
+
+/// A verdict's reason word (`session_end.reason`, `ks.verdict`): a protocol code, never a key.
+fn verdict_code(v: crate::admission::Verdict) -> &'static str {
+    v.code
+}
+
+/// The reason a journaled refusal carries (`Entry::reason`), for the refusals the window names
+/// apart from their kind: a permission given before a removal, a listed device not confirmed
+/// yet. `None` for every other refusal: its line reads as the kind.
+fn declined_reason(v: crate::admission::Verdict) -> Option<&'static str> {
+    match (v.code, v.detail) {
+        ("admit_refused", Some("grant_stale")) => Some("grant_stale"),
+        ("key_unconfirmed", _) => Some("key_unconfirmed"),
+        _ => None,
+    }
+}
+
+fn key_mode(mode: crate::admission::Mode) -> afklink_protocol::viewer_keys::KeyMode {
+    match mode {
+        crate::admission::Mode::Observe => afklink_protocol::viewer_keys::KeyMode::Observe,
+        crate::admission::Mode::Strict => afklink_protocol::viewer_keys::KeyMode::Strict,
+    }
 }
 
 /// The session teardowns running on their own threads (`crate::offload::detach`).
@@ -1983,6 +2589,11 @@ impl Agent {
         let helper_launch = Arc::new(crate::game::HelperLaunch::new());
         // Until a binary gives one that remembers (`with_entry`): the same rules, for this run only.
         let entry = Arc::new(crate::entry::Entry::in_memory(&config.server_url));
+        let live_keys = Arc::new(Mutex::new(LiveKeys::default()));
+        let admission = crate::admission::Admission::new(
+            config.device_id.clone(),
+            crate::viewer_keys::TelegramVerifier::production(),
+        );
         let config = Arc::new(Mutex::new(config));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (sess_ev_tx, sess_ev_rx) = mpsc::unbounded_channel();
@@ -1990,6 +2601,19 @@ impl Agent {
         let (outbox, outbox_rx) = mpsc::unbounded_channel();
         let (links, links_rx) = mpsc::unbounded_channel();
         let goodbyes = crate::goodbye::Goodbyes::new();
+        // The trusted devices' file jobs come back on the session-signal channel.
+        let trusted_done = sess_ev_tx.clone();
+        let (trusted, trusted_view) =
+            crate::trusted::Trusted::new(Arc::new(move |done: crate::trusted::TrustedDone| {
+                if trusted_done
+                    .send(SessionSignal::Trusted(Box::new(done)))
+                    .is_err()
+                {
+                    tracing::debug!(
+                        "trusted devices: the orchestrator is gone; a job's result dropped"
+                    );
+                }
+            }));
 
         let control = AgentControl {
             state: state.clone(),
@@ -1999,6 +2623,8 @@ impl Agent {
             game_access: game_access.clone(),
             helper_launch: helper_launch.clone(),
             goodbyes: goodbyes.clone(),
+            trusted: trusted_view,
+            live_keys: live_keys.clone(),
         };
 
         let reach = Arc::new(crate::input_reach::ReachMonitor::new(
@@ -2059,8 +2685,1712 @@ impl Agent {
             } else {
                 START_REFUSE_STUCK
             },
+            trusted,
+            admission,
+            admission_ids: std::collections::HashSet::new(),
+            keyed: HashMap::new(),
+            offers_waiting: HashMap::new(),
+            admitted_ready: Vec::new(),
+            held_pairs: Vec::new(),
+            answers_unlanded: Vec::new(),
+            #[cfg(test)]
+            hold_peers: false,
+            #[cfg(test)]
+            test_scratch: None,
+            nonce_pool: false,
+            key_mode_sent: None,
+            grant_token_on: false,
+            grant_token_sent: None,
+            nonce_sent_at: None,
+            nonce_deferred: None,
+            first_ready_seen: false,
+            mode_strict: None,
+            panel_told: false,
+            live_keys,
+            declined_journaled: HashMap::new(),
+            declined_hour: std::collections::VecDeque::new(),
+            ice_waiting: HashMap::new(),
+            panel_token: None,
+            pair_key_token: None,
+            pair_shown: 0,
         };
         (agent, control)
+    }
+
+    /// Keep the PC's trusted devices in `store` (`TrustStore::open_default` beside config.json):
+    /// the desktop app's. On a damaged list its backup is checked for the window here — blocking
+    /// file I/O, for the start where config.json is read, before the runtime runs this agent.
+    #[must_use]
+    pub fn with_trust_store(mut self, store: crate::viewer_keys::TrustStore) -> Self {
+        self.trusted.attach(store);
+        // The mode the list starts in is not a switch (spec §10): seen here, so the first sweep
+        // compares with it and ends nothing a strict PC's start already decided in strict mode
+        // (a Pending request above all).
+        let strict = self.admission_strict();
+        tracing::debug!(
+            strict,
+            "device keys: the admission's mode at the list's attach (the sweeps compare with it)"
+        );
+        self.mode_strict = Some(strict);
+        self
+    }
+
+    /// The sessions and pending sessions that count against the trusted devices' window
+    /// (`crate::trusted`, spec §3.4): every one but a live session signed by a confirmed owner key
+    /// (its identity from the key record). A session the admission does not know counts. One
+    /// source with the admission's own updates of the window (`Admission::window_live`), so the
+    /// window token moves once per change.
+    fn trust_window_live(&self) -> usize {
+        self.admission.window_live(
+            self.pending
+                .keys()
+                .chain(self.sessions.map.keys())
+                .map(String::as_str),
+        )
+    }
+
+    /// Whether offers go through the admission. Always, but in the unit tests of an agent with no
+    /// trusted list attached (`with_trust_store`), which keep the binding check as before keys:
+    /// a shipped build without a list is strict and refuses (the store's fail-closed rule).
+    fn admission_on(&self) -> bool {
+        !(cfg!(test) && !self.trusted.has_store())
+    }
+
+    /// Whether the admission decides in strict mode now — its own rule (`admission::mode_of`):
+    /// the PC's switch («Доверенные устройства») while the list reads; a damaged list's mode file
+    /// (`TrustStore::damaged_mode`) when it says observe; strict otherwise (no list, a damaged one
+    /// whose mode file says strict or nothing). The `session_request` and offer checks, the
+    /// journal's refusals and the sweep's mode change all ask this, so none of them disagrees
+    /// with the verdict.
+    fn admission_strict(&self) -> bool {
+        crate::admission::mode_of(self.trusted.store()) == crate::admission::Mode::Strict
+    }
+
+    /// `session_end.detail.key_mode` (spec §11, §12): on an end whose reason is one of device keys
+    /// (`KEY_END_REASONS`), the mode the admission decides in at this moment — read here, from the
+    /// list, never from the decision that ended the session (a decision made without the list's
+    /// reading, such as an offer with no `session_request`, carries no mode of the PC's). Observe
+    /// ends sessions with these reasons too, so the server's copy of the mode learns it from this
+    /// word, not from the reason. `None` on every other end.
+    fn key_end_mode(&self, reason: &str) -> Option<&'static str> {
+        let key_end = afklink_protocol::KeyEndReason::ALL
+            .iter()
+            .any(|r| r.as_str() == reason);
+        key_end.then(|| {
+            if self.admission_strict() {
+                afklink_protocol::KeyMode::Strict.as_str()
+            } else {
+                afklink_protocol::KeyMode::Observe.as_str()
+            }
+        })
+    }
+
+    /// The monotonic clock of the nonce book and the token bucket (ms since this agent started).
+    fn mono_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The PC's key mode to the server (`key_mode`, spec §12): only on a connection whose
+    /// `agent_ready` said `nonce_pool` (an older server answers `bad_message`), right after
+    /// `device_name` (`announce_after_connect`, `force`) and whenever the mode the admission decides
+    /// in differs from the one last sent on this connection (every switch).
+    fn send_key_mode(
+        &mut self,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+        force: bool,
+        why: &str,
+    ) {
+        if !self.nonce_pool {
+            tracing::debug!(
+                why,
+                "device keys: no nonce pool on this connection; no key_mode sent"
+            );
+            return;
+        }
+        let strict = self.admission_strict();
+        if !force && self.key_mode_sent == Some(strict) {
+            tracing::debug!(
+                why,
+                strict,
+                "device keys: key_mode unchanged on this connection; not sent"
+            );
+            return;
+        }
+        let mode = if strict {
+            afklink_protocol::viewer_keys::KeyMode::Strict
+        } else {
+            afklink_protocol::viewer_keys::KeyMode::Observe
+        };
+        let sent = send_to_backend(outgoing, AgentToServer::KeyMode { mode });
+        tracing::debug!(why, mode = mode.as_str(), was = ?self.key_mode_sent, sent, "device keys: key_mode sent");
+        if sent {
+            self.key_mode_sent = Some(strict);
+        }
+    }
+
+    /// The PC's grant token to the server (spec §7 «Токен выдачи», §12), only on a connection whose
+    /// `agent_ready` said `grant_token` (an older server answers `bad_message`): after `key_mode`
+    /// (`announce_after_connect`), then whenever the token the file holds is not the one last
+    /// sent on this connection — a write that replaced it landed (every trusted-list change ends
+    /// here). The file's token, never memory's not yet written (a grant over it would be signed
+    /// before the removal's write); none while the list is damaged or absent. On the main loop, no
+    /// I/O: a channel send. The value is never logged.
+    fn send_grant_token(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>, why: &str) {
+        if !self.grant_token_on {
+            return;
+        }
+        let Some(saved) = self
+            .trusted
+            .store()
+            .and_then(crate::viewer_keys::TrustStore::saved_grant_token)
+        else {
+            if self.grant_token_sent.is_none() {
+                tracing::debug!(
+                    why,
+                    "device keys: no grant_token sent: no list here, or it is damaged"
+                );
+            }
+            return;
+        };
+        if self.grant_token_sent == Some(saved) {
+            return;
+        }
+        let sent = send_to_backend(
+            outgoing,
+            AgentToServer::GrantToken {
+                token: afklink_protocol::agent_ws::GrantTokenText(saved.to_wire()),
+            },
+        );
+        tracing::info!(
+            why,
+            first = self.grant_token_sent.is_none(),
+            none_yet = saved.is_empty(),
+            sent,
+            "device keys: grant_token sent (the file's; its value is never logged)"
+        );
+        if sent {
+            self.grant_token_sent = Some(saved);
+        }
+    }
+
+    /// A nonce batch to the server (spec §2.2), on a connection with a nonce pool only.
+    fn send_nonce_batch(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>, why: &str) {
+        self.nonce_deferred = None;
+        if !self.nonce_pool {
+            tracing::debug!(
+                why,
+                "device keys: no nonce pool on this connection; no batch sent"
+            );
+            return;
+        }
+        let Some(batch) = self.admission.new_nonce_batch(self.mono_ms()) else {
+            tracing::warn!(why, "device keys: no nonce batch could be made; none sent");
+            return;
+        };
+        self.nonce_sent_at = Some(Instant::now());
+        tracing::debug!(
+            why,
+            batch = batch.batch,
+            nonces = batch.nonces.len(),
+            "device keys: a nonce batch sent"
+        );
+        send_to_backend(
+            outgoing,
+            AgentToServer::SessionNonces {
+                batch: batch.batch,
+                nonces: batch.nonces,
+            },
+        );
+    }
+
+    /// A refill asked by a `session_request` (spec §2.2 (c)): at once, or at the end of the 2 s
+    /// window since the last batch (one deferred send per window).
+    fn want_nonce_batch(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        let due = self.nonce_sent_at.map(|at| at + NONCE_REFILL_MIN);
+        match due {
+            Some(due) if due > Instant::now() => {
+                if self.nonce_deferred.is_none() {
+                    tracing::debug!(
+                        in_ms = due.saturating_duration_since(Instant::now()).as_millis() as u64,
+                        "device keys: a refill asked within 2 s of the last batch; put off to the \
+                         end of the window"
+                    );
+                    self.nonce_deferred = Some(due);
+                } else {
+                    tracing::trace!("device keys: a refill already put off for this window");
+                }
+            }
+            _ => self.send_nonce_batch(outgoing, "refill"),
+        }
+    }
+
+    /// Tell the admission of every session that left `pending` and `sessions` by any path, and
+    /// the pairing panel's state to the admission and the trust windows (`crate::own_windows`).
+    fn reconcile_admission(&mut self) {
+        let gone: Vec<String> = self
+            .admission_ids
+            .iter()
+            .filter(|id| {
+                !self.pending.contains_key(*id) && !self.sessions.contains_key(id.as_str())
+            })
+            .cloned()
+            .collect();
+        for id in gone {
+            self.admission_ids.remove(&id);
+            self.keyed.remove(&id);
+            if self.offers_waiting.remove(&id).is_some() {
+                tracing::debug!(session = %id, "device keys: a session that waited for its key's write ended");
+            }
+            if let Some((kept, over)) = self.ice_waiting.remove(&id) {
+                tracing::debug!(
+                    session = %id,
+                    candidates = kept.len() + over,
+                    "device keys: an ended session's waiting candidates are dropped"
+                );
+            }
+            self.admission.session_ended(&mut self.trusted, &id);
+        }
+        // The keys of live signed sessions, for the window's DTO (`in_session`).
+        let live: std::collections::BTreeSet<String> = self
+            .keyed
+            .iter()
+            .filter(|(sid, _)| self.sessions.contains_key(sid.as_str()))
+            .filter_map(|(_, k)| k.kid.as_ref().map(|kid| kid.as_str().to_string()))
+            .collect();
+        {
+            let mut shared = lock(&self.live_keys);
+            if shared.keys != live {
+                shared.generation = shared.generation.wrapping_add(1);
+                tracing::debug!(
+                    live = live.len(),
+                    generation = shared.generation,
+                    "device keys: the keys of live sessions changed (the window reads them again)"
+                );
+                shared.keys = live;
+            }
+        }
+        let open = lock(&self.state).pairing_panel == crate::pairing::PairingPanel::Open;
+        self.tell_panel(open, "the loop's turn");
+        self.sync_pair_key();
+    }
+
+    /// The pairing panel's state to the admission (which records the window token for its key)
+    /// and the trust windows, when it changed. Called as «Привязать» is handled, not a loop turn
+    /// later: a session that ends in between still taints the opening (spec §3.4); and at every
+    /// turn for the panel's other edges (a code redeemed, a request arriving).
+    fn tell_panel(&mut self, open: bool, why: &'static str) {
+        if open == self.panel_told {
+            return;
+        }
+        self.panel_told = open;
+        if open {
+            // The window as the sessions stand at this moment, then its token.
+            self.trusted.sync_live(self.trust_window_live());
+        }
+        self.admission.pairing_panel(&self.trusted, open);
+        self.panel_token = open.then(|| self.trusted.window_token());
+        tracing::debug!(
+            open,
+            why,
+            token = self.panel_token.unwrap_or(0),
+            clean = self.trusted.counting() == 0,
+            "device keys: the pairing panel's state to the admission and the trust windows"
+        );
+        crate::own_windows::TrustWindows::global().set_panel_open(open);
+    }
+
+    /// What a pairing request's key will do on «Разрешить», for the request window: its device
+    /// and whether it comes back after a removal. A key the admission took is checked already;
+    /// its card is read again here for the device's words and its id (one signature check, at
+    /// most one per panel opening).
+    fn pair_key_view(
+        &self,
+        request_id: &str,
+        outcome: crate::admission::ViewerKeyOutcome,
+        (shown, has_owner): (u64, Option<bool>),
+    ) -> PairKeyView {
+        use crate::admission::ViewerKeyOutcome as O;
+        // What «Разрешить» decides by: the key and the person the admission holds for the request
+        // (the first under its id, spec §5) — for a repeat, the first's, never the repeat's card.
+        let waiting = self.admission.pair_waiting(request_id);
+        let reg = waiting.and_then(|(_, k)| k).cloned();
+        // §5: «Удалено из доверенных: {when}» — the time of this key's own removed record when
+        // that removal was made at this PC (origin `pc`); no other removal gives a date.
+        let mut removed_here_at = None;
+        let key_state = match (outcome, &reg) {
+            // A key held for the request: this one's, or — a repeat — the first's.
+            (_, Some(reg)) => match self.trusted.store().map(|s| s.lookup(reg.key.key_id())) {
+                Some(crate::viewer_keys::Lookup::Removed(t)) => {
+                    removed_here_at = (t.origin == crate::viewer_keys::Origin::Pc).then_some(t.at);
+                    // not-a-key-name: a viewer device key's id, short (`kid`), never a keyboard key
+                    tracing::debug!(
+                        %request_id,
+                        kid = %reg.key.key_id().short(),
+                        origin = t.origin.as_str(),
+                        dated = removed_here_at.is_some(),
+                        "device keys: the request's key was removed here earlier: {}",
+                        if removed_here_at.is_some() {
+                            "the removal line carries its time"
+                        } else {
+                            "not at this PC's press, no date"
+                        }
+                    );
+                    "was_removed"
+                }
+                Some(crate::viewer_keys::Lookup::PendingRemoval(_)) => "was_removed",
+                _ => "valid",
+            },
+            (O::Accepted, None) => {
+                tracing::warn!(
+                    %request_id,
+                    "device keys: a key the admission took is not held for the request; shown as \
+                     invalid"
+                );
+                "invalid"
+            }
+            (O::Invalid, _) => "invalid",
+            (O::Absent | O::IgnoredNoPanel | O::IgnoredWindowUsed | O::IgnoredRepeat, _) => {
+                "absent"
+            }
+        };
+        let device = reg
+            .as_ref()
+            .map(|r| (r.kind.as_str().to_string(), r.platform.as_str().to_string()));
+        // The first frame reads the press as it goes now, `pc_allow` included.
+        let via = self.pair_via_pc_allow();
+        let now = self.pair_reading(request_id, via, has_owner, key_state == "was_removed");
+        // not-a-key-name: a viewer device key's id, short (`kid`), never a keyboard key
+        tracing::debug!(
+            %request_id,
+            viewer_key = outcome.as_str(),
+            key_state,
+            kid = %reg.as_ref().map_or_else(|| "-".to_string(), |r| r.key.key_id().short().to_string()),
+            removed_here_at = removed_here_at.unwrap_or(0),
+            panel_token = self.panel_token.unwrap_or(0),
+            "device keys: the request window's key line"
+        );
+        PairKeyView {
+            request_id: request_id.to_string(),
+            device,
+            key_state,
+            will_be_unconfirmed: false,
+            not_trusted_session: false,
+            removed_here_at,
+            via_pc_allow: via,
+            gives: now.gives,
+            owner_here: now.owner_here,
+            shown,
+            ask_role: now.ask_role,
+            role: now.role,
+            needs_owner_step: now.needs_owner_step,
+            device_line: now.device_line,
+        }
+    }
+
+    /// An answer for a request that is no longer waiting (found by `at`: the guard, or
+    /// `pair_allow`'s own sweep when the bound passed after the guard) — nothing goes to the
+    /// server; a window still showing it closes and the terminal hears it was not sent.
+    /// Noted directly (not through [`Agent::note_pair_answer`]): the id's approvals still
+    /// waiting for their key's landing stay listed, and their landing changes nothing — the
+    /// outcome they would replace is no longer current ([`PairAnswers::note_over`]).
+    fn answer_not_waiting(&self, request_id: &str, accept: bool, at: &'static str) {
+        let mut s = lock(&self.state);
+        let shown = s
+            .pending_pair
+            .as_ref()
+            .is_some_and(|p| p.request_id == request_id);
+        if shown {
+            s.pending_pair = None;
+        }
+        s.pair_answers.note(request_id, PairAnswer::NotWaiting);
+        tracing::info!(
+            %request_id,
+            accept,
+            at,
+            closed_window = shown,
+            "answer to a pairing request that no longer waits: not sent"
+        );
+    }
+
+    /// The request window's one reading of «Разрешить» on `request_id` (§5), `via` its
+    /// `pc_allow` now, `has_owner` the server's word with the request, `again` its key a removed
+    /// one: what the press gives the person and does to the device — the admission's plan
+    /// ([`crate::admission::PairPlan`], the press's own reading) in the mode the admission decides
+    /// by — whether «Кто это?» is asked, the role when derived, and whether the owner's step is
+    /// needed. No request waiting (or the admission off): the press binds as today, nothing
+    /// asked of the device.
+    fn pair_reading(
+        &self,
+        request_id: &str,
+        via: bool,
+        has_owner: Option<bool>,
+        again: bool,
+    ) -> PairReading {
+        use crate::admission::{PairDevice, PairGives};
+        let person = self
+            .admission
+            .pair_waiting(request_id)
+            .map(|(p, _)| p.telegram_user_id)
+            .filter(|_| self.admission_on());
+        let Some(uid) = person else {
+            return PairReading {
+                gives: PairGives::Connects,
+                owner_here: false,
+                ask_role: has_owner == Some(false),
+                role: None,
+                needs_owner_step: false,
+                device_line: PairDevice::None,
+            };
+        };
+        let strict = self.admission_strict();
+        let derived = crate::admission::press_role(&self.trusted, uid, via);
+        // The role the press carries: the derived one (§5); the window reads the plan as a
+        // guest's when the role is still to be chosen.
+        let role = derived.unwrap_or(afklink_protocol::BindingRole::Guest);
+        let plan = self
+            .admission
+            .pair_plan(&self.trusted, request_id, role, via);
+        let gives = plan.map_or(PairGives::Connects, |p| p.gives(strict));
+        let device_line = plan.map_or(PairDevice::None, |p| p.device(strict, again));
+        let owner_here = self.trusted.owner_on_pc(uid);
+        let needs_owner_step =
+            plan.is_some_and(|p| crate::admission::needs_owner_step(&self.trusted, uid, p));
+        let reading = PairReading {
+            gives,
+            owner_here,
+            ask_role: has_owner == Some(false) && derived.is_none(),
+            role: derived,
+            needs_owner_step,
+            device_line,
+        };
+        tracing::trace!(
+            request_id,
+            plan = plan.map_or("not_waiting", crate::admission::PairPlan::as_str),
+            strict,
+            via,
+            gives = gives.as_str(),
+            device = device_line.as_str(),
+            role = derived.map_or("chosen", afklink_protocol::BindingRole::as_str),
+            ask_role = reading.ask_role,
+            needs_owner_step,
+            "device keys: the request window's reading of «Разрешить»"
+        );
+        reading
+    }
+
+    /// Whether «Разрешить» goes via `pc_allow` now (§5): a session of someone who is not the
+    /// owner (by the bindings) is live, so the press only asks the owner.
+    fn pair_via_pc_allow(&self) -> bool {
+        let s = lock(&self.state);
+        self.sessions.map.values().any(|x| {
+            role_of(&s.bindings, x.telegram_user_id) != Some(afklink_protocol::BindingRole::Owner)
+        })
+    }
+
+    /// The request window's «Добавится без подтверждения»: whether a session that is not a
+    /// confirmed owner's ran since the panel opening whose key the request on screen took
+    /// (`AgentState::pair_key`). Once true, true (the window token never comes back). Dropped
+    /// with the request.
+    fn sync_pair_key(&mut self) {
+        // §5: whether «Разрешить» on the request on screen goes via `pc_allow` now, for
+        // every request (with a key or without one) — and so what the press gives.
+        let via = self.pair_via_pc_allow();
+        let (shown, again) = {
+            let s = lock(&self.state);
+            let shown = s
+                .pending_pair
+                .as_ref()
+                .map(|p| (p.request_id.clone(), p.has_owner));
+            let again = s.pair_key.as_ref().is_some_and(|k| {
+                k.key_state == "was_removed"
+                    && shown.as_ref().is_some_and(|(id, _)| *id == k.request_id)
+            });
+            (shown, again)
+        };
+        let reading = shown
+            .as_ref()
+            .map(|(id, has_owner)| self.pair_reading(id, via, *has_owner, again));
+        let shown = shown.map(|(id, _)| id);
+        {
+            let mut s = lock(&self.state);
+            if let (Some(line), Some(now)) = (
+                s.pair_key
+                    .as_mut()
+                    .filter(|line| Some(&line.request_id) == shown.as_ref()),
+                reading,
+            ) {
+                let was = PairReading {
+                    gives: line.gives,
+                    owner_here: line.owner_here,
+                    ask_role: line.ask_role,
+                    role: line.role,
+                    needs_owner_step: line.needs_owner_step,
+                    device_line: line.device_line,
+                };
+                if was != now {
+                    line.gives = now.gives;
+                    line.owner_here = now.owner_here;
+                    line.ask_role = now.ask_role;
+                    line.role = now.role;
+                    line.needs_owner_step = now.needs_owner_step;
+                    line.device_line = now.device_line;
+                    tracing::debug!(
+                        request_id = %line.request_id,
+                        shown = line.shown,
+                        gives = now.gives.as_str(),
+                        device = now.device_line.as_str(),
+                        owner_here = now.owner_here,
+                        ask_role = now.ask_role,
+                        role = now.role.map_or("chosen", afklink_protocol::BindingRole::as_str),
+                        needs_owner_step = now.needs_owner_step,
+                        "device keys: the request window's reading changed: «Разрешить» {}",
+                        if now.gives.connects() {
+                            "lets the person connect: offered"
+                        } else {
+                            "would not let the person connect: not offered, the window says why"
+                        }
+                    );
+                }
+                if line.via_pc_allow != via {
+                    line.via_pc_allow = via;
+                    tracing::debug!(
+                        request_id = %line.request_id,
+                        via_pc_allow = via,
+                        "device keys: the request window's «Разрешить» {}",
+                        if via {
+                            "goes via pc_allow now (a non-owner's session is live)"
+                        } else {
+                            "is the PC's own again (no non-owner's session)"
+                        }
+                    );
+                }
+            }
+        }
+        let Some((request_id, token)) = self.pair_key_token.clone() else {
+            return;
+        };
+        let dirty = !self.trusted.window_clean(token);
+        let strict = self.admission_strict();
+        let mut s = lock(&self.state);
+        let on_screen = s
+            .pending_pair
+            .as_ref()
+            .is_some_and(|p| p.request_id == request_id);
+        if !on_screen {
+            drop(s);
+            self.pair_key_token = None;
+            tracing::debug!(
+                %request_id,
+                "device keys: the pairing request with a key is gone; its window state dropped"
+            );
+            return;
+        }
+        if let Some(k) = s.pair_key.as_mut().filter(|k| k.request_id == request_id) {
+            if k.will_be_unconfirmed != dirty {
+                k.will_be_unconfirmed = dirty;
+                tracing::debug!(
+                    %request_id,
+                    token,
+                    "device keys: a session not signed by a confirmed owner key ran since the \
+                     panel opened: the request's key will land unconfirmed"
+                );
+            }
+            let not_trusted = dirty && strict;
+            if k.not_trusted_session != not_trusted {
+                k.not_trusted_session = not_trusted;
+                tracing::debug!(
+                    %request_id,
+                    token,
+                    dirty,
+                    strict,
+                    "device keys: the request window's key line: {}",
+                    if not_trusted {
+                        "strict mode and a tainted opening — «Разрешить» writes no key"
+                    } else {
+                        "a key «Разрешить» writes"
+                    }
+                );
+            }
+        }
+    }
+
+    /// After a change of the trusted list: the admission's landed changes, then the sessions of
+    /// removed keys and of a switched mode end (spec §10, §10.1).
+    fn after_trusted_change(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        for landed in self.trusted.take_landed() {
+            self.land_held_pair(&landed, outgoing);
+            let mut d = self.admission.landed(&mut self.trusted, landed);
+            for j in &d.journal {
+                self.note_key_journal(j);
+            }
+            // §10.2: an offer's key the list refused at the queue's turn is another
+            // device's attempt, as a refusal at the decision is — noted on the list's notes
+            // already, here only when new and within the day's bound (`journal_bound`).
+            if !d.attempts.is_empty() {
+                tracing::debug!(
+                    attempts = d.attempts.len(),
+                    "device keys: attempts refused at the queue's turn go into the journal"
+                );
+            }
+            for attempt in std::mem::take(&mut d.attempts) {
+                self.journal_attempt(&attempt);
+            }
+            if let Some((kid, unconfirmed, rpk)) = &d.pair_key {
+                tracing::info!(
+                    kid = %kid.short(),
+                    unconfirmed,
+                    rpk,
+                    "device keys: the pairing's key is in the list"
+                );
+            }
+            for e in d.end_sessions {
+                self.end_keyed(e, outgoing);
+            }
+            // `None`: no session waited for it, or it ended meanwhile — nothing to answer twice.
+            let Some((sid, admitted, verdict)) = d.session else {
+                continue;
+            };
+            if !admitted {
+                tracing::info!(
+                    session = %sid,
+                    verdict = verdict_code(verdict),
+                    detail = verdict.detail.unwrap_or("-"),
+                    waiting = self.offers_waiting.contains_key(&sid),
+                    "device keys: the session that waited for its key's write is refused"
+                );
+                self.journal_declined(&sid, verdict, None);
+                if self.pending.contains_key(&sid) || self.offers_waiting.contains_key(&sid) {
+                    self.refuse_offer(sid, verdict, outgoing);
+                }
+                continue;
+            }
+            // Admitted: what landed is the session's — its verdict, `ks`, key and person (the
+            // record's, or the server's word when the key did not land) — never the offer's guess.
+            if let Some(k) = self.keyed.get_mut(&sid) {
+                k.summary.verdict = verdict.code;
+                k.summary.detail = verdict.detail;
+                if let Some(ks) = &d.ks {
+                    k.summary.admit = ks.admit;
+                    k.summary.mode = key_mode(ks.mode);
+                }
+                k.ks = d.ks.as_ref().map(|ks| ks.to_json().to_string());
+                k.kid = d.kid.clone();
+                k.identity = d.identity.clone();
+            } else {
+                tracing::warn!(
+                    session = %sid,
+                    "device keys: an admitted session has no admission record here; its start \
+                     goes on with the server's word"
+                );
+            }
+            if self.offers_waiting.contains_key(&sid) {
+                tracing::debug!(
+                    session = %sid,
+                    verdict = verdict_code(verdict),
+                    keyed = d.kid.is_some(),
+                    from_record = d.identity.as_ref().is_some_and(|i| i.from_record),
+                    "device keys: the key's write landed; the session starts with the final result"
+                );
+                self.admitted_ready.push(sid);
+            } else {
+                tracing::debug!(
+                    session = %sid,
+                    "device keys: the key's write landed for a session no longer waiting; nothing \
+                     to start"
+                );
+            }
+        }
+        // §10 «Сверка со списком сервера»: what the rule took after this change (its run follows
+        // every installed change): their sessions and pending requests end.
+        self.end_ruled(outgoing, "a trusted-list change");
+        self.sweep_keys(outgoing);
+        // §7: a write that replaced the grant token landed — the server hears the new one now.
+        self.send_grant_token(outgoing, "a trusted-list change");
+    }
+
+    /// A held «Разрешить» answer whose key's change ended: sent with the key's id when the key is
+    /// in the list now, without it when the write was refused or outlived its limit (it may still
+    /// land; the server then learns of the key from the device's own offers).
+    fn land_held_pair(
+        &mut self,
+        landed: &crate::admission::Landed,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        let Some(at) = self
+            .held_pairs
+            .iter()
+            .position(|h| h.ticket == landed.ticket)
+        else {
+            self.land_unlanded_answer(landed);
+            return;
+        };
+        let held = self.held_pairs.remove(at);
+        // Past its limit (the tick has not come round yet): as if it had expired.
+        let late = Instant::now() >= held.until;
+        let written = !landed.slow
+            && !late
+            && matches!(
+                &landed.result,
+                Ok(crate::admission::LandedOutcome::Added(a)) if a.key_id == held.key_id
+            );
+        let outcome = if landed.slow {
+            "slow"
+        } else if late {
+            "past_limit"
+        } else {
+            match &landed.result {
+                Ok(_) if written => "written",
+                Ok(_) => "another_key",
+                Err(e) => e.as_str(),
+            }
+        };
+        tracing::debug!(
+            request_id = %held.request_id,
+            ticket = held.ticket,
+            kid = %held.key_id.short(),
+            outcome,
+            waited_ms = self
+                .trusted
+                .write_limit()
+                .saturating_sub(held.until.saturating_duration_since(Instant::now()))
+                .as_millis() as u64,
+            "device keys: «Разрешить»'s answer goes {}",
+            if written { "with its key's id" } else { "without a key id (not written)" }
+        );
+        // Overtaken since the press: the role derived at the write is not the one it named — the
+        // press goes whole, as a decline.
+        let role_changed = matches!(
+            &landed.result,
+            Err(crate::viewer_keys::StoreError::RoleChanged)
+        );
+        // Whether this request's key is in the list now (late or not) — what the outcome
+        // tells; `written` is whether its id goes with the answer, and why not.
+        let key_in = match KeyNotWritten::of(&landed.result, &held.key_id) {
+            None => Ok(()),
+            Some(why) => Err(why),
+        };
+        // `slow` — the write goes on and lands later; its answer goes now, not known yet.
+        let landed_key = (!landed.slow).then_some(key_in);
+        self.send_held_pair(held, (written, landed_key), role_changed, outgoing);
+    }
+
+    /// The landing of a key's write whose approval went before it (past the limit, `slow`,
+    /// the exit; [`Agent::answers_unlanded`]): the approval went as pressed, with no key id; the
+    /// kept outcome now tells whether its key is in the list. A `slow` one is not the end yet.
+    ///
+    /// Only while that approval's own outcome (`SentKeyPending`, by its generation) still
+    /// stands: once it was forgotten (the window or the terminal before a new press, a new
+    /// request under the id) or superseded (another press: not waiting), the landing changes
+    /// nothing. And «approved» (`Sent`) only for this request's key added; any other end —
+    /// refused, another key — is [`PairAnswer::SentKeyNotWritten`].
+    fn land_unlanded_answer(&mut self, landed: &crate::admission::Landed) {
+        if landed.slow {
+            return;
+        }
+        let Some(at) = self
+            .answers_unlanded
+            .iter()
+            .position(|u| u.ticket == landed.ticket)
+        else {
+            return;
+        };
+        let u = self.answers_unlanded.remove(at);
+        let not_written = KeyNotWritten::of(&landed.result, &u.key_id);
+        let key_in = not_written.is_none();
+        let answer = match not_written {
+            None => PairAnswer::Sent {
+                accept: true,
+                via_pc_allow: false,
+            },
+            Some(why) => PairAnswer::SentKeyNotWritten { why },
+        };
+        let told = lock(&self.state)
+            .pair_answers
+            .note_over(&u.request_id, u.generation, answer)
+            .is_some();
+        tracing::debug!(
+            request_id = %u.request_id,
+            ticket = u.ticket,
+            generation = u.generation,
+            kid = %u.key_id.short(),
+            key_in,
+            why = not_written.map_or("-", KeyNotWritten::as_str),
+            refused = landed.result.as_ref().err().map_or("-", |e| e.as_str()),
+            outcome = answer.as_str(),
+            told,
+            "device keys: «Разрешить»'s key write landed after its answer went (without a key id): \
+             {}",
+            if told {
+                "the kept outcome tells it"
+            } else {
+                "its outcome was forgotten or superseded since; the newer one stays"
+            }
+        );
+    }
+
+    /// A held «Разрешить» answer goes: with its key's id when `written`.
+    /// Not written (§5) and overtaken since the press — the key refused `role_changed` — the
+    /// press goes as a whole: a decline (`accept: false`), never an approval without a key id
+    /// (the server would bind the person by a role the PC does not give now).
+    ///
+    /// `landed` — the key's write has its final result (else past the limit, `slow` or
+    /// the exit: `None`): an approval that goes before it is kept as
+    /// [`PairAnswer::SentKeyPending`] until it lands ([`Agent::land_unlanded_answer`]), not
+    /// «approved». With a final result, `Some(key_in)` — whether the request's key is in
+    /// the list (late, its id does not go): an approval whose key is not is
+    /// [`PairAnswer::SentKeyNotWritten`], not «approved» (`Err(why)`).
+    fn send_held_pair(
+        &mut self,
+        held: HeldPair,
+        (written, landed): (bool, Option<Result<(), KeyNotWritten>>),
+        role_changed: bool,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        let decline = !written && role_changed;
+        let mut response = held.response;
+        if let AgentToServer::PairResponse {
+            accept,
+            name,
+            role,
+            key_id,
+            ..
+        } = &mut response
+        {
+            *key_id = written.then(|| held.key_id.as_str().to_string());
+            if decline {
+                *accept = false;
+                *name = None;
+                *role = None;
+            }
+        }
+        tracing::debug!(
+            request_id = %held.request_id,
+            written,
+            role_changed,
+            "device keys: «Разрешить»'s held answer: {}",
+            if decline {
+                "a role change overtook the press: it goes as a decline"
+            } else {
+                "as pressed"
+            }
+        );
+        if decline {
+            if let Some((uid, _)) = held.press {
+                self.note_answer_here(uid, &held.request_id, false, Instant::now());
+            }
+            tracing::info!(
+                request_id = %held.request_id,
+                "pairing request: «Разрешить» overtaken by a role change; declined"
+            );
+        }
+        send_to_backend(outgoing, response);
+        let answer = match (decline, written, landed) {
+            (true, _, _) => PairAnswer::Sent {
+                accept: false,
+                via_pc_allow: false,
+            },
+            (false, true, _) | (false, false, Some(Ok(()))) => PairAnswer::Sent {
+                accept: true,
+                via_pc_allow: false,
+            },
+            (false, false, None) => PairAnswer::SentKeyPending,
+            (false, false, Some(Err(why))) => PairAnswer::SentKeyNotWritten { why },
+        };
+        // Over its own `held` outcome only — a newer one of the id (another press: not
+        // waiting) or a forget (the window, the terminal, before a new press) stays.
+        let Some(generation) =
+            self.note_pair_answer_over(&held.request_id, held.generation, answer)
+        else {
+            return;
+        };
+        if answer == PairAnswer::SentKeyPending {
+            if self.answers_unlanded.len() >= PAIR_ANSWERS_MAX {
+                let u = self.answers_unlanded.remove(0);
+                tracing::debug!(
+                    request_id = %u.request_id,
+                    ticket = u.ticket,
+                    max = PAIR_ANSWERS_MAX,
+                    "device keys: the oldest approval waiting for its key's landing forgotten at \
+                     the bound (its outcome stays sent_key_pending)"
+                );
+            }
+            self.answers_unlanded.push(Unlanded {
+                ticket: held.ticket,
+                request_id: held.request_id,
+                key_id: held.key_id,
+                generation,
+            });
+        }
+    }
+
+    /// What became of an answer to `request_id`, kept for the terminal
+    /// ([`AgentState::pair_answers`]); its generation ([`PairAnswers::note`]). An outcome
+    /// noted here also drops the id's approvals still waiting for their key's landing
+    /// ([`Agent::answers_unlanded`]). One noted elsewhere — [`Agent::answer_not_waiting`],
+    /// a forget by the window or the terminal — leaves them; their landing then tells nothing
+    /// all the same, as its generation is no longer current ([`PairAnswers::note_over`]).
+    fn note_pair_answer(&mut self, request_id: &str, answer: PairAnswer) -> u64 {
+        let generation = lock(&self.state).pair_answers.note(request_id, answer);
+        let before = self.answers_unlanded.len();
+        self.answers_unlanded.retain(|u| u.request_id != request_id);
+        tracing::debug!(
+            %request_id,
+            outcome = answer.as_str(),
+            generation,
+            unlanded_dropped = before - self.answers_unlanded.len(),
+            "pairing request: the answer's outcome kept for the terminal"
+        );
+        generation
+    }
+
+    /// `request_id`'s outcome of `generation` (a held «Разрешить»'s `held`) comes to
+    /// `answer` — only while it still stands ([`PairAnswers::note_over`]): the new generation,
+    /// or `None` when a newer outcome of the id, or a forget, came first (that one stays).
+    fn note_pair_answer_over(
+        &mut self,
+        request_id: &str,
+        generation: u64,
+        answer: PairAnswer,
+    ) -> Option<u64> {
+        let told = lock(&self.state)
+            .pair_answers
+            .note_over(request_id, generation, answer);
+        let before = self.answers_unlanded.len();
+        if told.is_some() {
+            self.answers_unlanded.retain(|u| u.request_id != request_id);
+        }
+        tracing::debug!(
+            %request_id,
+            outcome = answer.as_str(),
+            over = generation,
+            generation = told.unwrap_or(0),
+            told = told.is_some(),
+            unlanded_dropped = before - self.answers_unlanded.len(),
+            "pairing request: the held answer's outcome {}",
+            if told.is_some() {
+                "kept for the terminal"
+            } else {
+                "not kept: a newer outcome of the id, or a forget, came first; that one stays"
+            }
+        );
+        told
+    }
+
+    /// The process is leaving: every held «Разрешить» answer goes now, without a key id (its write
+    /// has not landed), before the goodbye — not lost with the process.
+    fn flush_held_pairs(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        for held in std::mem::take(&mut self.held_pairs) {
+            tracing::info!(
+                request_id = %held.request_id,
+                ticket = held.ticket,
+                kid = %held.key_id.short(),
+                "device keys: exit: «Разрешить»'s answer goes without a key id (its write has not \
+                 landed)"
+            );
+            self.send_held_pair(held, (false, None), false, outgoing);
+        }
+    }
+
+    /// Held «Разрешить» answers past their limit (the write is queued behind others, or the
+    /// result was lost): sent without a key id. On the pairing tick.
+    fn expire_held_pairs(&mut self, now: Instant, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        if self.held_pairs.is_empty() {
+            return;
+        }
+        let (due, kept): (Vec<HeldPair>, Vec<HeldPair>) = std::mem::take(&mut self.held_pairs)
+            .into_iter()
+            .partition(|h| now >= h.until);
+        self.held_pairs = kept;
+        for held in due {
+            tracing::warn!(
+                request_id = %held.request_id,
+                ticket = held.ticket,
+                kid = %held.key_id.short(),
+                limit_ms = self.trusted.write_limit().as_millis() as u64,
+                "device keys: «Разрешить»'s key was not written within the limit; the answer goes \
+                 without a key id (the write may still land)"
+            );
+            self.send_held_pair(held, (false, None), false, outgoing);
+        }
+    }
+
+    /// Session requests that waited past [`PENDING_OFFER_LIMIT`] with no offer end
+    /// `no_session_request` (device keys spec §3.4): Pending, they hold the trust windows shut. A
+    /// request whose offer came — waiting for its key's write — is not one of them. The admission
+    /// hears of each at the loop's next reconcile. On the pairing tick, online and offline (a
+    /// request kept across a break must not hold the windows for the whole break); offline the
+    /// `session_end` waits in the outbox for the next connection.
+    fn expire_pending_requests(
+        &mut self,
+        now: Instant,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        let due: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(id, p)| {
+                now.saturating_duration_since(p.since) >= PENDING_OFFER_LIMIT
+                    && !self.offers_waiting.contains_key(id.as_str())
+                    && !self.admission.offered(id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            let Some(p) = self.pending.remove(&id) else {
+                continue;
+            };
+            tracing::info!(
+                session = %id,
+                telegram_user_id = p.telegram_user_id,
+                waited_ms = now.saturating_duration_since(p.since).as_millis() as u64,
+                limit_ms = PENDING_OFFER_LIMIT.as_millis() as u64,
+                reason = end_reason::NO_SESSION_REQUEST,
+                "session request ended: no offer came within the limit (a pending request holds \
+                 the trust windows)"
+            );
+            self.log_ended(&id, end_reason::NO_SESSION_REQUEST);
+            self.emit(AgentEvent::SessionEnded {
+                session_id: id.clone(),
+                reason: end_reason::NO_SESSION_REQUEST.into(),
+            });
+            send_to_backend(
+                outgoing,
+                AgentToServer::SessionEnd {
+                    session_id: id,
+                    reason: Some(end_reason::NO_SESSION_REQUEST.into()),
+                    detail: None,
+                },
+            );
+        }
+    }
+
+    /// End the sessions of keys that left the list, and those a switch of the mode ends. A live
+    /// signed session whose key is not active now — removed, its removal decided, unknown after a
+    /// reset or a restore, or the list damaged — ends; so does a first offer waiting for its
+    /// write whose signing key's removal is decided now or whose list is damaged (its own new key
+    /// is not in the list until the write lands: unknown is its normal state, and removed is too
+    /// when its ground lifts the tombstone — the stage decides).
+    fn sweep_keys(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        if !self.admission_on() {
+            return;
+        }
+        self.end_sessions_of_keys_gone(outgoing, "sweep");
+        self.sweep_mode(outgoing);
+    }
+
+    /// The key part of [`Self::sweep_keys`]: the live signed sessions (and waiting first offers)
+    /// whose key is not active in the list now end (`why`: the caller, for the log).
+    fn end_sessions_of_keys_gone(
+        &mut self,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+        why: &str,
+    ) {
+        if !self.admission_on() {
+            return;
+        }
+        use crate::viewer_keys::Lookup;
+        let (gone, damaged): (Vec<crate::viewer_keys::KeyId>, bool) = {
+            let store = self.trusted.store();
+            let damaged = store.is_none_or(crate::viewer_keys::TrustStore::is_damaged);
+            let gone = self
+                .keyed
+                .iter()
+                .filter_map(|(sid, k)| k.kid.as_ref().map(|kid| (sid, kid)))
+                .filter(|(sid, kid)| {
+                    let lookup = store.map_or(Lookup::StoreDamaged, |s| s.lookup(kid));
+                    let live = self.sessions.contains_key(sid.as_str());
+                    let waiting = self.offers_waiting.contains_key(sid.as_str());
+                    // A waiting first offer's key is not in the list until its write lands: unknown,
+                    // or removed when its ground lifts a tombstone (a fresh `grant` after the
+                    // removal, §10) — the list decides that again at the write's stage.
+                    // A removal decided now, or a damaged list, ends it at once.
+                    let ends = match lookup {
+                        Lookup::Active(_) => false,
+                        Lookup::Unknown | Lookup::Removed(_) => live,
+                        Lookup::PendingRemoval(_) | Lookup::StoreDamaged => live || waiting,
+                    };
+                    if ends {
+                        tracing::debug!(
+                            session = %sid,
+                            kid = %kid.short(),
+                            live,
+                            waiting,
+                            "device keys: the session's key does not work in the list now"
+                        );
+                    }
+                    ends
+                })
+                .map(|(_, kid)| kid.clone())
+                .collect();
+            (gone, damaged)
+        };
+        if !gone.is_empty() {
+            tracing::debug!(
+                why,
+                removed = gone.len(),
+                damaged,
+                "device keys: keys of live or waiting sessions left the list"
+            );
+            for mut e in self.admission.keys_removed(&mut self.trusted, &gone) {
+                if damaged {
+                    // The list cannot say the key any more: not a removal.
+                    e.verdict = crate::admission::Verdict::key_list_damaged("read_failed");
+                }
+                self.end_keyed(e, outgoing);
+            }
+        }
+    }
+
+    /// The mode part of [`Self::sweep_keys`]: a switch of the mode seen ends what it ends and is
+    /// told to the server.
+    fn sweep_mode(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        let strict = self.admission_strict();
+        let was = self.mode_strict.replace(strict);
+        if was != Some(strict) {
+            // A switch is a change between two modes seen: observe → strict ends the sessions
+            // observe let in and every Pending request (§10); strict → observe ends nothing but is
+            // told. `None` — no list attached (always strict; the attach seeds the mode) — is a
+            // first look, not a switch: a strict PC's Pending requests stay (§10 has no rule for
+            // it), as do its sessions, all decided in strict mode already.
+            let tell = was.is_some();
+            tracing::info!(
+                strict,
+                was = ?was,
+                told = tell,
+                "device keys: the admission's mode changed"
+            );
+            if tell {
+                for e in self.admission.mode_changed(&mut self.trusted, strict) {
+                    self.end_keyed(e, outgoing);
+                }
+            }
+        }
+        // Every switch reaches the server (spec §12); a first look that differs from what the
+        // connection was told (no list at the announce: strict) too.
+        self.send_key_mode(outgoing, false, "mode_seen");
+    }
+
+    /// End a session (or a pending one) the admission ended, with its reason.
+    fn end_keyed(
+        &mut self,
+        e: crate::admission::EndSession,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        tracing::info!(
+            session = %e.session_id,
+            reason = verdict_code(e.verdict),
+            detail = e.verdict.detail.unwrap_or("-"),
+            live = self.sessions.contains_key(&e.session_id),
+            "device keys: the session ends"
+        );
+        if self.sessions.contains_key(&e.session_id) {
+            self.end_session_with(
+                &e.session_id,
+                true,
+                e.verdict.code,
+                e.verdict.detail,
+                outgoing,
+            );
+        } else if self.pending.contains_key(&e.session_id) {
+            self.refuse_offer(e.session_id.clone(), e.verdict, outgoing);
+        }
+        self.admission
+            .session_ended(&mut self.trusted, &e.session_id);
+    }
+
+    /// Refuse a session before its peer exists: the viewer told the reason and its
+    /// `ended_detail` (spec §11).
+    fn refuse_offer(
+        &mut self,
+        session_id: String,
+        verdict: crate::admission::Verdict,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        tracing::info!(
+            session = %session_id,
+            reason = verdict_code(verdict),
+            detail = verdict.detail.unwrap_or("-"),
+            "device keys: the session is refused"
+        );
+        self.pending.remove(&session_id);
+        self.offers_waiting.remove(&session_id);
+        if let Some((kept, over)) = self.ice_waiting.remove(&session_id) {
+            tracing::debug!(
+                session = %session_id,
+                candidates = kept.len() + over,
+                "device keys: the refused offer's waiting candidates are dropped"
+            );
+        }
+        self.log_ended(&session_id, verdict.code);
+        self.emit(AgentEvent::SessionEnded {
+            session_id: session_id.clone(),
+            reason: verdict.code.into(),
+        });
+        let detail = refusal_detail(&session_id, verdict.detail, self.key_end_mode(verdict.code));
+        send_to_backend(
+            outgoing,
+            AgentToServer::SessionEnd {
+                session_id,
+                reason: Some(verdict.code.into()),
+                detail,
+            },
+        );
+    }
+
+    /// A journal event of the admission (spec §3.4 step 9: after the write): «Новое устройство»
+    /// and «Ключ доступа восстановлен» with the device from the list, and the toast of a person's
+    /// new device (spec §7, §3.4 step 9). The other events (a recovery's wrong signature, a
+    /// `first_use` probe) are logged: another device's attempt is journaled from the offer's
+    /// decision or its landed change instead ([`Self::journal_attempt`]).
+    fn note_key_journal(&self, event: &crate::admission::JournalEvent) {
+        use crate::admission::JournalEvent as J;
+        let (kind, key_id, ground, by, guest_new_device) = match event {
+            J::KeyAdded {
+                ground,
+                key_id,
+                by,
+                guest_new_device,
+                ..
+            } => (
+                crate::journal::Kind::DeviceAdded,
+                key_id,
+                *ground,
+                by.as_ref(),
+                *guest_new_device,
+            ),
+            J::KeyReplaced { key_id, .. } => (
+                crate::journal::Kind::KeyRestored,
+                key_id,
+                "recover",
+                None,
+                false,
+            ),
+            J::RecoverAttempt { .. } | J::FirstUseProbe { .. } => {
+                tracing::info!(event = %event.name(), "device keys: an event with no journal kind");
+                return;
+            }
+        };
+        let record = match self.trusted.store().map(|s| s.lookup(key_id)) {
+            Some(crate::viewer_keys::Lookup::Active(r)) => r.clone(),
+            other => {
+                tracing::warn!(
+                    event = %event.name(),
+                    kid = %key_id.short(),
+                    found = other.is_some(),
+                    "device keys: the key of a journal event is not active in the list; not \
+                     written, no toast"
+                );
+                return;
+            }
+        };
+        // The device that vouched (`endorse.by` / `grant.by`), while it is in the list and its
+        // removal is not decided.
+        let by_device = by.and_then(|by| match self.trusted.store().map(|s| s.lookup(by)) {
+            Some(crate::viewer_keys::Lookup::Active(r)) => Some(crate::journal::TrustedDevice {
+                kind: r.kind.as_str().to_string(),
+                platform: r.platform.as_str().to_string(),
+                source: r.source.as_str().to_string(),
+            }),
+            _ => None,
+        });
+        let device = crate::journal::TrustedDevice {
+            kind: record.kind.as_str().to_string(),
+            platform: record.platform.as_str().to_string(),
+            source: ground.to_string(),
+        };
+        if kind == crate::journal::Kind::DeviceAdded {
+            self.toast_new_device(
+                &record,
+                ground,
+                guest_new_device,
+                &device,
+                by_device.as_ref(),
+            );
+        }
+        let Some(journal) = &self.journal else {
+            tracing::debug!(event = %event.name(), "device keys: no journal (the CLI)");
+            return;
+        };
+        let name = crate::person_name(
+            record.person.telegram_user_id,
+            record.person.first_name.as_deref(),
+            record.person.username.as_deref(),
+        );
+        tracing::debug!(
+            kind = kind.as_str(),
+            kid = %key_id.short(),
+            ground,
+            guest_new_device,
+            vouched = by.is_some(),
+            vouching_device_known = by_device.is_some(),
+            "device keys: journal entry after the write"
+        );
+        let person = crate::journal::Person {
+            user: record.person.telegram_user_id,
+            name: &name.text,
+            username: record.person.username.as_deref(),
+        };
+        let now = crate::journal::now_ms();
+        if kind == crate::journal::Kind::DeviceAdded {
+            journal.device_added(person, device, by_device, guest_new_device, now);
+        } else {
+            journal.trusted_event(kind, Some(person), Some(device), now);
+        }
+    }
+
+    /// The toast of a key that landed (spec §7, §3.4 step 9), after the write: a device vouched
+    /// for by another of the person's (`endorse`) — «{user}: новое устройство» over
+    /// «… · Подтверждено с …» (the vouching device's name, quoted); a known guest's new device
+    /// by the owner's grant
+    /// (`guest_new_device`) — «… · Разрешил владелец». A new guest by a grant has its one toast
+    /// from `binding_added.via: invite` («Новый гость»), not a second one here; a pairing at this
+    /// PC, a recovery and the first use have none. The names from the key record.
+    fn toast_new_device(
+        &self,
+        record: &crate::viewer_keys::KeyRecord,
+        ground: &'static str,
+        guest_new_device: bool,
+        device: &crate::journal::TrustedDevice,
+        by: Option<&crate::journal::TrustedDevice>,
+    ) {
+        let how = match (ground, guest_new_device) {
+            ("endorse", _) => NewDeviceHow::Endorsed { by: by.cloned() },
+            ("grant", true) => NewDeviceHow::OwnerAllowed,
+            _ => {
+                tracing::debug!(
+                    ground,
+                    guest_new_device,
+                    "device keys: no new-device toast for this ground ({})",
+                    if ground == "grant" {
+                        "a new guest: «Новый гость» comes from binding_added"
+                    } else {
+                        "the person at the PC did it, or nothing new to tell"
+                    }
+                );
+                return;
+            }
+        };
+        let listeners = self.events.receiver_count();
+        let name = crate::person_name::requester_name(
+            record.person.telegram_user_id,
+            record.person.first_name.as_deref(),
+            record.person.username.as_deref(),
+        );
+        tracing::debug!(
+            telegram_user_id = record.person.telegram_user_id,
+            ground,
+            guest_new_device,
+            vouching_device_known = by.is_some(),
+            name_source = name.source.as_str(),
+            listeners,
+            "device keys: new-device toast due (after the write)"
+        );
+        self.emit(AgentEvent::NewTrustedDevice {
+            telegram_user_id: record.person.telegram_user_id,
+            name,
+            device: device.clone(),
+            how,
+        });
+    }
+
+    /// Another device's attempt to get in as a bound person (spec §10.2), as the admission handed
+    /// it (its signature checked, new on the list's notes, within the day's bound):
+    /// «Попытка подключения с неизвестного устройства» under the person, no device. The names from
+    /// the person's key record.
+    fn journal_attempt(&self, attempt: &crate::trusted::DeviceAttempt) {
+        let Some(journal) = &self.journal else {
+            tracing::debug!(
+                reason = attempt.reason,
+                "device keys: another device's attempt; no journal (the CLI)"
+            );
+            return;
+        };
+        let uid = attempt.telegram_user_id;
+        let names = self.record_names(uid);
+        let name = crate::person_name(uid, names.0.as_deref(), names.1.as_deref());
+        tracing::debug!(
+            telegram_user_id = uid,
+            reason = attempt.reason,
+            kid = %attempt.key_id.short(),
+            names_from_record = names != (None, None),
+            "device keys: another device's attempt into the journal"
+        );
+        // With its key and reason, for the record (the window's attempts are the list's notes).
+        journal.other_device_attempt(
+            crate::journal::Person {
+                user: uid,
+                name: &name.text,
+                username: names.1.as_deref(),
+            },
+            attempt.key_id.as_str(),
+            attempt.reason,
+            crate::journal::now_ms(),
+        );
+    }
+
+    /// A person's names from their newest listed key record (`(first_name, username)`), or none.
+    fn record_names(&self, telegram_user_id: i64) -> (Option<String>, Option<String>) {
+        self.trusted
+            .store()
+            .and_then(|s| s.person_names(telegram_user_id))
+            .map(|p| (p.first_name.clone(), p.username.clone()))
+            .unwrap_or((None, None))
+    }
+
+    /// A session refused in strict mode, into the journal (`declined_*`, with
+    /// [`declined_reason`]): at most once an hour per person, kind and reason, and
+    /// [`DECLINED_JOURNAL_PER_HOUR`] for everyone. Called while the request
+    /// is still in `pending`. The person: for a key the list knows and whose signature checked
+    /// (`key_unconfirmed`, `key_revoked`), the key record's (spec §3.4 step 10), from `proof`;
+    /// otherwise the server's word — journaled only for someone bound now, since the server can
+    /// name anyone.
+    fn journal_declined(
+        &mut self,
+        session_id: &str,
+        verdict: crate::admission::Verdict,
+        proof: Option<&serde_json::Value>,
+    ) {
+        use crate::journal::Kind;
+        let kind = match verdict.code {
+            "key_required" | "nonce_stale"
+                if verdict
+                    .detail
+                    .is_none_or(|d| d == "no_nonce" || d == "no_proof") =>
+            {
+                Kind::DeclinedNoKey
+            }
+            "key_revoked" => Kind::DeclinedUntrusted,
+            "key_unknown" | "key_unconfirmed" | "admit_refused" => Kind::DeclinedUnknown,
+            _ => {
+                tracing::debug!(
+                    session = session_id,
+                    reason = verdict_code(verdict),
+                    "device keys: a refusal with no journal kind; not journaled"
+                );
+                return;
+            }
+        };
+        let journal_reason = declined_reason(verdict);
+        if !self.admission_strict() {
+            tracing::debug!(
+                session = session_id,
+                reason = verdict_code(verdict),
+                "device keys: a refusal outside strict mode: not journaled"
+            );
+            return;
+        }
+        if self.journal.is_none() {
+            tracing::debug!(
+                session = session_id,
+                "device keys: a strict-mode refusal; no journal (the CLI)"
+            );
+            return;
+        }
+        // The key record's person, for a key whose signature the admission checked.
+        let record_person = matches!(verdict.code, "key_unconfirmed" | "key_revoked")
+            .then(|| proof.and_then(|p| crate::viewer_keys::proof::OfferProof::parse(p).ok()))
+            .flatten()
+            .and_then(
+                |p| match self.trusted.store().map(|s| s.lookup(&p.key_id)) {
+                    Some(
+                        crate::viewer_keys::Lookup::Active(r)
+                        | crate::viewer_keys::Lookup::PendingRemoval(r),
+                    ) => Some((
+                        r.person.telegram_user_id,
+                        r.person.first_name.clone(),
+                        r.person.username.clone(),
+                    )),
+                    Some(crate::viewer_keys::Lookup::Removed(t)) => {
+                        let (first_name, username) = self.record_names(t.telegram_user_id);
+                        Some((t.telegram_user_id, first_name, username))
+                    }
+                    _ => None,
+                },
+            );
+        let (uid, first_name, username, from) = if let Some((uid, f, u)) = record_person {
+            (uid, f, u, "the key record")
+        } else {
+            let Some(uid) = self.pending.get(session_id).map(|p| p.telegram_user_id) else {
+                tracing::debug!(
+                    session = session_id,
+                    "device keys: a strict-mode refusal of a request no longer pending; not \
+                     journaled"
+                );
+                return;
+            };
+            let binding = {
+                let s = lock(&self.state);
+                s.bindings
+                    .iter()
+                    .find(|b| b.telegram_user_id == uid)
+                    .map(|b| (b.first_name.clone(), b.username.clone()))
+            };
+            let Some((f, u)) = binding else {
+                tracing::debug!(
+                    session = session_id,
+                    telegram_user_id = uid,
+                    kind = kind.as_str(),
+                    "device keys: a strict-mode refusal of someone not bound now; not journaled \
+                     (the server can name anyone)"
+                );
+                return;
+            };
+            (uid, f, u, "the binding")
+        };
+        let now = Instant::now();
+        self.declined_journaled
+            .retain(|_, at| now.saturating_duration_since(*at) < DECLINED_JOURNAL_EVERY);
+        while self
+            .declined_hour
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= DECLINED_JOURNAL_EVERY)
+        {
+            self.declined_hour.pop_front();
+        }
+        let key = (uid, kind.as_str(), journal_reason);
+        if self.declined_journaled.contains_key(&key) {
+            tracing::debug!(
+                telegram_user_id = uid,
+                kind = kind.as_str(),
+                journal_reason = journal_reason.unwrap_or("-"),
+                "device keys: this person's refusal of this kind and reason is in the journal this \
+                 hour; not again"
+            );
+            return;
+        }
+        if self.declined_hour.len() >= DECLINED_JOURNAL_PER_HOUR
+            || self.declined_journaled.len() >= DECLINED_JOURNALED_MAX
+        {
+            tracing::debug!(
+                telegram_user_id = uid,
+                kind = kind.as_str(),
+                journal_reason = journal_reason.unwrap_or("-"),
+                this_hour = self.declined_hour.len(),
+                remembered = self.declined_journaled.len(),
+                "device keys: the journal had its hour's refusals; this one is logged only"
+            );
+            return;
+        }
+        self.declined_journaled.insert(key, now);
+        self.declined_hour.push_back(now);
+        let name = crate::person_name(uid, first_name.as_deref(), username.as_deref());
+        tracing::debug!(
+            telegram_user_id = uid,
+            kind = kind.as_str(),
+            reason = verdict_code(verdict),
+            journal_reason = journal_reason.unwrap_or("-"),
+            person_from = from,
+            this_hour = self.declined_hour.len(),
+            "device keys: a strict-mode refusal into the journal"
+        );
+        if let Some(journal) = &self.journal {
+            journal.declined(
+                kind,
+                crate::journal::Person {
+                    user: uid,
+                    name: &name.text,
+                    username: username.as_deref(),
+                },
+                journal_reason,
+                crate::journal::now_ms(),
+            );
+        }
+    }
+
+    /// A signed session's identity from its key record (spec §3.4 step 10) into its request.
+    fn take_record_identity(&mut self, session_id: &str) {
+        let Some(id) = self
+            .keyed
+            .get(session_id)
+            .and_then(|k| k.identity.clone())
+            .filter(|id| id.from_record)
+        else {
+            return;
+        };
+        if let Some(p) = self.pending.get_mut(session_id) {
+            tracing::debug!(
+                session = session_id,
+                server_user = p.telegram_user_id,
+                record_user = id.telegram_user_id,
+                role = id.role.as_str(),
+                "device keys: the session's person and role are the key record's"
+            );
+            p.telegram_user_id = id.telegram_user_id;
+            p.username = id.username;
+        }
+    }
+
+    /// A starting session's names `(first_name, username)` for the toasts, the window and the
+    /// journal: a session signed by a key, the key record's (spec §3.4 step 10), whatever a
+    /// binding of that id says now; any other, the binding's and the request's
+    /// (`person_name::session_names`).
+    fn session_names_of(
+        &self,
+        bindings: &[BindingInfo],
+        session_id: &str,
+        uid: i64,
+        request_username: Option<String>,
+    ) -> (Option<String>, Option<String>) {
+        let record = self
+            .keyed
+            .get(session_id)
+            .and_then(|k| k.identity.as_ref())
+            .filter(|id| id.from_record && id.telegram_user_id == uid);
+        if let Some(id) = record {
+            tracing::debug!(
+                session = session_id,
+                telegram_user_id = uid,
+                "session names: the key record's (a signed session)"
+            );
+            return (id.first_name.clone(), id.username.clone());
+        }
+        let names = crate::person_name::session_names(bindings, session_id, uid, request_username);
+        (names.first_name, names.username)
+    }
+
+    /// A signed session's role from its key record, for `game_access` and the windows' guard.
+    fn admission_pin(&self, session_id: &str) -> Option<crate::game_access::Pin> {
+        let (signed, verdict, id) = self.admission.session(session_id)?;
+        if !(signed && id.from_record) {
+            return None;
+        }
+        let owner = id.role == afklink_protocol::BindingRole::Owner;
+        Some(crate::game_access::Pin {
+            role: if owner {
+                crate::game_access::ViewerRole::Owner
+            } else {
+                crate::game_access::ViewerRole::Guest
+            },
+            owner_key: owner && verdict == crate::admission::Verdict::SIGNED,
+        })
+    }
+
+    /// The `first_use` snapshot (spec §9) from the first `agent_ready` of this process.
+    fn first_use_snapshot(&mut self, bindings: &[BindingInfo]) {
+        if self.first_ready_seen || !self.admission_on() || !self.trusted.has_store() {
+            return;
+        }
+        self.first_ready_seen = true;
+        let people: Vec<crate::viewer_keys::SnapshotPerson> = bindings
+            .iter()
+            .filter_map(|b| {
+                b.role.map(|role| crate::viewer_keys::SnapshotPerson {
+                    person: crate::viewer_keys::Person {
+                        telegram_user_id: b.telegram_user_id,
+                        first_name: b.first_name.clone(),
+                        username: b.username.clone(),
+                    },
+                    role,
+                })
+            })
+            .collect();
+        tracing::debug!(
+            people = people.len(),
+            without_role = bindings.len() - people.len(),
+            "device keys: the first_use snapshot from the first agent_ready"
+        );
+        let op = self.admission.first_use_snapshot(people);
+        self.trusted.admit(op);
     }
 
     /// Compare the first binding list of this run with `bindings`, the one the previous run heard
@@ -2376,6 +4706,30 @@ impl Agent {
         let Some(journal) = &self.journal else {
             return;
         };
+        let Some(e) = self.journal_person(kind, telegram_user_id, first_name, username) else {
+            return;
+        };
+        journal.event(
+            kind,
+            crate::journal::Person {
+                user: e.user,
+                name: &e.name,
+                username: e.username.as_deref(),
+            },
+            crate::journal::now_ms(),
+        );
+    }
+
+    /// [`Self::journal_event`]'s entry before it is written — the name as the journal
+    /// names the person (its last entry's when the binding has none). `None` without a journal.
+    fn journal_person(
+        &self,
+        kind: crate::journal::Kind,
+        telegram_user_id: i64,
+        first_name: Option<&str>,
+        username: Option<&str>,
+    ) -> Option<crate::journal::PersonEvent> {
+        let journal = self.journal.as_ref()?;
         let known = (first_name.is_none() && username.is_none())
             .then(|| journal.known_name(telegram_user_id))
             .flatten();
@@ -2396,15 +4750,57 @@ impl Agent {
             },
             "connection journal: event"
         );
-        journal.event(
+        Some(crate::journal::PersonEvent {
             kind,
-            crate::journal::Person {
-                user: telegram_user_id,
-                name: &name,
-                username: username.as_deref(),
-            },
-            crate::journal::now_ms(),
-        );
+            user: telegram_user_id,
+            name,
+            username,
+        })
+    }
+
+    /// A comparison's journal
+    /// entries (`batch`, in order) as ONE journal write ([`crate::journal::Journal::events`]: one
+    /// open, one `write_all`). Called on the orchestrator and inline: the journal keeps them in
+    /// memory and hands the file write to its own writer thread, behind whatever was journaled
+    /// before and ahead of whatever comes after (order on disk = order of the calls); the
+    /// journal's lock is never held across the disk, so neither this nor the next journal call
+    /// waits for it. The `toasts` (new guests) go right after, so the journal has their entries
+    /// first (in memory: the window's «Журнал» shows them at once). A failed file write is the
+    /// journal's to say (`warn`); the entries stay in memory and the toasts still go.
+    fn journal_batch(
+        &self,
+        batch: Vec<crate::journal::PersonEvent>,
+        toasts: Vec<AgentEvent>,
+        against: &str,
+    ) {
+        match &self.journal {
+            None => tracing::debug!(
+                against,
+                toasts = toasts.len(),
+                "connection journal: none (the CLI); the comparison's toasts go at once"
+            ),
+            Some(_) if batch.is_empty() => tracing::debug!(
+                against,
+                toasts = toasts.len(),
+                "connection journal: no changes of the comparison to write"
+            ),
+            Some(journal) => {
+                let started = Instant::now();
+                journal.events(&batch, crate::journal::now_ms());
+                tracing::debug!(
+                    against,
+                    entries = batch.len(),
+                    toasts = toasts.len(),
+                    took_us = started.elapsed().as_micros() as u64,
+                    "connection journal: the comparison's entries kept and queued as one write; \
+                     its new-guest toasts go"
+                );
+            }
+        }
+        // GuestInvited only (no session bookkeeping in `emit` for it).
+        for event in toasts {
+            self.emit(event);
+        }
     }
 
     /// A guest the owner let in by his invite (`binding_added.via: invite`): the person at the PC
@@ -2418,6 +4814,20 @@ impl Agent {
         listed: bool,
         name: crate::PersonName,
     ) {
+        if let Some(event) = self.invited_guest_toast(telegram_user_id, role, listed, name) {
+            self.emit(event);
+        }
+    }
+
+    /// [`Self::announce_invited_guest`]'s event when the toast is due (each outcome
+    /// logged), for a caller that sends it later — after the journal has the entry.
+    fn invited_guest_toast(
+        &self,
+        telegram_user_id: i64,
+        role: Option<afklink_protocol::BindingRole>,
+        listed: bool,
+        name: crate::PersonName,
+    ) -> Option<AgentEvent> {
         let listeners = self.events.receiver_count();
         let why = match invited_guest_toast_withheld(role, listed) {
             Some(why) => Some(why),
@@ -2434,7 +4844,7 @@ impl Agent {
                 listeners,
                 "new-guest toast not shown: {why}"
             );
-            return;
+            return None;
         }
         tracing::debug!(
             telegram_user_id,
@@ -2443,10 +4853,10 @@ impl Agent {
             "new-guest toast due: the owner let a guest in by his invite, and the person at the PC \
              is told at once"
         );
-        self.emit(AgentEvent::GuestInvited {
+        Some(AgentEvent::GuestInvited {
             telegram_user_id,
             name,
-        });
+        })
     }
 
     /// The owner answered `request_id` of `uid` on this PC: an approval is remembered
@@ -2593,26 +5003,74 @@ impl Agent {
     ///   and «Новый гость» would be untrue.
     ///
     /// Every case is logged with why; the names never.
-    fn note_changes_while_away(&mut self, against: &str, changes: BindingChanges) {
+    fn note_changes_while_away(
+        &mut self,
+        against: &str,
+        changes: BindingChanges,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        // As at `binding_removed` — the gone people's sessions that outlived the break
+        // (observe, unsigned) and their waiting requests end now; the server ended its side
+        // already. One pass over the sessions and requests for all of them, not one per
+        // person (a relay's flood of 100k).
+        let gone_ids: std::collections::HashSet<i64> =
+            changes.gone.iter().map(|b| b.telegram_user_id).collect();
+        let (ended, dropped) = self.end_unbound_of(|uid| gone_ids.contains(&uid), outgoing);
+        tracing::debug!(
+            against,
+            gone = gone_ids.len(),
+            sessions_ended = ended,
+            requests_dropped = dropped,
+            "bindings gone from the list (removed while away): their sessions and waiting \
+             requests end, as at binding_removed"
+        );
+        // The journal and the toasts take at most AWAY_JOURNAL_MAX of this comparison's
+        // gone bindings and, apart, as many new ones (a flood would push the owner's own
+        // history out past the journal's bound); the rest are counted below. The entries
+        // are collected and written as ONE journal write off this loop ([`Self::journal_batch`]).
+        let mut batch: Vec<crate::journal::PersonEvent> = Vec::new();
+        let mut gone_room = AWAY_JOURNAL_MAX;
+        let (mut gone_unjournaled, mut added_unjournaled, mut owners_unjournaled) =
+            (0usize, 0usize, 0usize);
         for b in &changes.gone {
+            if gone_room == 0 {
+                gone_unjournaled += 1;
+                continue;
+            }
+            gone_room -= 1;
+            batch.extend(self.journal_person(
+                crate::journal::Kind::Revoked,
+                b.telegram_user_id,
+                b.first_name.as_deref(),
+                b.username.as_deref(),
+            ));
             tracing::debug!(
                 telegram_user_id = b.telegram_user_id,
                 against,
                 "a binding is gone from the list (removed while away): «Доступ отозван» in the \
                  journal"
             );
-            self.journal_event(
-                crate::journal::Kind::Revoked,
-                b.telegram_user_id,
-                b.first_name.as_deref(),
-                b.username.as_deref(),
-            );
         }
         let mut invited = 0usize;
+        // The new-guest toasts go once the journal has their entries, as at
+        // `binding_added` (the journal first).
+        let mut toasts: Vec<AgentEvent> = Vec::new();
+        let mut added_room = AWAY_JOURNAL_MAX;
         self.forget_old_approvals(Instant::now());
         for b in &changes.added {
             let uid = b.telegram_user_id;
             let role = b.role.map_or("-", afklink_protocol::BindingRole::as_str);
+            if added_room == 0 {
+                // Past the bound: the approval on this PC (if any) is still heard of; nothing
+                // journaled or announced. A new owner among them is counted for the warning.
+                let _ = self.approved_here.remove(&uid);
+                added_unjournaled += 1;
+                if b.role == Some(afklink_protocol::BindingRole::Owner) {
+                    owners_unjournaled += 1;
+                }
+                continue;
+            }
+            added_room -= 1;
             if self.approved_here.remove(&uid).is_some() {
                 tracing::debug!(
                     telegram_user_id = uid,
@@ -2621,12 +5079,12 @@ impl Agent {
                     "a binding is new in the list, approved on this PC (its binding_added was lost \
                      to the break): «Доступ выдан» in the journal"
                 );
-                self.journal_event(
+                batch.extend(self.journal_person(
                     crate::journal::Kind::Granted,
                     uid,
                     b.first_name.as_deref(),
                     b.username.as_deref(),
-                );
+                ));
                 continue;
             }
             if b.role == Some(afklink_protocol::BindingRole::Owner) {
@@ -2636,12 +5094,12 @@ impl Agent {
                     "an owner is new in the list, approved neither on this PC nor by an invite (an \
                      invite makes a guest): «Доступ выдан» in the journal, no new-guest toast"
                 );
-                self.journal_event(
+                batch.extend(self.journal_person(
                     crate::journal::Kind::Granted,
                     uid,
                     b.first_name.as_deref(),
                     b.username.as_deref(),
-                );
+                ));
                 continue;
             }
             invited += 1;
@@ -2653,20 +5111,35 @@ impl Agent {
                  only way in without it — «Доступ по приглашению» in the journal and the new-guest \
                  toast"
             );
-            self.journal_event(
+            batch.extend(self.journal_person(
                 crate::journal::Kind::Invited,
                 uid,
                 b.first_name.as_deref(),
                 b.username.as_deref(),
-            );
+            ));
             // As `binding_added` by invite names the guest: «Имя (@username)», cleaned.
             let name = crate::person_name::requester_name(
                 uid,
                 b.first_name.as_deref(),
                 b.username.as_deref(),
             );
-            self.announce_invited_guest(uid, b.role, false, name);
+            toasts.extend(self.invited_guest_toast(uid, b.role, false, name));
         }
+        if gone_unjournaled + added_unjournaled > 0 {
+            tracing::warn!(
+                against,
+                gone = changes.gone.len(),
+                added = changes.added.len(),
+                gone_unjournaled,
+                added_unjournaled,
+                owners_unjournaled,
+                max_each = AWAY_JOURNAL_MAX,
+                "access: more changes while away than the journal takes at once: the first ones \
+                 of each side journaled and announced, the rest only counted here (a relay's \
+                 flood?)"
+            );
+        }
+        self.journal_batch(batch, toasts, against);
         tracing::debug!(
             against,
             gone = changes.gone.len(),
@@ -2674,6 +5147,160 @@ impl Agent {
             invited,
             "access: the new list compared with the earlier one"
         );
+    }
+
+    /// An unbound person's sessions end (`unbound`, the agreed reason — the backend ends them
+    /// with it too) and their not-yet-answered requests are dropped: the offer-time check would
+    /// refuse them anyway, but a `pending` entry is a promise that this user may connect — no
+    /// promises to the unbound. How many of each.
+    fn end_unbound(
+        &mut self,
+        telegram_user_id: i64,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) -> (usize, usize) {
+        self.end_unbound_of(|uid| uid == telegram_user_id, outgoing)
+    }
+
+    /// [`Self::end_unbound`] for everyone `unbound` says, in one pass over the sessions and the
+    /// requests (a comparison's gone people together).
+    fn end_unbound_of(
+        &mut self,
+        unbound: impl Fn(i64) -> bool,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) -> (usize, usize) {
+        let victims: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| unbound(s.telegram_user_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let ended = victims.len();
+        for id in victims {
+            self.end_session(&id, true, end_reason::UNBOUND, outgoing);
+        }
+        let dropped: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| unbound(p.telegram_user_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dropped {
+            self.pending.remove(id);
+            // No `SessionEnded` for a request that never started; its log file closes.
+            self.log_ended(id, end_reason::UNBOUND);
+        }
+        (ended, dropped.len())
+    }
+
+    /// §10 «Сверка со списком сервера: одно правило»: the trusted list brought to the rule by
+    /// this connection's current list (`why`: the trigger — an `agent_ready`, a binding
+    /// message; the queue runs it itself after every installed change and on the tick), then
+    /// what it took ends ([`Self::end_ruled`]).
+    fn bring_to_rule(
+        &mut self,
+        why: &'static str,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        if !self.admission_on() {
+            return;
+        }
+        self.trusted.bring_to_rule(why);
+        self.end_ruled(outgoing, why);
+    }
+
+    /// What the rule took since the last look ([`crate::trusted::Trusted::take_ruled`]): first the
+    /// live sessions and waiting first offers of the keys it denied (the key sweep: `key_revoked`
+    /// for a signed session), then every other session of the people it took (`unbound`, as the
+    /// server ends them at an unbind) and their not-yet-answered requests. A holder of a working
+    /// owner key is never among the people: only their guest keys' sessions end (§10). Said at
+    /// debug when it ends anything.
+    fn end_ruled(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>, why: &'static str) {
+        let (people, keys) = self.trusted.take_ruled();
+        if keys {
+            self.end_sessions_of_keys_gone(outgoing, why);
+        }
+        if people.is_empty() {
+            return;
+        }
+        let taken: std::collections::HashSet<i64> = people.iter().copied().collect();
+        let (ended, dropped) = self.end_unbound_of(|uid| taken.contains(&uid), outgoing);
+        tracing::debug!(
+            why,
+            people = taken.len(),
+            keys_denied = keys,
+            sessions_ended = ended,
+            requests_dropped = dropped,
+            "device keys: the rule took people the current binding list does not name: their \
+             sessions and waiting requests end"
+        );
+    }
+
+    /// A connection's `agent_ready`, past its handshake: the server's list as it stands
+    /// (`initial`) is this run's, compared with the one before it, and told to the admission, the
+    /// game-only decisions and the trusted list. The refusal it lifts, if any.
+    fn take_agent_ready(
+        &mut self,
+        initial: &[BindingInfo],
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) -> Option<Refusal> {
+        let (was_refused, first_list, changes) = {
+            let mut s = lock(&self.state);
+            s.connected = true;
+            // Bindings removed or added while this agent was away (unbound in the Mini App, a guest
+            // let in by the owner's invite): no `binding_removed` or `binding_added` reached it, so
+            // the journal — and for a new guest the person at the PC — hears of them from the new
+            // list. Compared with the list this run had, or before the first list of a run
+            // with the previous run's last one (`with_last_known_bindings`); with neither there is
+            // nothing to compare with.
+            let compared_with = if s.bindings_known {
+                Some(("a reconnect", s.bindings.clone()))
+            } else {
+                self.last_known_bindings
+                    .take()
+                    .map(|previous| ("the previous run's last list", previous))
+            };
+            let changes = compared_with
+                .map(|(against, previous)| (against, binding_changes(&previous, initial)));
+            s.bindings = initial.to_vec();
+            let first_list = !std::mem::replace(&mut s.bindings_known, true);
+            // What was asked of the owner while offline goes out now; a request still pending is
+            // re-sent by the server right after `agent_ready` (`crate::owner_request`).
+            s.owner_requests.reconnected(crate::journal::now_ms());
+            (s.refused.take(), first_list, changes)
+        };
+        log_roles(initial, "agent_ready");
+        // §10 «Текущий список»: this connection's list begins with its `agent_ready` (the
+        // binding messages after it follow it, `sync_game_roles`); the rule runs by it below.
+        self.trusted.agent_ready(initial.iter().map(|b| {
+            (
+                b.telegram_user_id,
+                b.role.unwrap_or(afklink_protocol::BindingRole::Guest),
+            )
+        }));
+        self.first_use_snapshot(initial);
+        // Sessions outlive a signaling reconnect: a role that changed while this agent was away
+        // moves them now.
+        self.sync_game_roles("agent_ready");
+        match changes {
+            Some((against, changes)) => self.note_changes_while_away(against, changes, outgoing),
+            None => tracing::debug!(
+                bindings = initial.len(),
+                "access: the first list of this run, and no earlier one to compare it with"
+            ),
+        }
+        // §10 «Сверка со списком сервера»: the rule by this list — whoever it takes loses their
+        // sessions and pending requests at once (the keys' ones by the key sweep, not the mode
+        // part of it: the connection's `key_mode` goes once it serves), not at the write's
+        // landing. The server ended its side of an unbound person's sessions already.
+        self.bring_to_rule("agent_ready", outgoing);
+        if first_list {
+            tracing::debug!(
+                bindings = initial.len(),
+                since_start_ms = self.started.elapsed().as_millis() as u64,
+                "binding list known for this run: the window leaves its placeholder"
+            );
+        }
+        was_refused
     }
 
     /// Tell `log` of every session's life as it happens (`crate::session_log`): the desktop app's
@@ -3216,6 +5843,9 @@ impl Agent {
         // A pairing request kept across the break closes at its deadline while offline too.
         let mut pairing_tick = pairing_tick();
         loop {
+            self.reconcile_admission();
+            // The trusted devices' window: `clean` as the sessions stand after the last step.
+            self.trusted.sync_live(self.trust_window_live());
             tokio::select! {
                 () = &mut deadline, if limit.is_some() => {
                     if held {
@@ -3255,6 +5885,15 @@ impl Agent {
                 _ = pairing_tick.tick() => {
                     let _step = self.steps.begin("pairing_tick", "-", None);
                     self.tick_pairing();
+                    // Parked trusted-device removals, every minute (`crate::trusted::PARKED_RETRY`),
+                    // and the binding list's rule once a skipped person's grace ended (§10).
+                    self.trusted.tick(Instant::now());
+                    self.end_ruled(outbox, "the pairing tick");
+                    self.expire_held_pairs(Instant::now(), outbox);
+                    self.forget_old_approvals(Instant::now());
+                    // A request kept across the break holds the trust windows shut as long as it
+                    // is Pending: its 30 s run offline too (its end is held for the connection).
+                    self.expire_pending_requests(Instant::now(), outbox);
                 }
                 cmd = commands_rx.recv() => match cmd {
                     None => {
@@ -3281,7 +5920,9 @@ impl Agent {
                         | AgentCommand::CancelOwnerRequest
                         | AgentCommand::RequestPairing
                         | AgentCommand::CancelPairing
-                        | AgentCommand::EndForExit { .. }),
+                        | AgentCommand::EndForExit { .. }
+                        | AgentCommand::Trusted(_)
+                        | AgentCommand::ResumedFromSleep),
                     ) => {
                         tracing::debug!(
                             wait = wait.label(),
@@ -3370,50 +6011,11 @@ impl Agent {
         // Authenticated: the way works this far; through the RU entry, remembered for the next start.
         self.entry.connected(attempt.endpoint);
 
-        let (was_refused, first_list, changes) = {
-            let mut s = lock(&self.state);
-            s.connected = true;
-            // Bindings removed or added while this agent was away (unbound in the Mini App, a guest
-            // let in by the owner's invite): no `binding_removed` or `binding_added` reached it, so
-            // the journal — and for a new guest the person at the PC — hears of them from the new
-            // list. Compared with the list this run had, or before the first list of a run
-            // with the previous run's last one (`with_last_known_bindings`); with neither there is
-            // nothing to compare with.
-            let compared_with = if s.bindings_known {
-                Some(("a reconnect", s.bindings.clone()))
-            } else {
-                self.last_known_bindings
-                    .take()
-                    .map(|previous| ("the previous run's last list", previous))
-            };
-            let changes = compared_with.map(|(against, previous)| {
-                (against, binding_changes(&previous, &sig.initial_bindings))
-            });
-            s.bindings = sig.initial_bindings.clone();
-            let first_list = !std::mem::replace(&mut s.bindings_known, true);
-            // What was asked of the owner while offline goes out now; a request still pending is
-            // re-sent by the server right after `agent_ready` (`crate::owner_request`).
-            s.owner_requests.reconnected(crate::journal::now_ms());
-            (s.refused.take(), first_list, changes)
-        };
-        log_roles(&sig.initial_bindings, "agent_ready");
-        // Sessions outlive a signaling reconnect: a role that changed while this agent was away
-        // moves them now.
-        self.sync_game_roles("agent_ready");
-        match changes {
-            Some((against, changes)) => self.note_changes_while_away(against, changes),
-            None => tracing::debug!(
-                bindings = sig.initial_bindings.len(),
-                "access: the first list of this run, and no earlier one to compare it with"
-            ),
-        }
-        if first_list {
-            tracing::debug!(
-                bindings = sig.initial_bindings.len(),
-                since_start_ms = self.started.elapsed().as_millis() as u64,
-                "binding list known for this run: the window leaves its placeholder"
-            );
-        }
+        self.nonce_pool = sig.nonce_pool;
+        self.grant_token_on = sig.grant_token;
+        self.grant_token_sent = None;
+        let outbox = self.outbox.clone();
+        let was_refused = self.take_agent_ready(&sig.initial_bindings, &outbox);
         if let Some(was) = was_refused.or_else(|| self.refusal_logged.clone()) {
             if was.is_blocked() {
                 tracing::info!(
@@ -3489,6 +6091,8 @@ impl Agent {
         // What happened on the PC while no connection took it: after the handshake (this connection
         // is past `agent_ready`), never before (`crate::agent_events`).
         self.send_agent_events(link_id, &outbox, "connected");
+        // Device keys: the first nonce batch of this connection (spec §2.2 (a)).
+        self.send_nonce_batch(&outbox, "connected");
 
         // Deliberately does NOT request a pairing code here unless the owner has the pairing
         // panel open.
@@ -3509,7 +6113,16 @@ impl Agent {
         crate::pairing::reconnected(&mut lock(&self.state), crate::journal::now_ms(), link_id);
 
         let served = self.serve(incoming, commands_rx, sess_ev_rx, &outbox).await;
+        // This connection's bindings are no longer the server's word; the guest reconcile
+        // waits for the next `agent_ready` (the store's last known list stays for its comparison).
+        self.trusted
+            .forget_bound_people("the signaling link went down");
         self.link_health = None;
+        self.nonce_pool = false;
+        self.key_mode_sent = None;
+        self.grant_token_on = false;
+        self.grant_token_sent = None;
+        self.nonce_deferred = None;
         // Nothing can say goodbye on this connection any more.
         self.goodbyes.retire(link_id);
         // Events this connection did not stay up long enough to have taken go again on the next.
@@ -3546,14 +6159,44 @@ impl Agent {
         let events = self.event_queue.clone();
         let mut events_tick = tokio::time::interval(EVENTS_TICK);
         events_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Device keys: a nonce batch every minute (spec §2.2 (b)); the first went at connect.
+        let mut nonce_tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + NONCE_ROTATE, NONCE_ROTATE);
+        nonce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            // Sessions that left by any path are told to the admission; the pairing panel too.
+            self.reconcile_admission();
+            // Admitted once their key's write landed: their peers now.
+            if !self.admitted_ready.is_empty() {
+                self.start_admitted(outbox).await;
+                self.reconcile_admission();
+            }
+            // The trusted devices' window: `clean` as the sessions stand after the last step.
+            self.trusted.sync_live(self.trust_window_live());
             // Each branch's work is a step of the orchestrator's (`crate::step_watch`): a watcher
             // outside the runtime names one that does not end.
             tokio::select! {
                 _ = pairing_tick.tick() => {
                     let _step = self.steps.begin("pairing_tick", "-", None);
                     self.tick_pairing();
+                    // Parked trusted-device removals, every minute (`crate::trusted::PARKED_RETRY`),
+                    // and the binding list's rule once a skipped person's grace ended (§10).
+                    self.trusted.tick(Instant::now());
+                    self.end_ruled(outbox, "the pairing tick");
+                    self.expire_held_pairs(Instant::now(), outbox);
+                    self.forget_old_approvals(Instant::now());
+                    self.expire_pending_requests(Instant::now(), outbox);
                     self.retry_pairing_code(outbox);
+                }
+                _ = nonce_tick.tick() => {
+                    let _step = self.steps.begin("nonce_batch", "rotate", None);
+                    self.send_nonce_batch(outbox, "rotate");
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                    self.nonce_deferred.unwrap_or_else(Instant::now),
+                )), if self.nonce_deferred.is_some() => {
+                    let _step = self.steps.begin("nonce_batch", "deferred", None);
+                    self.send_nonce_batch(outbox, "deferred refill");
                 }
                 () = events_queued(events.as_deref()) => {
                     let _step = self.steps.begin("agent_events", "queued", None);
@@ -3659,6 +6302,10 @@ impl Agent {
         if let Some(name) = self.pc_name_to_send("device_name") {
             send_to_backend(outgoing, AgentToServer::DeviceName { name });
         }
+        // Device keys: the PC's mode right after the name (spec §12), on a nonce-pool server only;
+        // then the grant token (§7), on a server that takes it.
+        self.send_key_mode(outgoing, true, "connected");
+        self.send_grant_token(outgoing, "connected");
         let live = self.sessions.len();
         for (id, sess) in self.sessions.iter() {
             let reported = sess.stats.report(outgoing, id, false);
@@ -3757,7 +6404,121 @@ impl Agent {
                 first_name,
                 expires_at,
                 has_owner,
+                viewer_key,
             } => {
+                // §5: a re-send (the server re-sends waiting requests after `agent_ready`) of a
+                // request whose «Разрешить» answer is still held for its key's write gets nothing
+                // more — that answer goes once the write lands. Any other re-send, an answered one
+                // included, is an ordinary new request (no memory of answered requests is kept).
+                // Another person under the id is a new request too.
+                if self.admission_on()
+                    && self.held_pairs.iter().any(|h| {
+                        h.request_id == request_id && h.telegram_user_id == Some(telegram_user_id)
+                    })
+                {
+                    tracing::debug!(
+                        %request_id,
+                        telegram_user_id,
+                        "pair_request: a re-send of a request whose answer is still held for its \
+                         key's write: that answer goes once the write lands; nothing more"
+                    );
+                    return;
+                }
+                // The same request already on screen (the backend re-sent it): the window keeps
+                // the person and the key line it shows, so «Разрешить» keeps that key too — a
+                // re-sent request's card (another key, another person) is never taken.
+                let on_screen = lock(&self.state)
+                    .pending_pair
+                    .as_ref()
+                    .is_some_and(|p| p.request_id == request_id);
+                // An answer's outcome kept under this id says nothing of a new request.
+                // But a repeat of a request that still waits (the server re-sends it on a
+                // reconnect) is the same request: its outcome stays — `second_step_required` is
+                // what brings the request window back for the step.
+                let still_waiting = if self.admission_on() {
+                    self.admission.pair_repeat(&request_id)
+                } else {
+                    on_screen
+                };
+                if still_waiting {
+                    let kept = lock(&self.state).pair_answers.get(&request_id);
+                    tracing::debug!(
+                        %request_id,
+                        on_screen,
+                        kept = kept.map_or("-", PairAnswer::as_str),
+                        "pair_request: a repeat of a request that still waits; the outcome kept \
+                         for its answer stays"
+                    );
+                } else if lock(&self.state).pair_answers.forget(&request_id) {
+                    tracing::debug!(
+                        %request_id,
+                        on_screen,
+                        "pair_request: the outcome kept for an earlier answer under this id is \
+                         forgotten (the earlier request ended)"
+                    );
+                }
+                if on_screen && self.admission_on() {
+                    tracing::debug!(
+                        %request_id,
+                        telegram_user_id,
+                        with_key = viewer_key.is_some(),
+                        "device keys: pair_request of the request on screen again; its key is not \
+                         taken again (the window and «Разрешить» keep what is shown)"
+                    );
+                }
+                // Device keys (spec §5): the key card only while the pairing panel is open, one per
+                // opening; before `request_arrived` closes it.
+                let pair_key = if self.admission_on() && !on_screen {
+                    self.reconcile_admission();
+                    // The request on screen now is never the one forgotten at the bound.
+                    let shown = lock(&self.state)
+                        .pending_pair
+                        .as_ref()
+                        .map(|p| p.request_id.clone());
+                    self.admission.pair_shown(shown.as_deref());
+                    let outcome = self.admission.pair_request(&crate::admission::PairRequest {
+                        request_id: &request_id,
+                        telegram_user_id,
+                        first_name: first_name.as_deref(),
+                        username: username.as_deref(),
+                        viewer_key: viewer_key.as_ref(),
+                    });
+                    tracing::debug!(
+                        %request_id,
+                        viewer_key = outcome.as_str(),
+                        "device keys: pair_request's key"
+                    );
+                    // A request placed in the window's slot: a new generation of what is shown,
+                    // so no consent given for an earlier one holds for it.
+                    self.pair_shown += 1;
+                    Some(self.pair_key_view(&request_id, outcome, (self.pair_shown, has_owner)))
+                } else {
+                    None
+                };
+                // Spec §5: a repeat of a waiting request changes nothing — the window shows the
+                // person the admission holds for it (the first), not the repeat's.
+                let (telegram_user_id, username, first_name) = match self
+                    .admission
+                    .pair_waiting(&request_id)
+                    .map(|(p, _)| p)
+                    .filter(|p| self.admission_on() && p.telegram_user_id != telegram_user_id)
+                {
+                    Some(first) => {
+                        tracing::warn!(
+                            %request_id,
+                            first_user_id = first.telegram_user_id,
+                            user_id = telegram_user_id,
+                            "device keys: pair_request again under a waiting id names another \
+                             person; the first one stands"
+                        );
+                        (
+                            first.telegram_user_id,
+                            first.username.clone(),
+                            first.first_name.clone(),
+                        )
+                    }
+                    None => (telegram_user_id, username, first_name),
+                };
                 // The request already on screen, re-sent by the backend after a reconnect: live
                 // again where it was (its «Кто это?» step is the window's, by the same id); nothing
                 // new to raise and no panel to close. `crate::pairing`.
@@ -3790,25 +6551,36 @@ impl Agent {
                     "pairing request: {}",
                     match has_owner {
                         Some(false) => "the PC has no owner: «Разрешить» leads to «Кто это?»",
-                        Some(true) => "the PC has an owner: no question, the person becomes a guest",
+                        Some(true) => {
+                            "the server says the PC has an owner: no «Кто это?» (the role is the \
+                             «owner on this PC» reading's)"
+                        }
                         None => "a server older than roles: no question",
                     }
                 );
                 let name = pending.display_name();
+                // The key's line for the request window, and the opening it was taken in.
+                self.pair_key_token = pair_key
+                    .as_ref()
+                    .filter(|k| matches!(k.key_state, "valid" | "was_removed"))
+                    .and_then(|k| self.panel_token.map(|t| (k.request_id.clone(), t)));
                 let closed = {
                     let mut s = lock(&self.state);
                     s.pending_pair = Some(pending);
+                    s.pair_key = pair_key;
                     // The code on an open panel was spent on entry: the panel closes and the prompt
                     // is what remains (the owner's choice), and the code is revoked as for any
                     // close. `crate::pairing`.
                     crate::pairing::request_arrived(&mut s, name)
                 };
+                self.sync_pair_key();
                 if closed {
                     send_to_backend(outgoing, AgentToServer::PairingCancel);
                 }
             }
             ServerToAgent::PairCancelled { request_id, reason } => {
                 tracing::info!("pairing request {request_id} withdrawn ({reason:?})");
+                self.admission.pair_cancelled(&request_id);
                 // An approval of it the server did not take (it had expired, say): no binding is
                 // coming from it.
                 let before = self.approved_here.len();
@@ -3918,17 +6690,16 @@ impl Agent {
                     // guest re-paired as the owner — `owner_changed` follows that one) leaves no
                     // other. The server never lists two; this keeps the window from showing two
                     // in between.
-                    if role == Some(afklink_protocol::BindingRole::Owner) {
-                        for b in s.bindings.iter_mut() {
-                            if b.role == Some(afklink_protocol::BindingRole::Owner) {
-                                tracing::warn!(
-                                    was_owner = b.telegram_user_id,
-                                    new_owner = telegram_user_id,
-                                    "roles: binding_added names a new owner while another was \
-                                     listed; the other is a guest now"
-                                );
-                                b.role = Some(afklink_protocol::BindingRole::Guest);
-                            }
+                    for b in s.bindings.iter_mut() {
+                        let kept = crate::admission::role_beside_added(role, b.role);
+                        if kept != b.role {
+                            tracing::warn!(
+                                was_owner = b.telegram_user_id,
+                                new_owner = telegram_user_id,
+                                "roles: binding_added names a new owner while another was \
+                                 listed; the other is a guest now"
+                            );
+                            b.role = kept;
                         }
                     }
                     if was.is_some() && was != role {
@@ -4003,6 +6774,21 @@ impl Agent {
                 }
                 // A re-pair can change a role (a guest re-paired as the owner of a PC with none).
                 self.sync_game_roles("binding_added");
+                // Device keys (spec §5): a `pc_allow` key waiting for this person's binding —
+                // decided with this binding applied (just above), so an owner on this PC by it
+                // never gets the guest key.
+                if self.admission_on() {
+                    let d = self
+                        .admission
+                        .binding_added(&self.trusted, telegram_user_id);
+                    if let Some(op) = d.op {
+                        tracing::debug!(
+                            telegram_user_id,
+                            "device keys: a pc_allow key is written, unconfirmed"
+                        );
+                        self.trusted.admit(op);
+                    }
+                }
                 // Not under the state's lock: the config's is taken on its own.
                 if first_pairing {
                     let mut c = lock(&self.config);
@@ -4017,6 +6803,8 @@ impl Agent {
                 } else {
                     tracing::trace!("not the first pairing: the autostart card is not offered");
                 }
+                // §10: the binding list changed — the rule by it (a newcomer is named now).
+                self.bring_to_rule("binding_added", outgoing);
             }
             ServerToAgent::BindingRemoved { telegram_user_id } => {
                 tracing::info!("binding removed: {telegram_user_id}");
@@ -4055,46 +6843,77 @@ impl Agent {
                     removed.as_ref().and_then(|b| b.first_name.as_deref()),
                     removed.as_ref().and_then(|b| b.username.as_deref()),
                 );
-                // Drop any sessions belonging to that user.
-                let victims: Vec<String> = self
-                    .sessions
-                    .iter()
-                    .filter(|(_, s)| s.telegram_user_id == telegram_user_id)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                let ended = victims.len();
-                // `unbound`, the agreed reason (the backend ends these sessions with it too). This
-                // said `unbound_by_owner`, which is not in `SESSION_END_REASONS`.
-                for id in victims {
-                    self.end_session(&id, true, end_reason::UNBOUND, outgoing);
-                }
-                // And any not-yet-answered request: the offer-time check would
-                // refuse it anyway, but a `pending` entry is a promise that this
-                // user may connect — don't keep promises to the unbound.
-                let dropped: Vec<String> = self
-                    .pending
-                    .iter()
-                    .filter(|(_, p)| p.telegram_user_id == telegram_user_id)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in &dropped {
-                    self.pending.remove(id);
-                    // No `SessionEnded` for a request that never started; its log file closes.
-                    self.log_ended(id, end_reason::UNBOUND);
-                }
+                let (ended, dropped) = self.end_unbound(telegram_user_id, outgoing);
                 tracing::debug!(
                     telegram_user_id,
                     sessions_ended = ended,
-                    requests_dropped = dropped.len(),
+                    requests_dropped = dropped,
                     bindings = lock(&self.state).bindings.len(),
                     "unbind applied"
                 );
                 // After that account's sessions ended. The owner's unbinding is followed by
                 // `owner_changed`, which moves the rest.
                 self.sync_game_roles("binding_removed");
+                // Device keys (spec §10, origin `server`): an unbound person loses their
+                // guest-role keys here too, whatever role the server's list gave the binding —
+                // `owner_changed` may have moved it, and the key's own role decides (the list never
+                // lets the server remove an owner-role key).
+                let role = removed.as_ref().and_then(|b| b.role);
+                if self.admission_on() {
+                    let live = self.trust_window_live();
+                    tracing::debug!(
+                        telegram_user_id,
+                        binding_role = role.map_or("-", afklink_protocol::BindingRole::as_str),
+                        live,
+                        "device keys: a binding removed on the server; the person's guest-role \
+                         keys leave the list (owner-role keys stay)"
+                    );
+                    // §10: decided in memory at once; the owner, a holder of a working owner-role
+                    // key and a person the PC does not know are not touched.
+                    let bound = removed
+                        .as_ref()
+                        .map(|b| b.role.unwrap_or(afklink_protocol::BindingRole::Guest));
+                    let touched = self.admission.remove_person(
+                        &mut self.trusted,
+                        telegram_user_id,
+                        bound,
+                        crate::viewer_keys::Removal::Server,
+                        live,
+                    );
+                    self.sweep_keys(outgoing);
+                    // §10: after the explicit removal above (its vector-pinned rules first), the
+                    // rule by the list as it is now. A person it did not touch (the owner by
+                    // binding at the message, a working owner-role key, unknown) keeps their
+                    // stored record at this message: the next reconciliation decides.
+                    if touched {
+                        self.bring_to_rule("binding_removed", outgoing);
+                    } else {
+                        tracing::debug!(
+                            telegram_user_id,
+                            "device keys: a binding removed that touched nothing: no rule at this \
+                             message (the stored list keeps them until the next reconciliation)"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        telegram_user_id,
+                        "device keys: a binding removed; no trusted list here (the keys stay)"
+                    );
+                }
             }
             ServerToAgent::OwnerChanged { telegram_user_id } => {
+                // Device keys: only unsigned sessions move; a signed one keeps its record's role.
+                // Its copy of the binding roles is rewritten too, with the trust list's owners.
+                let roles = self
+                    .admission
+                    .owner_changed(&mut self.trusted, telegram_user_id);
+                tracing::debug!(
+                    owner = ?telegram_user_id,
+                    sessions = roles.len(),
+                    "device keys: owner_changed told to the admission"
+                );
                 self.owner_changed(telegram_user_id);
+                self.bring_to_rule("owner_changed", outgoing);
             }
             ServerToAgent::OwnerRequestState {
                 request_id,
@@ -4116,6 +6935,23 @@ impl Agent {
                         state,
                         expires_at,
                         now_ms,
+                    );
+                    // Device keys (spec §5): the key waiting for `BindingAdded` follows the owner's
+                    // answer — forgotten on a decline or an expiry, bounded by the request's time.
+                    let expires_in = expires_at.map(|at| {
+                        Duration::from_millis(u64::try_from(at.saturating_sub(now_ms)).unwrap_or(0))
+                    });
+                    tracing::debug!(
+                        telegram_user_id,
+                        state = state.as_str(),
+                        expires_in_s = expires_in.map_or(0, |d| d.as_secs()),
+                        "device keys: pc_allow's state to the admission"
+                    );
+                    self.admission.pc_allow_state(
+                        request_id.as_deref(),
+                        telegram_user_id,
+                        state,
+                        expires_in,
                     );
                     Some(crate::owner_request::Newcomer {
                         username,
@@ -4149,8 +6985,12 @@ impl Agent {
                 username,
                 turn,
                 quality_profile,
+                nonce_pc,
             } => {
-                if !is_bound(&lock(&self.state).bindings, telegram_user_id) {
+                // Strict mode: the binding does not decide (spec §3.4); the key record does, at
+                // the offer. The pause still does.
+                let strict = self.admission_on() && self.admission_strict();
+                if !strict && !is_bound(&lock(&self.state).bindings, telegram_user_id) {
                     tracing::warn!(
                         "session_request {session_id} from unbound user \
                          {telegram_user_id}: ignoring"
@@ -4174,14 +7014,23 @@ impl Agent {
                          until the owner resumes"
                     );
                     // «Отклонено: ПК на паузе» in the journal, once per person per pause: a viewer
-                    // that retries every few seconds is one attempt to the owner.
-                    if self.journal.is_some() {
+                    // that retries every few seconds is one attempt to the owner. Only for someone
+                    // bound now: strict mode lets an unbound request get this far, and the server
+                    // can name anyone.
+                    let binding = lock(&self.state)
+                        .bindings
+                        .iter()
+                        .find(|b| b.telegram_user_id == telegram_user_id)
+                        .map(|b| b.first_name.clone());
+                    if self.journal.is_some() && binding.is_none() {
+                        tracing::debug!(
+                            telegram_user_id,
+                            "connection journal: an attempt on pause by someone not bound now; not \
+                             journaled"
+                        );
+                    } else if self.journal.is_some() {
                         if self.paused_journaled.insert(telegram_user_id) {
-                            let first_name = lock(&self.state)
-                                .bindings
-                                .iter()
-                                .find(|b| b.telegram_user_id == telegram_user_id)
-                                .and_then(|b| b.first_name.clone());
+                            let first_name = binding.flatten();
                             self.journal_event(
                                 crate::journal::Kind::Paused,
                                 telegram_user_id,
@@ -4233,6 +7082,42 @@ impl Agent {
                         pending = self.pending.len() + 1,
                         "session request accepted; waiting for the viewer's offer"
                     );
+                    // Device keys: pending, and counting against the trusted devices' window until
+                    // its offer is decided (§3.4 «Органы доверия»): the token moves on.
+                    if self.admission_on() {
+                        let (role, first_name) = {
+                            let s = lock(&self.state);
+                            let b = s
+                                .bindings
+                                .iter()
+                                .find(|b| b.telegram_user_id == telegram_user_id);
+                            (
+                                b.and_then(|b| b.role)
+                                    .unwrap_or(afklink_protocol::BindingRole::Guest),
+                                b.and_then(|b| b.first_name.clone()),
+                            )
+                        };
+                        let d = self.admission.session_requested(
+                            &mut self.trusted,
+                            &crate::admission::SessionRequest {
+                                session_id: &session_id,
+                                telegram_user_id,
+                                role,
+                                first_name: first_name.as_deref(),
+                                username: username.as_deref(),
+                                nonce_pc: nonce_pc.as_deref(),
+                            },
+                        );
+                        if d.ignored {
+                            return;
+                        }
+                        self.admission_ids.insert(session_id.clone());
+                        if d.want_batch {
+                            self.want_nonce_batch(outgoing);
+                        }
+                    } else {
+                        self.trusted.session_began("session_request", &session_id);
+                    }
                     self.pending.insert(
                         session_id,
                         Pending {
@@ -4240,6 +7125,7 @@ impl Agent {
                             username,
                             stun_servers,
                             policy,
+                            since: Instant::now(),
                         },
                     );
                 }
@@ -4248,9 +7134,10 @@ impl Agent {
                 session_id,
                 sdp_type,
                 sdp,
+                proof,
             } => {
                 if sdp_type == SdpType::Offer {
-                    self.start_session(session_id, sdp, outgoing).await;
+                    self.start_session(session_id, sdp, proof, outgoing).await;
                 } else {
                     tracing::debug!("ignoring non-offer sdp ({sdp_type:?})");
                 }
@@ -4268,6 +7155,30 @@ impl Agent {
                         &session_id,
                         PeerSignal::AddRemoteIce(candidate),
                     );
+                } else if self.offers_waiting.contains_key(&session_id) {
+                    // Device keys: the first offer waits for its key's write (spec §3.4 step 9, at
+                    // most 2 s) and the viewer trickles on. Kept in order for the peer it gets, up
+                    // to a bound; dropped with a refusal.
+                    let (kept, dropped) = self.ice_waiting.entry(session_id.clone()).or_default();
+                    if kept.len() < ICE_WAITING_MAX {
+                        kept.push(candidate);
+                        tracing::trace!(
+                            session = %session_id,
+                            kept = kept.len(),
+                            "remote candidate kept: the session's offer waits for its key's write"
+                        );
+                    } else {
+                        *dropped += 1;
+                        // Once per session at warn; the count goes with the replay's line.
+                        if *dropped == 1 {
+                            tracing::warn!(
+                                session = %session_id,
+                                max = ICE_WAITING_MAX,
+                                "remote candidates dropped: too many while the offer waits for \
+                                 its key's write"
+                            );
+                        }
+                    }
                 } else if self.pending.contains_key(&session_id) {
                     // A request with no offer yet. Cannot happen as things are: the viewer sends
                     // its offer before its first candidate, the backend relays one socket's frames
@@ -4362,7 +7273,11 @@ impl Agent {
             AgentCommand::RequestPairing => {
                 // Offline, the request would be dropped by the relay; the next connection asks for
                 // the code instead (`connect_and_serve`). `open` logs which.
-                if crate::pairing::open(&mut lock(&self.state)) {
+                let ask = crate::pairing::open(&mut lock(&self.state));
+                // Device keys (spec §3.4): the opening's window token now, as «Привязать» is
+                // handled — a session that ends before the next turn still taints it.
+                self.tell_panel(true, "«Привязать»");
+                if ask {
                     send_to_backend(outgoing, AgentToServer::RequestPairing);
                 }
             }
@@ -4370,12 +7285,15 @@ impl Agent {
                 // Sent whatever the panel was: revoking is idempotent on the backend, and covers a
                 // code issued for a request this agent does not track any more.
                 crate::pairing::close(&mut lock(&self.state));
+                self.tell_panel(false, "the panel closed");
                 send_to_backend(outgoing, AgentToServer::PairingCancel);
             }
             AgentCommand::RespondToPair {
                 request_id,
                 accept,
                 role,
+                second_step,
+                shown,
             } => {
                 // Kept across a break of the link and not live again yet: the answer would reach
                 // nobody (the relay drops it offline) or a backend that has dropped the request.
@@ -4386,6 +7304,7 @@ impl Agent {
                     .filter(|p| p.request_id == request_id && !p.answerable())
                     .map(|p| p.link);
                 if let Some(link) = held {
+                    self.note_pair_answer(&request_id, PairAnswer::LinkDown);
                     tracing::info!(
                         %request_id,
                         accept,
@@ -4393,6 +7312,28 @@ impl Agent {
                         "answer to a pairing request while its link is down: not sent; the request \
                          stays, answerable once the backend re-sends it"
                     );
+                    return;
+                }
+                // An answer only for a request that still waits — not one answered already,
+                // cancelled, expired or forgotten at the bound. Nothing goes; a window still
+                // showing it closes.
+                if self.admission_on() && !self.admission.pair_still_waiting(&request_id) {
+                    self.answer_not_waiting(&request_id, accept, "the guard");
+                    return;
+                }
+                // §5: an approval consents to what the window showed. Another request placed in
+                // the slot since (the same id received again, another key) is not what it saw:
+                // nothing goes, the window reads the request on screen now.
+                let now_shown = lock(&self.state).pair_shown(&request_id);
+                if accept && shown.is_some() && shown != now_shown {
+                    tracing::info!(
+                        %request_id,
+                        pressed_for = shown.unwrap_or(0),
+                        on_screen = now_shown.unwrap_or(0),
+                        "pairing request: «Разрешить» was given for another request on screen \
+                         under this id; nothing sent, the request still waits"
+                    );
+                    self.note_pair_answer(&request_id, PairAnswer::SecondStepRequired);
                     return;
                 }
                 tracing::info!(
@@ -4407,20 +7348,18 @@ impl Agent {
                 } else {
                     None
                 };
-                let (asked, requester) = lock(&self.state)
+                let asked = lock(&self.state).pair_asks_role(&request_id);
+                let requester = lock(&self.state)
                     .pending_pair
                     .as_ref()
                     .filter(|p| p.request_id == request_id)
-                    .map_or((None, None), |p| {
+                    .map(|p| {
                         (
-                            Some(p.asks_role()),
-                            Some((
-                                p.telegram_user_id,
-                                crate::owner_request::Newcomer {
-                                    username: p.username.clone(),
-                                    first_name: p.first_name.clone(),
-                                },
-                            )),
+                            p.telegram_user_id,
+                            crate::owner_request::Newcomer {
+                                username: p.username.clone(),
+                                first_name: p.first_name.clone(),
+                            },
                         )
                     });
                 let role = if accept {
@@ -4428,9 +7367,77 @@ impl Agent {
                 } else {
                     None
                 };
+                // Device keys (spec §5): «Разрешить» writes the request's key; a decline forgets it.
+                // Decided first: an owner on this PC needs «Это моё устройство», and without it
+                // nothing at all happens — no answer, the request waits. Whether the approval only asks the owner (§5) — for the key and for the
+                // outcome the terminal hears.
+                let via_pc_allow = accept && self.admission_on() && self.pair_via_pc_allow();
+                let key_id = if accept && self.admission_on() {
+                    let d = self.admission.pair_allow(
+                        &self.trusted,
+                        &request_id,
+                        requester.as_ref().map(|(uid, _)| *uid),
+                        role.unwrap_or(afklink_protocol::BindingRole::Guest),
+                        via_pc_allow,
+                        second_step,
+                    );
+                    tracing::debug!(
+                        %request_id,
+                        via_pc_allow,
+                        second_step,
+                        second_step_required = d.second_step_required,
+                        with_key = d.key_id.is_some(),
+                        unconfirmed = d.unconfirmed,
+                        refused = d.refused.map_or("-", verdict_code),
+                        warn = d.warn.unwrap_or("-"),
+                        "device keys: «Разрешить»: the request's key"
+                    );
+                    if d.not_waiting {
+                        // Its bound passed after the guard above (`pair_allow`'s own
+                        // sweep): nothing decided, nothing goes.
+                        self.answer_not_waiting(&request_id, accept, "the allow");
+                        return;
+                    }
+                    if d.second_step_required {
+                        self.note_pair_answer(&request_id, PairAnswer::SecondStepRequired);
+                        tracing::info!(
+                            %request_id,
+                            "pairing request: «Разрешить» without the owner's «Это моё \
+                             устройство»; nothing sent, the request still waits"
+                        );
+                        return;
+                    }
+                    if d.role_refused {
+                        // The window showed a role this PC does not derive now: it is shown again
+                        // with the one it does (`sync_pair_key` keeps its owner flag current).
+                        self.note_pair_answer(&request_id, PairAnswer::RoleRefused);
+                        tracing::info!(
+                            %request_id,
+                            "pairing request: «Разрешить» named another role than this PC gives \
+                             the person now; nothing sent, the request still waits"
+                        );
+                        return;
+                    }
+                    // The server hears a key id only for a key actually written: none for a refusal
+                    // (strict and a tainted opening, another person's key), nor for a `pc_allow`
+                    // key that waits — and for a write, only once it landed: the answer is held
+                    // until then (at most the write's limit; `slow` or a refusal sends it without
+                    // the id).
+                    if d.op.is_none() && d.key_id.is_some() {
+                        tracing::debug!(
+                            %request_id,
+                            "device keys: «Разрешить»: a key id with no write; not sent"
+                        );
+                    }
+                    d.op.zip(d.key_id)
+                } else {
+                    self.admission.pair_cancelled(&request_id);
+                    None
+                };
                 // Approved here: if its `binding_added` is lost to a break of the link, the next
                 // `agent_ready` lists it, and that is this «Разрешить», not access given elsewhere.
                 // Declined: an earlier approval of the same account counts no more.
+                let asker = requester.as_ref().map(|(uid, _)| *uid);
                 if let Some((uid, names)) = requester {
                     self.note_answer_here(uid, &request_id, accept, Instant::now());
                     // The server may hold an approval for the owner (`pc_allow`) and name the
@@ -4439,15 +7446,50 @@ impl Agent {
                         lock(&self.state).owner_requests.note_approved(uid, names);
                     }
                 }
-                send_to_backend(
-                    outgoing,
-                    AgentToServer::PairResponse {
+                let response = AgentToServer::PairResponse {
+                    request_id: request_id.clone(),
+                    accept,
+                    name,
+                    role,
+                    key_id: None,
+                };
+                if let Some((op, kid)) = key_id {
+                    tracing::debug!(
+                        %request_id,
+                        ticket = op.ticket,
+                        kid = %kid.short(),
+                        limit_ms = self.trusted.write_limit().as_millis() as u64,
+                        "device keys: «Разрешить»: the answer waits for its key's write"
+                    );
+                    let press = match &op.op {
+                        crate::admission::StoreOp::Add(a) => a.pc_press(),
+                        _ => None,
+                    };
+                    let generation = self.note_pair_answer(&request_id, PairAnswer::Held);
+                    self.held_pairs.push(HeldPair {
+                        ticket: op.ticket,
                         request_id: request_id.clone(),
-                        accept,
-                        name,
-                        role,
-                    },
-                );
+                        telegram_user_id: asker,
+                        key_id: kid,
+                        response,
+                        // As long as the write's own limit (the product's WRITE_LIMIT).
+                        until: Instant::now() + self.trusted.write_limit(),
+                        press,
+                        generation,
+                    });
+                    self.trusted.admit(op);
+                    // A change refused at once (the list decided it at its stage) lands now.
+                    self.after_trusted_change(outgoing);
+                } else {
+                    send_to_backend(outgoing, response);
+                    self.note_pair_answer(
+                        &request_id,
+                        PairAnswer::Sent {
+                            accept,
+                            via_pc_allow,
+                        },
+                    );
+                }
                 let mut s = lock(&self.state);
                 if s.pending_pair
                     .as_ref()
@@ -4460,6 +7502,44 @@ impl Agent {
                 }
             }
             AgentCommand::Unbind(uid) => self.unbind(uid, outgoing),
+            AgentCommand::Trusted(request) => {
+                let live = self.trust_window_live();
+                // «Удалить человека» needs the server's word on the person (never the owner, by
+                // the bindings too, §10).
+                let bound = match &request.ask {
+                    crate::trusted::TrustedAsk::RemovePerson { telegram_user_id } => {
+                        self.admission.bound_role(*telegram_user_id)
+                    }
+                    _ => None,
+                };
+                self.trusted.command_at(request, live, bound);
+                // A removal is denied at once: its keys' sessions end now (spec §10).
+                self.sweep_keys(outgoing);
+            }
+            AgentCommand::ResumedFromSleep => {
+                let batch = self.admission.resumed_from_sleep(self.mono_ms());
+                tracing::info!(
+                    pool = self.nonce_pool,
+                    "device keys: resumed from sleep; the nonce book starts over"
+                );
+                match batch {
+                    Some(b) if self.nonce_pool => {
+                        self.nonce_sent_at = Some(Instant::now());
+                        send_to_backend(
+                            outgoing,
+                            AgentToServer::SessionNonces {
+                                batch: b.batch,
+                                nonces: b.nonces,
+                            },
+                        );
+                    }
+                    Some(_) => tracing::debug!(
+                        "device keys: no nonce pool on a live connection; the next connection \
+                         sends its own batch"
+                    ),
+                    None => tracing::warn!("device keys: no nonce batch could be made after sleep"),
+                }
+            }
             AgentCommand::MakeOwner(uid) => {
                 let (role, owner) = {
                     let s = lock(&self.state);
@@ -4517,7 +7597,8 @@ impl Agent {
                 done,
             } => {
                 // The process is leaving: whatever the orchestrator still holds at its end is
-                // part of an ordinary exit.
+                // part of an ordinary exit. Held «Разрешить» answers go first, past the budget too.
+                self.flush_held_pairs(outgoing);
                 self.sessions
                     .ends_as_asked("the exit asked for the sessions' end");
                 let waited = asked.elapsed();
@@ -4812,6 +7893,21 @@ impl Agent {
                 telegram_user_id: uid,
             },
         );
+        // A person removed at the PC (spec §10, origin `pc`): their keys leave the trusted list
+        // too. The owner's unbind above does not touch keys (he confirms in Telegram).
+        let live = self.trust_window_live();
+        if self.admission_on() {
+            // §10: the guest keys denied in memory at the press, then one write.
+            self.admission.remove_person(
+                &mut self.trusted,
+                uid,
+                role.or(Some(afklink_protocol::BindingRole::Guest)),
+                crate::viewer_keys::Removal::Pc,
+                live,
+            );
+        } else {
+            self.trusted.untrust_guest(uid, live);
+        }
     }
 
     /// Open a request to the owner — unless one is in flight already (at most one per PC: the row
@@ -4850,11 +7946,7 @@ impl Agent {
             .collect();
         let mut changed = 0usize;
         for b in s.bindings.iter_mut() {
-            let role = if Some(b.telegram_user_id) == owner {
-                BindingRole::Owner
-            } else {
-                BindingRole::Guest
-            };
+            let role = crate::admission::role_after_owner_changed(b.telegram_user_id, owner);
             if b.role != Some(role) {
                 changed += 1;
                 b.role = Some(role);
@@ -4888,9 +7980,31 @@ impl Agent {
     /// message that changed it). With «Только для гостей» on, a live session whose viewer's role
     /// changed moves to its new mode at once (`crate::game_access`). Called wherever the list
     /// changes: `agent_ready`, `binding_added`, `binding_removed`, `owner_changed`.
-    fn sync_game_roles(&self, why: &str) {
+    fn sync_game_roles(&mut self, why: &str) {
         let bindings = lock(&self.state).bindings.clone();
         self.game_access.set_roles(&bindings, why);
+        // Device keys (spec §10, §10.2): the admission's copy of the server's word — who the PC
+        // knows and whose attempts count — and with it the trust list's bound owners («owner on
+        // this PC», the second step of «Разрешить»). A binding with no role (a server older than
+        // roles) reads as a guest's here: a binding never gives a key a role.
+        self.admission.set_bindings(
+            &mut self.trusted,
+            bindings.iter().map(|b| {
+                (
+                    b.telegram_user_id,
+                    b.role.unwrap_or(afklink_protocol::BindingRole::Guest),
+                )
+            }),
+        );
+        // §10 «Текущий список»: everyone the bindings name, for the binding list's rule (only on a
+        // connection whose `agent_ready` began one; the caller runs the rule when its own change
+        // is in, `bring_to_rule`).
+        self.trusted.set_bound_people(bindings.iter().map(|b| {
+            (
+                b.telegram_user_id,
+                b.role.unwrap_or(afklink_protocol::BindingRole::Guest),
+            )
+        }));
     }
 
     /// The owner's Resume after the kill switch: session requests are accepted again, and the pause
@@ -4977,6 +8091,11 @@ impl Agent {
         outgoing: &mpsc::UnboundedSender<AgentToServer>,
     ) {
         match sig {
+            SessionSignal::Trusted(done) => {
+                let live = self.trust_window_live();
+                self.trusted.on_done(*done, live, self.journal.as_deref());
+                self.after_trusted_change(outgoing);
+            }
             SessionSignal::Connected(id) => {
                 let started = {
                     let mut s = lock(&self.state);
@@ -5079,6 +8198,7 @@ impl Agent {
         &mut self,
         session_id: String,
         offer_sdp: String,
+        proof: Option<serde_json::Value>,
         outgoing: &mpsc::UnboundedSender<AgentToServer>,
     ) {
         // A second offer for a session that is already running: the viewer restarting ICE because
@@ -5091,6 +8211,48 @@ impl Agent {
         // Dropping it as a duplicate would leave a phone that changed networks unable to get its
         // session back: the restart's candidates arrive for an offer that was ignored, and the
         // session ends seconds later.
+        // Device keys (spec §2.6, §3.5): a session has one first offer. Any other — of a live
+        // session, or of one whose first offer waits for its key's write — keeps the session's
+        // DTLS fingerprint, and a signed session's proof, or the session ends; it is never decided
+        // again. A live session the admission does not know fails closed (`fingerprint_changed`).
+        let live = self.sessions.contains_key(&session_id);
+        if self.admission_on() && (live || self.admission.offered(&session_id)) {
+            match self
+                .admission
+                .reoffer(&session_id, &offer_sdp, proof.as_ref())
+            {
+                crate::admission::Reoffer::End(v) => {
+                    tracing::warn!(
+                        session = %session_id,
+                        live,
+                        waiting = self.offers_waiting.contains_key(&session_id),
+                        reason = verdict_code(v),
+                        detail = v.detail.unwrap_or("-"),
+                        "re-offer refused: the session ends"
+                    );
+                    if live {
+                        self.end_session_with(&session_id, true, v.code, v.detail, outgoing);
+                    } else {
+                        self.refuse_offer(session_id.clone(), v, outgoing);
+                    }
+                    self.admission.session_ended(&mut self.trusted, &session_id);
+                    return;
+                }
+                crate::admission::Reoffer::Continue if !live => {
+                    // The same offer again while its first waits for the key's write (a resend
+                    // after the viewer's socket lost the answer): that one goes on; this is a
+                    // duplicate.
+                    tracing::debug!(
+                        session = %session_id,
+                        waiting = self.offers_waiting.contains_key(&session_id),
+                        "device keys: a repeated first offer while the first waits for its key's \
+                         write; dropped as a duplicate"
+                    );
+                    return;
+                }
+                crate::admission::Reoffer::Continue => {}
+            }
+        }
         if let Some(sess) = self.sessions.get(&session_id) {
             tracing::info!(
                 bytes = offer_sdp.len(),
@@ -5139,8 +8301,11 @@ impl Agent {
         // The binding may have died between the request and the offer
         // (unbind, revoke). `BindingRemoved` already sweeps `pending`, so this
         // is the belt to those suspenders — kept because the cost of being
-        // wrong here is a screen streaming to a stranger.
-        if !is_bound(&lock(&self.state).bindings, request.telegram_user_id) {
+        // wrong here is a screen streaming to a stranger. Strict mode: the key record decides
+        // instead (spec §3.4), the binding does not.
+        let bound = is_bound(&lock(&self.state).bindings, request.telegram_user_id);
+        let strict = self.admission_on() && self.admission_strict();
+        if !strict && !bound {
             tracing::warn!(
                 "offer for {session_id} from user {} no longer bound: ignoring",
                 request.telegram_user_id
@@ -5181,6 +8346,142 @@ impl Agent {
             return;
         }
 
+        // Device keys (spec §3.4): decided here, before any socket, Rtc or STUN.
+        if self.admission_on() {
+            let now_ms = self.mono_ms();
+            let mut d = self.admission.first_offer(
+                &mut self.trusted,
+                &crate::admission::FirstOffer {
+                    session_id: &session_id,
+                    sdp: &offer_sdp,
+                    proof: proof.as_ref(),
+                    is_bound: bound,
+                },
+                now_ms,
+            );
+            if let Some(touch) = d.touch.take() {
+                self.trusted.admit(touch);
+            }
+            if let Some(w) = d.warn {
+                tracing::warn!(session = %session_id, warn = w, "device keys: the offer's identity");
+            }
+            for j in &d.journal {
+                self.note_key_journal(j);
+            }
+            // Another device tried to get in as a bound person (spec §10.2): the offer's
+            // signature checked, a new attempt on the list's notes, within the day's bound.
+            for attempt in std::mem::take(&mut d.attempts) {
+                self.journal_attempt(&attempt);
+            }
+            let keyed = Keyed {
+                ks: d.ks.as_ref().map(|k| k.to_json().to_string()),
+                summary: crate::summary::KeyVerdict {
+                    verdict: d.verdict.code,
+                    detail: d.verdict.detail,
+                    admit: d.admit,
+                    mode: key_mode(d.mode),
+                },
+                kid: d
+                    .ks
+                    .as_ref()
+                    .filter(|_| d.verdict.is_signed())
+                    .map(|k| k.kid.clone()),
+                identity: d.identity.clone(),
+            };
+            match d.outcome {
+                crate::admission::Outcome::Refuse => {
+                    self.journal_declined(&session_id, d.verdict, proof.as_ref());
+                    self.refuse_offer(session_id, d.verdict, outgoing);
+                    return;
+                }
+                crate::admission::Outcome::AfterWrite(op) => {
+                    tracing::debug!(
+                        session = %session_id,
+                        "device keys: the offer waits for its key's write (at most 2 s)"
+                    );
+                    self.trusted.admit(*op);
+                    self.keyed.insert(session_id.clone(), keyed);
+                    self.offers_waiting.insert(session_id, offer_sdp);
+                    return;
+                }
+                crate::admission::Outcome::Admit => {
+                    self.keyed.insert(session_id.clone(), keyed);
+                    self.take_record_identity(&session_id);
+                }
+            }
+        }
+        self.spawn_admitted(session_id, offer_sdp, outgoing).await;
+    }
+
+    /// Start every session whose key's write landed and admitted it (spec §3.4 step 9).
+    async fn start_admitted(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        for sid in std::mem::take(&mut self.admitted_ready) {
+            let Some(sdp) = self.offers_waiting.remove(&sid) else {
+                tracing::debug!(session = %sid, "device keys: an admitted session is gone before its start");
+                continue;
+            };
+            let candidates = self.ice_waiting.remove(&sid);
+            if !self.pending.contains_key(&sid) || lock(&self.state).paused {
+                tracing::debug!(
+                    session = %sid,
+                    candidates = candidates.as_ref().map_or(0, |(c, _)| c.len()),
+                    "device keys: an admitted session's request is gone or paused; not started \
+                     (its waiting candidates dropped)"
+                );
+                continue;
+            }
+            self.take_record_identity(&sid);
+            self.spawn_admitted(sid.clone(), sdp, outgoing).await;
+            self.replay_candidates(&sid, candidates);
+        }
+    }
+
+    /// The remote candidates that came while `session_id`'s first offer waited for its key's
+    /// write, to its peer now, in order — behind the offer, as the viewer sent them.
+    fn replay_candidates(
+        &self,
+        session_id: &str,
+        candidates: Option<(Vec<afklink_protocol::IceCandidate>, usize)>,
+    ) {
+        let Some((candidates, dropped)) = candidates else {
+            return;
+        };
+        let Some(sess) = self.sessions.get(session_id) else {
+            tracing::debug!(
+                session = session_id,
+                candidates = candidates.len(),
+                "device keys: the admitted session did not start; its waiting candidates dropped"
+            );
+            return;
+        };
+        let count = candidates.len();
+        let mut refused = 0usize;
+        for c in candidates {
+            if signal_peer(&sess.signals, session_id, PeerSignal::AddRemoteIce(c)).is_err() {
+                refused += 1;
+            }
+        }
+        tracing::debug!(
+            session = session_id,
+            replayed = count,
+            refused,
+            dropped,
+            "device keys: candidates that came while the offer waited for its write, to the peer"
+        );
+    }
+
+    /// The peer and the pipeline of an admitted first offer.
+    async fn spawn_admitted(
+        &mut self,
+        session_id: String,
+        offer_sdp: String,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        #[cfg(test)]
+        if self.hold_peers {
+            tracing::debug!(session = %session_id, "offer: a test holds the peer; still a request");
+            return;
+        }
         // `pending` holds this session: checked just above, and nothing in between removes it. (Were
         // it gone, the viewer would be account 0: no role, so game-only would apply — the safe side.)
         let (stun_servers, viewer, session_policy) = self
@@ -5209,6 +8510,21 @@ impl Agent {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("failed to create peer: {e:#}");
+                    // The request is over: out of `pending` (it would hold the trusted devices'
+                    // window and keep a later offer of the id for a duplicate), and the admission
+                    // hears of its end now, not at the next loop turn.
+                    let had_request = self.pending.remove(&session_id).is_some();
+                    let admitted = self.admission_ids.remove(&session_id);
+                    self.keyed.remove(&session_id);
+                    if admitted {
+                        self.admission.session_ended(&mut self.trusted, &session_id);
+                    }
+                    tracing::debug!(
+                        session = %session_id,
+                        had_request,
+                        admitted,
+                        "offer: no peer; the request is dropped and the admission told"
+                    );
                     self.emit(AgentEvent::SessionEnded {
                         session_id: session_id.clone(),
                         reason: end_reason::PEER_ERROR.into(),
@@ -5279,7 +8595,7 @@ impl Agent {
             session_id: session_id.clone(),
             reason: reason.into(),
         });
-        let detail = end_detail(&session_id, &path.get(), None);
+        let detail = end_detail(&session_id, &path.get(), None, self.key_end_mode(reason));
         send_to_backend(
             outgoing,
             AgentToServer::SessionEnd {
@@ -5363,7 +8679,10 @@ impl Agent {
         // here or at any restart. See `crate::game`.
         let game_status = Arc::new(crate::game::GameStatus::new());
         let bindings = lock(&self.state).bindings.clone();
-        let capture_mode = self.game_access.open(&session_id, viewer, &bindings);
+        let pin = self.admission_pin(&session_id);
+        let capture_mode = self
+            .game_access
+            .open_pinned(&session_id, viewer, &bindings, pin);
         let session_capture = crate::game::SessionCapture::new(
             self.backends.clone(),
             capture_mode.clone(),
@@ -5702,7 +9021,8 @@ impl Agent {
                 Some(capture_mode.clone()),
                 reach_start,
             )
-            .with_quality_profile(&session_policy.label, session_policy.source),
+            .with_quality_profile(&session_policy.label, session_policy.source)
+            .with_key_verdict(self.keyed.get(&session_id).map(|k| k.summary)),
         );
 
         // Encode thread (CPU-bound; std thread, not the async runtime).
@@ -5888,6 +9208,9 @@ impl Agent {
             // where its `vv` report arrives. See `afklink_transport::ViewerPlayout`.
             let playout_tx = peer.control_tx.clone();
             let sid = session_id.clone();
+            // Device keys: the `ks` for the viewer once its `input` channel opens (spec §3.7).
+            let mut ks = self.keyed.get(&session_id).and_then(|k| k.ks.clone());
+            let ks_tx = peer.control_tx.clone();
             // The viewer's Telegram platform goes to the journal from its reports (`crate::journal`).
             let journal = self.journal.clone();
             let mut events = peer.events;
@@ -6175,6 +9498,21 @@ impl Agent {
                                 tally.malformed(&sid, bytes.len(), "not UTF-8");
                             }
                         }
+                        PeerEvent::InputChannelOpen => match ks.take() {
+                            Some(message) => {
+                                match ks_tx.try_send(PeerControl::SendReliable(vec![message])) {
+                                    Ok(()) => {
+                                        tracing::debug!(session = %sid, "device keys: ks sent on the input channel")
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(session = %sid, "device keys: ks not sent: {e}")
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::trace!(session = %sid, "input channel open; no ks for this session")
+                            }
+                        },
                         PeerEvent::InputChannelClosed => {
                             tracing::debug!(session = %sid, "input channel closed: releasing held input");
                             input.release_all();
@@ -6386,7 +9724,7 @@ impl Agent {
             });
             let reported = stats.report(outgoing, &session_id, true);
             tracing::debug!(session = %session_id, outcome = ?reported, "final session report");
-            let detail = end_detail(&session_id, &peer.path.get(), None);
+            let detail = end_detail(&session_id, &peer.path.get(), None, None);
             send_to_backend(
                 outgoing,
                 AgentToServer::SessionEnd {
@@ -6407,16 +9745,18 @@ impl Agent {
         );
 
         {
-            // The name the toasts and the window show. `session_request` has no first name, so the
-            // binding this session was admitted on supplies it (`person_name::session_names`).
+            // The name the toasts, the window and the journal show. `session_request` has no first
+            // name, so the binding this session was admitted on supplies it
+            // (`person_name::session_names`) — but a session signed by a key is the key record's
+            // person (spec §3.4 step 10): its names too, whatever a binding of that id says now.
             let mut s = lock(&self.state);
-            let names =
-                crate::person_name::session_names(&s.bindings, &session_id, uid, username.clone());
+            let (first_name, username) =
+                self.session_names_of(&s.bindings, &session_id, uid, username.clone());
             s.sessions.push(SessionInfo {
                 session_id: session_id.clone(),
                 telegram_user_id: uid,
-                username: names.username,
-                first_name: names.first_name,
+                username,
+                first_name,
                 connected: false,
                 connected_at: None,
             });
@@ -6432,6 +9772,7 @@ impl Agent {
             panic!("a session start panics before its registration (a test)");
         }
         unregistered.disarm();
+        self.trusted.session_began("session", &session_id);
         self.sessions.insert(
             session_id,
             Session {
@@ -6528,7 +9869,12 @@ impl Agent {
             close_peer(&sess.closer, session_id);
             self.teardown_capture(session_id, sess.capturer.clone());
             if notify_backend {
-                let detail = end_detail(session_id, &sess.path.get(), ended_detail);
+                let detail = end_detail(
+                    session_id,
+                    &sess.path.get(),
+                    ended_detail,
+                    self.key_end_mode(reason),
+                );
                 send_to_backend(
                     outgoing,
                     AgentToServer::SessionEnd {
@@ -6726,9 +10072,52 @@ fn end_detail(
     session_id: &str,
     path: &transport::PeerPath,
     ended_detail: Option<&'static str>,
-) -> Option<afklink_protocol::SessionEndDetail> {
-    let mut detail = path.detail();
-    detail.ended_detail = ended_detail.map(str::to_string);
+    key_mode: Option<&'static str>,
+) -> Option<afklink_protocol::AgentSessionEndDetail> {
+    let mut detail = afklink_protocol::AgentSessionEndDetail {
+        base: path.detail(),
+        key_mode: key_mode.map(str::to_string),
+    };
+    detail.base.ended_detail = ended_detail.map(str::to_string);
+    let (detail, dropped) = detail.keep_valid();
+    if !dropped.is_empty() {
+        tracing::warn!(
+            session = session_id,
+            dropped = ?dropped,
+            "session_end detail: fields the contract would refuse left out"
+        );
+    }
+    let base = &detail.base;
+    tracing::debug!(
+        session = session_id,
+        ended_detail = base.ended_detail.as_deref().unwrap_or("-"),
+        stage = base.stage.as_deref().unwrap_or("-"),
+        verdict = base.verdict.as_deref().unwrap_or("-"),
+        dtls_after_ice_ms = ?base.dtls_after_ice_ms,
+        pair_local_kind = base.pair_local_kind.as_deref().unwrap_or("-"),
+        pair_remote_kind = base.pair_remote_kind.as_deref().unwrap_or("-"),
+        relay_transport = base.relay_transport.as_deref().unwrap_or("-"),
+        key_mode = detail.key_mode.as_deref().unwrap_or("-"),
+        "session_end detail"
+    );
+    (!detail.is_empty()).then_some(detail)
+}
+
+/// The `session_end.detail` of a session refused before its peer exists (spec §11): the
+/// verdict's `ended_detail` and the PC's `key_mode` ([`Agent::key_end_mode`]) — no path, there was
+/// none. Checked like [`end_detail`]; nothing left, no detail.
+fn refusal_detail(
+    session_id: &str,
+    ended_detail: Option<&'static str>,
+    key_mode: Option<&'static str>,
+) -> Option<afklink_protocol::AgentSessionEndDetail> {
+    let detail = afklink_protocol::AgentSessionEndDetail {
+        base: afklink_protocol::SessionEndDetail {
+            ended_detail: ended_detail.map(str::to_string),
+            ..Default::default()
+        },
+        key_mode: key_mode.map(str::to_string),
+    };
     let (detail, dropped) = detail.keep_valid();
     if !dropped.is_empty() {
         tracing::warn!(
@@ -6739,14 +10128,9 @@ fn end_detail(
     }
     tracing::debug!(
         session = session_id,
-        ended_detail = detail.ended_detail.as_deref().unwrap_or("-"),
-        stage = detail.stage.as_deref().unwrap_or("-"),
-        verdict = detail.verdict.as_deref().unwrap_or("-"),
-        dtls_after_ice_ms = ?detail.dtls_after_ice_ms,
-        pair_local_kind = detail.pair_local_kind.as_deref().unwrap_or("-"),
-        pair_remote_kind = detail.pair_remote_kind.as_deref().unwrap_or("-"),
-        relay_transport = detail.relay_transport.as_deref().unwrap_or("-"),
-        "session_end detail"
+        ended_detail = detail.base.ended_detail.as_deref().unwrap_or("-"),
+        key_mode = detail.key_mode.as_deref().unwrap_or("-"),
+        "session_end detail: a refusal before the peer"
     );
     (!detail.is_empty()).then_some(detail)
 }
@@ -10201,11 +13585,10 @@ mod tests {
         // `Config::defaults` / `Identity::generate` are private to their
         // modules, so go through the public `*_at` constructors in a scratch
         // dir — no production visibility changes for the sake of tests.
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let base =
-            std::env::temp_dir().join(format!("afklink-core-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&base).expect("test dir");
+        // A fresh one, never an earlier run's (named by the process id and a counter, a
+        // later process with the same id started from its config.json: paused, renamed).
+        let base = std::env::temp_dir().join(format!("afklink-core-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&base).expect("a fresh test dir");
         let mut config = Config::load_or_create_at(base.join("config.json")).expect("test config");
         edit(&mut config);
         config.save().expect("test config saved");
@@ -10217,9 +13600,387 @@ mod tests {
             make_encoder: Box::new(|| Err(anyhow::anyhow!("no encoder in test"))),
             injector: Arc::new(NoopInjector),
         };
-        let (agent, control) = Agent::new(config, Arc::new(identity), backends);
+        let (mut agent, control) = Agent::new(config, Arc::new(identity), backends);
+        // The scratch goes with the agent.
+        agent.test_scratch = Some(TestScratch(base));
         // The reconnect tests time the backoff's own waits (the jitter is `reconnect`'s tests').
         (agent.with_jitter(reconnect::Jitter::off()), control)
+    }
+
+    /// Folders as an earlier test process would have left them (a paused config.json in
+    /// each), at `names(0..count)` — only where nothing is there yet (`create_dir`): a folder
+    /// that exists (another process's, a user's) is skipped, never rewritten. Dropped, it
+    /// removes only the folders it made.
+    struct Planted(Vec<std::path::PathBuf>);
+
+    impl Planted {
+        fn at(names: impl Fn(usize) -> std::path::PathBuf, count: usize) -> Self {
+            let mut made = Vec::new();
+            for n in 0..count {
+                let dir = names(n);
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        tracing::debug!(dir = %dir.display(), "planted: there already; skipped");
+                        continue;
+                    }
+                    Err(e) => panic!("planted {}: {e}", dir.display()),
+                }
+                made.push(dir.clone());
+                let mut config =
+                    Config::load_or_create_at(dir.join("config.json")).expect("planted config");
+                config.paused = true;
+                config.save().expect("planted config saved");
+            }
+            Self(made)
+        }
+    }
+
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            for dir in &self.0 {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// The scratch dirs of test agents stay behind, and a later test process with the same process
+    /// id (Windows reuses them) would find an earlier run's `config.json` — paused by a kill-switch
+    /// test, renamed by another — and start from it. A test agent starts from its own fresh
+    /// scratch, whatever earlier runs left. The planted folders are only the ones this test made
+    /// ([`Planted`]).
+    #[test]
+    fn a_test_agent_never_starts_from_an_earlier_runs_scratch() {
+        // What an earlier process with this process id left, for the first test agents' names
+        // (as the old helper named them).
+        let _planted = Planted::at(
+            |n| std::env::temp_dir().join(format!("afklink-core-test-{}-{n}", std::process::id())),
+            64,
+        );
+        let (agent, _control) = test_agent(None);
+        let paused = lock(&agent.state).paused;
+        assert!(
+            !paused,
+            "the test agent started paused from an earlier run's config.json"
+        );
+    }
+
+    /// Planting earlier runs' folders never
+    /// touches a folder it did not make — one there already (another process's, a user's) keeps
+    /// its files, and is neither rewritten nor removed.
+    #[test]
+    fn planting_earlier_runs_leaves_a_folder_it_did_not_make() {
+        let root = TestScratch::fresh("planted");
+        let names = |n: usize| root.path().join(format!("run-{n}"));
+        let foreign = names(3);
+        std::fs::create_dir(&foreign).expect("foreign");
+        std::fs::write(foreign.join("sentinel"), b"not the test's").expect("sentinel");
+        let planted = Planted::at(names, 8);
+        assert!(
+            !foreign.join("config.json").exists(),
+            "a config.json written into a folder the test did not make"
+        );
+        drop(planted);
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).ok().as_deref(),
+            Some(&b"not the test's"[..]),
+            "a folder the test did not make was removed"
+        );
+        assert!(!names(0).exists(), "the test's own planted folder stayed");
+    }
+
+    /// A test agent's scratch (config.json, identity.json) goes with the agent — earlier
+    /// runs left 25k of them on afk-pc. Only the helper's own fresh folder.
+    #[test]
+    fn a_test_agents_scratch_goes_with_it() {
+        let (agent, control) = test_agent(None);
+        let dir = lock(&control.config)
+            .path()
+            .and_then(std::path::Path::parent)
+            .expect("the scratch")
+            .to_path_buf();
+        assert!(dir.join("config.json").exists());
+        drop(agent);
+        assert!(
+            !dir.exists(),
+            "the scratch stayed behind: {}",
+            dir.display()
+        );
+    }
+
+    /// A relay's list of 100k bindings, then an `agent_ready` with
+    /// none: the comparison is done at once, the journal gets at most
+    /// [`AWAY_JOURNAL_MAX`] of the changes (not one blocking write each), and the owner's own
+    /// history is not pushed out past the journal's bound.
+    #[tokio::test]
+    async fn a_flood_gone_while_away_journals_a_bounded_few_at_once() {
+        let (agent, tx, _rx) = harness();
+        let (mut agent, journal) = with_journal(agent);
+        agent.journal_event(crate::journal::Kind::Granted, 1, Some("Owner"), None);
+        {
+            let mut s = lock(&agent.state);
+            s.bindings = (2..=100_001)
+                .map(|u| role_binding(u, Some(afklink_protocol::BindingRole::Guest)))
+                .collect();
+            s.bindings_known = true;
+        }
+        let started = Instant::now();
+        let _ = agent.take_agent_ready(&[], &tx);
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+        let entries = journal.entries();
+        assert!(
+            entries.len() <= 1 + AWAY_JOURNAL_MAX,
+            "{} journal entries",
+            entries.len()
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|v| v.entry.user == 1 && v.entry.kind == crate::journal::Kind::Granted),
+            "the owner's own history stays"
+        );
+    }
+
+    /// A journal in a file of the test's own (its scratch goes with the returned guard).
+    fn with_file_journal(agent: Agent) -> (Agent, Arc<crate::journal::Journal>, TestScratch) {
+        let scratch = TestScratch::fresh("journal");
+        let journal = Arc::new(crate::journal::Journal::open(
+            Some(scratch.path().join(crate::journal::FILE_NAME)),
+            crate::journal::now_ms(),
+        ));
+        (agent.with_journal(journal.clone()), journal, scratch)
+    }
+
+    /// Waits (≤ 10 s) until `journal` has done `writes` file writes.
+    async fn journal_writes_reach(journal: &crate::journal::Journal, writes: usize) -> usize {
+        let until = Instant::now() + Duration::from_secs(10);
+        while journal.file_writes() < writes && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        journal.file_writes()
+    }
+
+    /// A relay's 100k bindings, then an
+    /// `agent_ready` with none, over a file-backed journal whose disk the test holds: the
+    /// comparison's journal entries are ONE file write (not one per person), and neither the
+    /// orchestrator nor its next inline journal call (nor `known_name`) waits for that write —
+    /// the gate is opened by the test only after they returned.
+    #[tokio::test]
+    async fn a_flood_gone_while_away_is_one_journal_write_off_the_loop() {
+        let (agent, tx, _rx) = harness();
+        let (mut agent, journal, scratch) = with_file_journal(agent);
+        agent.journal_event(crate::journal::Kind::Granted, 1, Some("Owner"), None);
+        assert!(
+            journal.drain(Duration::from_secs(10)),
+            "the owner's entry written"
+        );
+        {
+            let mut s = lock(&agent.state);
+            s.bindings = (2..=100_001)
+                .map(|u| role_binding(u, Some(afklink_protocol::BindingRole::Guest)))
+                .collect();
+            s.bindings_known = true;
+        }
+        let before = journal.file_writes();
+        let gate = journal.hold_file_writes();
+        let started = Instant::now();
+        let _ = agent.take_agent_ready(&[], &tx);
+        let entered = {
+            let gate = gate.clone();
+            tokio::task::spawn_blocking(move || gate.wait_entered(1, Duration::from_secs(10)))
+                .await
+                .expect("the gate's wait")
+        };
+        // The loop goes on while the disk holds the comparison's write: its next journal event
+        // and a name lookup return at once.
+        agent.journal_event(crate::journal::Kind::Granted, 100_002, Some("Next"), None);
+        let name = journal.known_name(100_002);
+        let took = started.elapsed();
+        let entered_before_release = gate.entered();
+        gate.release();
+        assert!(entered, "the comparison's write reached the disk");
+        assert!(
+            took < crate::journal::WriteGate::LIMIT / 2,
+            "the orchestrator waited {took:?} for the disk"
+        );
+        assert_eq!(
+            entered_before_release, 1,
+            "one write at the disk while held"
+        );
+        assert_eq!(
+            name.map(|(n, _)| n).as_deref(),
+            Some("Next"),
+            "known_name while the disk was held"
+        );
+        assert!(journal.drain(Duration::from_secs(10)), "drained");
+        assert_eq!(
+            journal.file_writes() - before,
+            2,
+            "one write for the comparison's entries, one for the next event"
+        );
+        let entries = journal.entries();
+        let revoked = entries
+            .iter()
+            .filter(|v| v.entry.kind == crate::journal::Kind::Revoked)
+            .count();
+        assert_eq!(revoked, AWAY_JOURNAL_MAX, "gone people journaled");
+        assert!(entries
+            .iter()
+            .any(|v| v.entry.user == 1 && v.entry.kind == crate::journal::Kind::Granted));
+        // In the file too, after a reopen.
+        drop(agent);
+        let reread = crate::journal::Journal::open(
+            Some(scratch.path().join(crate::journal::FILE_NAME)),
+            crate::journal::now_ms(),
+        );
+        assert_eq!(reread.entries().len(), entries.len(), "on disk");
+    }
+
+    /// A comparison's batch, then an inline event about the same
+    /// person — the journal has them in call order, in memory and on disk, so the newest name
+    /// wins (`known_name` reads newest first).
+    #[tokio::test]
+    async fn a_batch_and_the_next_event_reach_the_journal_in_call_order() {
+        let (agent, _tx, _rx) = harness();
+        let (agent, journal, scratch) = with_file_journal(agent);
+        journal.slow_file_writes(Duration::from_millis(50));
+        let before = journal.file_writes();
+        agent.journal_batch(
+            vec![crate::journal::PersonEvent {
+                kind: crate::journal::Kind::Revoked,
+                user: 7,
+                name: "Old".to_string(),
+                username: None,
+            }],
+            Vec::new(),
+            "test",
+        );
+        agent.journal_event(crate::journal::Kind::Granted, 7, Some("New"), None);
+        assert_eq!(
+            journal.known_name(7).map(|(n, _)| n).as_deref(),
+            Some("New"),
+            "in memory: the later call is the newer entry"
+        );
+        journal_writes_reach(&journal, before + 2).await;
+        assert!(journal.drain(Duration::from_secs(10)), "drained");
+        let text = std::fs::read_to_string(scratch.path().join(crate::journal::FILE_NAME))
+            .unwrap_or_default();
+        let old_at = text.find(r#""name":"Old""#);
+        let new_at = text.find(r#""name":"New""#);
+        assert!(
+            old_at.is_some() && new_at.is_some() && old_at < new_at,
+            "on disk in call order: {text}"
+        );
+        let reread = crate::journal::Journal::open(
+            Some(scratch.path().join(crate::journal::FILE_NAME)),
+            crate::journal::now_ms(),
+        );
+        assert_eq!(
+            reread.known_name(7).map(|(n, _)| n).as_deref(),
+            Some("New"),
+            "after a reopen"
+        );
+    }
+
+    /// A comparison's batch still on its way to a slow disk at exit is on disk once the
+    /// exit's drain (bounded by `journal::DRAIN_LIMIT`) returns. The app's exit drains after
+    /// `app_closing`, on its main thread (`lib.rs`).
+    #[tokio::test]
+    async fn a_batch_queued_at_exit_is_on_disk_after_the_drain() {
+        let (agent, _tx, _rx) = harness();
+        let (agent, journal, scratch) = with_file_journal(agent);
+        journal.slow_file_writes(Duration::from_millis(300));
+        agent.journal_batch(
+            vec![crate::journal::PersonEvent {
+                kind: crate::journal::Kind::Revoked,
+                user: 7,
+                name: "Gone".to_string(),
+                username: None,
+            }],
+            Vec::new(),
+            "test",
+        );
+        // The exit's drain (after `app_closing`, which may itself queue entries); not
+        // `app_closing` here — it takes the journal's lock, which the old blocking-pool job held
+        // across its write, so it hid the race this test is for.
+        let journal_for_drain = journal.clone();
+        let drained = tokio::task::spawn_blocking(move || {
+            journal_for_drain.drain(crate::journal::DRAIN_LIMIT)
+        })
+        .await
+        .expect("the drain");
+        let text = std::fs::read_to_string(scratch.path().join(crate::journal::FILE_NAME))
+            .unwrap_or_default();
+        assert!(drained, "drained within the bound");
+        assert!(text.contains(r#""name":"Gone""#), "on disk: {text:?}");
+    }
+
+    /// Gone and new bindings have budgets of their own — a relay's
+    /// flood of gone people does not hide a real invite's journal entry and toast, nor a new
+    /// owner's warning entry.
+    #[tokio::test]
+    async fn a_flood_of_gone_bindings_still_journals_and_announces_the_new_one() {
+        use afklink_protocol::BindingRole;
+        let (agent, tx, _rx) = harness();
+        let (mut agent, journal) = with_journal(agent);
+        let mut events = agent.events.subscribe();
+        {
+            let mut s = lock(&agent.state);
+            s.bindings = (2..=10_001)
+                .map(|u| role_binding(u, Some(BindingRole::Guest)))
+                .collect();
+            s.bindings_known = true;
+        }
+        let _ = agent.take_agent_ready(
+            &[
+                role_binding(20_000, Some(BindingRole::Guest)),
+                role_binding(20_001, Some(BindingRole::Owner)),
+            ],
+            &tx,
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        let has = |user: i64, kind: crate::journal::Kind| {
+            journal
+                .entries()
+                .iter()
+                .any(|v| v.entry.user == user && v.entry.kind == kind)
+        };
+        while !(has(20_000, crate::journal::Kind::Invited)
+            && has(20_001, crate::journal::Kind::Granted))
+            && Instant::now() < until
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            has(20_000, crate::journal::Kind::Invited),
+            "the invite's «Доступ по приглашению»"
+        );
+        assert!(
+            has(20_001, crate::journal::Kind::Granted),
+            "the new owner's «Доступ выдан»"
+        );
+        // The toast goes once the journal has the entry.
+        let toast = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(AgentEvent::GuestInvited {
+                        telegram_user_id, ..
+                    }) => break telegram_user_id,
+                    Ok(_) => {}
+                    Err(e) => panic!("events: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("the new guest's toast");
+        assert_eq!(toast, 20_000, "the new guest's toast");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|e| matches!(e, AgentEvent::GuestInvited { .. })),
+            "one toast only (none for the owner)"
+        );
     }
 
     fn harness() -> (
@@ -10243,6 +14004,7 @@ mod tests {
                 credential: String::new(),
             },
             quality_profile: None,
+            nonce_pc: None,
         }
     }
 
@@ -10270,6 +14032,8 @@ mod tests {
                     request_id: "7c4b1e90-2a3d-4f51-9b8e-6d5c4a3b2f10".into(),
                     accept,
                     role,
+                    second_step: false,
+                    shown: None,
                 },
                 tx,
             )
@@ -10285,6 +14049,7 @@ mod tests {
             first_name: Some("Аня".into()),
             expires_at: 1,
             has_owner,
+            viewer_key: None,
         }
     }
 
@@ -10436,6 +14201,185 @@ mod tests {
             .filter(|(_, r)| *r == Some(BindingRole::Owner))
             .count();
         assert_eq!(owners, 1);
+    }
+
+    /// A trusted list in a scratch directory with an owner's key (user 1) and a guest's (user 2).
+    fn trusted_agent() -> (
+        Agent,
+        AgentControl,
+        crate::viewer_keys::KeyId,
+        crate::viewer_keys::KeyId,
+        std::path::PathBuf,
+    ) {
+        use crate::viewer_keys::{
+            ClientKind, Ground, NewKey, Person, Platform, TrustStore, ViewerKey,
+        };
+        use aws_lc_rs::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
+        const PREFIX: [u8; 26] = [
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+        let dir =
+            std::env::temp_dir().join(format!("afklink-agent-trusted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let mut store = TrustStore::open_in(&dir);
+        let mut ids = Vec::new();
+        for (uid, role) in [
+            (1, afklink_protocol::BindingRole::Owner),
+            (2, afklink_protocol::BindingRole::Guest),
+        ] {
+            let pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).expect("key");
+            let mut spki = PREFIX.to_vec();
+            spki.extend_from_slice(pair.public_key().as_ref());
+            let key = ViewerKey::from_spki(&spki).expect("spki");
+            ids.push(key.key_id().clone());
+            store
+                .add(
+                    NewKey {
+                        key,
+                        rpk: None,
+                        kind: ClientKind::parse("telegram").expect("kind"),
+                        platform: Platform::parse("android").expect("platform"),
+                    },
+                    Ground::Pair {
+                        person: Person {
+                            telegram_user_id: uid,
+                            first_name: None,
+                            username: None,
+                        },
+                        role,
+                        unconfirmed: false,
+                    },
+                    1_731_400_000_000,
+                )
+                .expect("added");
+        }
+        let (agent, control) = test_agent(None);
+        let mut agent = agent.with_trust_store(store);
+        agent.trusted.set_write_limit(TEST_WRITE_LIMIT);
+        let guest = ids.pop().expect("guest");
+        let owner = ids.pop().expect("owner");
+        (agent, control, owner, guest, dir)
+    }
+
+    /// An agent-level test's limit before a list write answers `slow` — a loaded machine
+    /// (the full gate, the Windows runner) starts a blocking job seconds late, which the product's
+    /// [`crate::trusted::WRITE_LIMIT`] would turn into `slow` for a test that waits for the
+    /// write. Set by the helpers that give a test agent its own list; the product's is unchanged.
+    const TEST_WRITE_LIMIT: Duration = Duration::from_secs(30);
+
+    /// How long [`settle_trusted`] waits for a job queued or in flight.
+    const SETTLE_BOUND: Duration = Duration::from_secs(60);
+
+    /// Take the trusted devices' file jobs in until the queue is idle, as the loops do.
+    /// While a job is queued or in flight it waits for its result (at most [`SETTLE_BOUND`]: a
+    /// loaded machine starts it late), not for a short quiet spell; once idle, what still comes
+    /// within the spell (a landing's follow-ups) is taken too.
+    async fn settle_trusted(agent: &mut Agent, tx: &mpsc::UnboundedSender<AgentToServer>) {
+        let mut rx = agent.sess_ev_rx.take().expect("signals");
+        loop {
+            let wait = if agent.trusted.settled() {
+                Duration::from_millis(500)
+            } else {
+                SETTLE_BOUND
+            };
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(sig)) => agent.handle_session_signal(sig, tx),
+                Ok(None) => break,
+                Err(_) => {
+                    assert!(
+                        agent.trusted.settled(),
+                        "a list job did not end within {SETTLE_BOUND:?}"
+                    );
+                    break;
+                }
+            }
+        }
+        agent.sess_ev_rx = Some(rx);
+    }
+
+    /// «Отвязать» on a guest takes the guest's trusted keys too (origin `pc`); on the owner it
+    /// does not (he confirms in Telegram, and his keys are never the server's to touch).
+    #[tokio::test]
+    async fn guest_unbind_removes_their_trusted_keys_owner_unbind_does_not() {
+        use crate::viewer_keys::Lookup;
+        let (mut agent, control, owner, guest, dir) = trusted_agent();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        lock(&agent.state).bindings = vec![
+            role_binding(1, Some(afklink_protocol::BindingRole::Owner)),
+            role_binding(2, Some(afklink_protocol::BindingRole::Guest)),
+        ];
+        agent.handle_command(AgentCommand::Unbind(1), &tx).await;
+        agent.handle_command(AgentCommand::Unbind(2), &tx).await;
+        settle_trusted(&mut agent, &tx).await;
+        let reopened = crate::viewer_keys::TrustStore::open_in(&dir);
+        assert!(matches!(reopened.lookup(&owner), Lookup::Active(_)));
+        match reopened.lookup(&guest) {
+            Lookup::Removed(t) => assert_eq!(t.origin.as_str(), "pc"),
+            other => panic!("the guest's key is not removed: {other:?}"),
+        }
+        let view = control.trusted_view();
+        let people: Vec<i64> = view.people.iter().map(|p| p.telegram_user_id).collect();
+        assert_eq!(people, [1]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session request moves the trusted devices' window token and makes it unclean: a confirm
+    /// or mode-on with the window opened before it is refused `session`.
+    #[tokio::test]
+    async fn a_session_request_moves_the_trusted_window_token() {
+        let (mut agent, control, _owner, _guest, dir) = trusted_agent();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        lock(&agent.state).bindings =
+            vec![role_binding(1, Some(afklink_protocol::BindingRole::Owner))];
+        let opened = control.trusted_view();
+        assert!(opened.clean);
+        agent.handle_server_msg(session_request("s1", 1), &tx).await;
+        let now = control.trusted_view();
+        assert!(!now.clean);
+        assert_ne!(now.token, opened.token);
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        agent
+            .handle_command(
+                AgentCommand::Trusted(crate::trusted::TrustedRequest {
+                    ask: crate::trusted::TrustedAsk::SetMode {
+                        on: true,
+                        token: Some(now.token),
+                    },
+                    reply,
+                }),
+                &tx,
+            )
+            .await;
+        assert_eq!(
+            answer.try_recv().ok(),
+            Some(Err(crate::trusted::TrustedError::Session)),
+            "a request pending: not clean"
+        );
+        // The request gone (told to the admission, as the loops do): clean again, but the old
+        // window is stale.
+        agent.pending.clear();
+        agent.reconcile_admission();
+        agent.trusted.sync_live(agent.trust_window_live());
+        assert!(control.trusted_view().clean);
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        agent
+            .handle_command(
+                AgentCommand::Trusted(crate::trusted::TrustedRequest {
+                    ask: crate::trusted::TrustedAsk::SetMode {
+                        on: true,
+                        token: Some(opened.token),
+                    },
+                    reply,
+                }),
+                &tx,
+            )
+            .await;
+        assert_eq!(
+            answer.try_recv().ok(),
+            Some(Err(crate::trusted::TrustedError::Session))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// «Отвязать» on a guest unbinds at once; on the owner it asks the owner (`unbind_owner`); on a
@@ -10988,6 +14932,35 @@ mod tests {
         assert_eq!(binding_changes(&before, &before), BindingChanges::default());
         assert_eq!(binding_changes(&[], &before).added.len(), 3);
         assert_eq!(binding_changes(&before, &[]).gone.len(), 3);
+    }
+
+    /// A relay's `agent_ready` with ≫ 4096 bindings, against a previous
+    /// list as long, is compared at once (a quadratic comparison would stall the orchestrator) and
+    /// right: each id once, in its list's order, the last entries too.
+    #[test]
+    fn a_flood_of_bindings_is_compared_at_once() {
+        let b = |id: i64| BindingInfo {
+            telegram_user_id: id,
+            username: None,
+            first_name: None,
+            role: None,
+        };
+        // Before: 1..=200_000 (each twice); now: 100_001..=300_000 (each twice).
+        let before: Vec<BindingInfo> = (1..=200_000).chain(1..=200_000).map(b).collect();
+        let now: Vec<BindingInfo> = (100_001..=300_000)
+            .chain(100_001..=300_000)
+            .map(b)
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(binding_changes(&before, &now));
+        });
+        let changes = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("compared within 5 s, not a stall");
+        let ids = |l: &[BindingInfo]| l.iter().map(|b| b.telegram_user_id).collect::<Vec<_>>();
+        assert_eq!(ids(&changes.gone), (1..=100_000).collect::<Vec<_>>());
+        assert_eq!(ids(&changes.added), (200_001..=300_000).collect::<Vec<_>>());
     }
 
     /// An approval on this PC is remembered until its `binding_added` comes, so a later list
@@ -12174,7 +16147,7 @@ mod tests {
     /// The highlight outlives a restart: an agent made from a config.json that has it shows it.
     #[test]
     fn the_input_highlight_carries_over_from_config() {
-        let (agent, control) = test_agent(None);
+        let (mut agent, control) = test_agent(None);
         assert!(!lock(&control.state).input_not_reaching);
         {
             let mut c = lock(&control.config);
@@ -12182,6 +16155,8 @@ mod tests {
             c.save().expect("save");
         }
         let path = lock(&control.config).path().expect("a file").to_path_buf();
+        // The scratch outlives this agent for the next run's, which takes it.
+        let scratch = agent.test_scratch.take();
         drop(agent);
         // The next run: the same files.
         let identity = Arc::new(
@@ -12194,7 +16169,8 @@ mod tests {
             make_encoder: Box::new(|| Err(anyhow::anyhow!("no encoder in test"))),
             injector: Arc::new(NoopInjector),
         };
-        let (_again, control) = Agent::new(config, identity, backends);
+        let (mut again, control) = Agent::new(config, identity, backends);
+        again.test_scratch = scratch;
         assert!(lock(&control.state).input_not_reaching);
         // The desktop app read the driver installed: it goes, from config.json too.
         control.driver_installed("test: installed");
@@ -12685,6 +16661,7 @@ mod tests {
                         username,
                         turn,
                         quality_profile: profile,
+                        nonce_pc: None,
                     },
                     &tx,
                 )
@@ -12735,6 +16712,7 @@ mod tests {
                 username,
                 turn,
                 quality_profile: Some(reference_profile()),
+                nonce_pc: None,
             }
         };
         let log = crate::quality_policy::log_capture::start();
@@ -12987,6 +16965,8 @@ mod tests {
                 .paused,
             "paused, as the state is"
         );
+        // The scratch outlives this agent for the next run's, which takes it.
+        let scratch = agent.test_scratch.take();
         drop(agent);
 
         // The next run — the same config.json, as after a restart or an update.
@@ -13000,6 +16980,7 @@ mod tests {
             injector: Arc::new(NoopInjector),
         };
         let (mut next, control) = Agent::new(on_disk, identity, backends);
+        next.test_scratch = scratch;
         assert!(
             lock(&control.state).paused,
             "paused before the first connection"
@@ -13101,7 +17082,7 @@ mod tests {
         let (mut agent, tx, mut rx) = harness();
 
         agent
-            .start_session("ghost".into(), "not-an-offer".into(), &tx)
+            .start_session("ghost".into(), "not-an-offer".into(), None, &tx)
             .await;
         assert!(agent.sessions.is_empty());
         assert!(lock(&agent.state).sessions.is_empty());
@@ -13319,6 +17300,7 @@ mod tests {
             session_id: "s1".into(),
             sdp_type: SdpType::Answer,
             sdp: "v=0".into(),
+            proof: None,
         };
         assert_eq!(step_budget(&answer, limit), Duration::ZERO);
         assert_eq!(
@@ -13422,6 +17404,7 @@ mod tests {
             session_id: session_id.into(),
             sdp_type: SdpType::Offer,
             sdp: sdp.into(),
+            proof: None,
         }
     }
 
@@ -13484,8 +17467,9 @@ mod tests {
                 assert_eq!(session_id, "s1");
                 assert_eq!(reason.as_deref(), Some("ice_restart_failed"));
                 let detail = detail.expect("the peer's path");
-                assert_eq!(detail.ended_detail, None, "not a peer_closed");
-                assert_eq!(detail.stage.as_deref(), Some("new"));
+                assert_eq!(detail.base.ended_detail, None, "not a peer_closed");
+                assert_eq!(detail.base.stage.as_deref(), Some("new"));
+                assert_eq!(detail.key_mode, None, "not an end of device keys");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -13630,7 +17614,7 @@ mod tests {
                     "the reason is unchanged"
                 );
                 assert_eq!(
-                    detail.and_then(|d| d.ended_detail).as_deref(),
+                    detail.and_then(|d| d.base.ended_detail).as_deref(),
                     Some("viewer"),
                     "the detail says the viewer said goodbye"
                 );
@@ -14104,6 +18088,7 @@ mod tests {
                 policy: crate::quality_policy::SessionPolicy::fallback(
                     crate::quality_policy::FallbackReason::Absent,
                 ),
+                since: Instant::now(),
             },
         );
 
@@ -15254,6 +19239,7 @@ mod tests {
                 policy: crate::quality_policy::SessionPolicy::fallback(
                     crate::quality_policy::FallbackReason::Absent,
                 ),
+                since: Instant::now(),
             },
         );
         let (done, answer) = std::sync::mpsc::sync_channel(1);
@@ -16268,6 +20254,7 @@ mod tests {
                     first_name: None,
                     expires_at: 1,
                     has_owner: None,
+                    viewer_key: None,
                 },
                 &tx,
             )
@@ -16534,6 +20521,7 @@ mod tests {
             first_name: Some("Аня".into()),
             expires_at,
             has_owner: Some(false),
+            viewer_key: None,
         }
     }
 
@@ -16556,6 +20544,8 @@ mod tests {
             request_id: id.into(),
             accept: true,
             role: Some(BindingRole::Owner),
+            second_step: false,
+            shown: None,
         };
         agent.handle_command(answer, &tx).await;
         assert!(
@@ -16588,6 +20578,8 @@ mod tests {
                     request_id: id.into(),
                     accept: true,
                     role: Some(BindingRole::Owner),
+                    second_step: false,
+                    shown: None,
                 },
                 &tx,
             )
@@ -16675,6 +20667,8 @@ mod tests {
             request_id: id.into(),
             accept: false,
             role: None,
+            second_step: false,
+            shown: None,
         };
         control
             .commands
@@ -16712,6 +20706,8 @@ mod tests {
                 request_id: id.into(),
                 accept: true,
                 role: Some(afklink_protocol::BindingRole::Owner),
+                second_step: false,
+                shown: None,
             })
             .expect("the agent is running");
         let answer = own_frame(&mut ws).await;
@@ -16847,13 +20843,10 @@ mod tests {
     /// injector is `slot`; its session steps give up after 300 ms; viewer 42 is bound.
     fn stuck_rig(slot: &Arc<DriverSlot>, script: &Arc<CaptureScript>) -> (Agent, AgentControl) {
         use crate::pipeline::fakes::{fake_backends, CaptureWorld, EncoderWorld};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!(
-            "afklink-core-stuck-test-{}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&base).expect("test dir");
+        // A fresh folder of its own (never an earlier run's, named by the
+        // process id), removed with the agent.
+        let scratch = TestScratch::fresh("stuck");
+        let base = scratch.path().to_path_buf();
         let config = Config::load_or_create_at(base.join("config.json")).expect("test config");
         let identity =
             Identity::load_or_create_at(base.join("identity.json")).expect("test identity");
@@ -16883,6 +20876,7 @@ mod tests {
         };
         let (mut agent, control) = Agent::new(config, Arc::new(identity), backends);
         agent.setup_limit = Duration::from_millis(300);
+        agent.test_scratch = Some(scratch);
         lock(&agent.state).bindings.push(BindingInfo {
             telegram_user_id: 42,
             username: None,
@@ -18030,5 +22024,4761 @@ mod tests {
             .await,
             0
         );
+    }
+
+    /// Device keys wired into the orchestrator (`crate::admission`, spec §2–§11): what reaches the
+    /// backend and the session's state for each decision, with a real trusted list in a scratch
+    /// directory and real signatures.
+    mod admission_wiring {
+        use super::*;
+        use crate::admission::Verdict;
+        use crate::viewer_keys::{
+            ClientKind, Ground, KeyId, NewKey, Person, Platform, TrustStore, ViewerKey,
+        };
+        use aws_lc_rs::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
+        use base64::Engine as _;
+
+        const FP: [u8; 32] = [0xAB; 32];
+        const OTHER_FP: [u8; 32] = [0xCD; 32];
+        const SPKI_PREFIX: [u8; 26] = [
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+
+        struct Ctx {
+            agent: Agent,
+            tx: mpsc::UnboundedSender<AgentToServer>,
+            rx: mpsc::UnboundedReceiver<AgentToServer>,
+            owner: (EcdsaKeyPair, KeyId),
+            guest: (EcdsaKeyPair, KeyId),
+            dir: std::path::PathBuf,
+            /// The window's side: the published trusted list (`trusted_view`).
+            control: AgentControl,
+        }
+
+        impl Drop for Ctx {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        /// An agent with a list holding a confirmed owner key (user 1, «Owner») and a guest's
+        /// (user 2, «Guest»), both bound; strict mode or observe.
+        fn ctx(strict: bool) -> Ctx {
+            ctx_with(strict, |_| {})
+        }
+
+        /// [`ctx`], with `more` done to the list before the switch is set.
+        fn ctx_with(strict: bool, more: impl FnOnce(&mut TrustStore)) -> Ctx {
+            let dir = std::env::temp_dir()
+                .join(format!("afklink-agent-admission-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("scratch");
+            let mut store = TrustStore::open_in(&dir);
+            let mut keys = Vec::new();
+            for (uid, role) in [
+                (1, afklink_protocol::BindingRole::Owner),
+                (2, afklink_protocol::BindingRole::Guest),
+            ] {
+                let pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).expect("key");
+                let mut spki = SPKI_PREFIX.to_vec();
+                spki.extend_from_slice(pair.public_key().as_ref());
+                let key = ViewerKey::from_spki(&spki).expect("spki");
+                let kid = key.key_id().clone();
+                store
+                    .add(
+                        NewKey {
+                            key,
+                            rpk: None,
+                            kind: ClientKind::parse("telegram").expect("kind"),
+                            platform: Platform::parse("android").expect("platform"),
+                        },
+                        Ground::Pair {
+                            person: Person {
+                                telegram_user_id: uid,
+                                first_name: Some(if uid == 1 { "Owner" } else { "Guest" }.into()),
+                                username: None,
+                            },
+                            role,
+                            unconfirmed: false,
+                        },
+                        1_731_400_000_000,
+                    )
+                    .expect("added");
+                keys.push((pair, kid));
+            }
+            more(&mut store);
+            // The list as the last known one already (an earlier run's), so the ctx's
+            // `agent_ready` below queues no write of it: the tests drive the store directly.
+            let _ = store.note_last_bindings([
+                crate::viewer_keys::KnownBinding {
+                    telegram_user_id: 1,
+                    role: afklink_protocol::BindingRole::Owner,
+                },
+                crate::viewer_keys::KnownBinding {
+                    telegram_user_id: 2,
+                    role: afklink_protocol::BindingRole::Guest,
+                },
+            ]);
+            store.flush().expect("the notes written");
+            if strict {
+                store.set_trusted_devices_mode(true).expect("strict");
+            }
+            let (agent, control) = test_agent(None);
+            let mut agent = agent.with_trust_store(store);
+            agent.trusted.set_write_limit(TEST_WRITE_LIMIT);
+            agent.hold_peers = true;
+            lock(&agent.state).bindings = vec![
+                role_binding(1, Some(afklink_protocol::BindingRole::Owner)),
+                role_binding(2, Some(afklink_protocol::BindingRole::Guest)),
+            ];
+            // As `agent_ready` does: the admission knows who is bound (§10, §10.2).
+            agent.sync_game_roles("test ctx");
+            let (tx, rx) = mpsc::unbounded_channel();
+            let guest = keys.pop().expect("guest");
+            let owner = keys.pop().expect("owner");
+            Ctx {
+                agent,
+                tx,
+                rx,
+                owner,
+                guest,
+                dir,
+                control,
+            }
+        }
+
+        fn sdp(fp: &[u8; 32]) -> String {
+            let hex: Vec<String> = fp.iter().map(|b| format!("{b:02X}")).collect();
+            format!(
+                "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=fingerprint:sha-256 {}\r\n",
+                hex.join(":")
+            )
+        }
+
+        fn b64(bytes: &[u8]) -> String {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        }
+
+        /// The viewer's `offer_proof` for `sid` with `nonce`, signed by `key`.
+        fn proof(
+            c: &Ctx,
+            key: &(EcdsaKeyPair, KeyId),
+            sid: &str,
+            nonce: &str,
+        ) -> serde_json::Value {
+            let device_id = lock(&c.agent.config).device_id.clone();
+            let n = crate::viewer_keys::wire::b64url_array::<16>(nonce).expect("nonce");
+            let m = crate::viewer_keys::wire::offer_message(sid, &device_id, &key.1, &n, &FP);
+            let sig = key
+                .0
+                .sign(&aws_lc_rs::rand::SystemRandom::new(), &m)
+                .expect("signed");
+            serde_json::json!({
+                "v": 1,
+                "key_id": key.1.as_str(),
+                "nonce_pc": nonce,
+                "sig": b64(sig.as_ref()),
+            })
+        }
+
+        /// A `session_request` with a fresh nonce of the PC's (or none); the nonce.
+        async fn request(c: &mut Ctx, sid: &str, uid: i64, with_nonce: bool) -> String {
+            let batch = c
+                .agent
+                .admission
+                .new_nonce_batch(c.agent.mono_ms())
+                .expect("a batch");
+            let nonce = batch.nonces[0].clone();
+            let ServerToAgent::SessionRequest {
+                session_id,
+                telegram_user_id,
+                username,
+                turn,
+                quality_profile,
+                ..
+            } = session_request(sid, uid)
+            else {
+                unreachable!()
+            };
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::SessionRequest {
+                        session_id,
+                        telegram_user_id,
+                        username,
+                        turn,
+                        quality_profile,
+                        nonce_pc: with_nonce.then(|| nonce.clone()),
+                    },
+                    &c.tx,
+                )
+                .await;
+            nonce
+        }
+
+        async fn offer_with(
+            c: &mut Ctx,
+            sid: &str,
+            fp: &[u8; 32],
+            proof: Option<serde_json::Value>,
+        ) {
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::Sdp {
+                        session_id: sid.into(),
+                        sdp_type: SdpType::Offer,
+                        sdp: sdp(fp),
+                        proof,
+                    },
+                    &c.tx,
+                )
+                .await;
+        }
+
+        /// Every `session_end` sent so far: `(session, reason, ended_detail)`.
+        fn ends(c: &mut Ctx) -> Vec<(String, String, Option<String>)> {
+            ends_with_mode(c)
+                .into_iter()
+                .map(|(s, r, d, _)| (s, r, d))
+                .collect()
+        }
+
+        /// [`ends`], with each one's `detail.key_mode`.
+        #[allow(clippy::type_complexity)]
+        fn ends_with_mode(c: &mut Ctx) -> Vec<(String, String, Option<String>, Option<String>)> {
+            let mut out = Vec::new();
+            while let Ok(m) = c.rx.try_recv() {
+                if let AgentToServer::SessionEnd {
+                    session_id,
+                    reason,
+                    detail,
+                } = m
+                {
+                    let (ended_detail, key_mode) =
+                        detail.map_or((None, None), |d| (d.base.ended_detail, d.key_mode));
+                    out.push((
+                        session_id,
+                        reason.unwrap_or_default(),
+                        ended_detail,
+                        key_mode,
+                    ));
+                }
+            }
+            out
+        }
+
+        /// §3.4: a `session_request` with no offer past 30 s ends `no_session_request` and stops
+        /// counting against the trust windows; a younger one stays Pending and keeps counting.
+        #[tokio::test]
+        async fn a_pending_request_without_an_offer_ends_after_30_s() {
+            let mut c = ctx(true);
+            request(&mut c, "p1", 1, true).await;
+            ends(&mut c);
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 1, "Pending counts");
+            // Just under the limit: nothing ends.
+            let start = c.agent.pending["p1"].since;
+            c.agent.expire_pending_requests(
+                start + PENDING_OFFER_LIMIT - Duration::from_millis(1),
+                &c.tx,
+            );
+            assert!(ends(&mut c).is_empty());
+            assert!(c.agent.pending.contains_key("p1"));
+            // A second request, younger: past the first one's limit it is still within its own.
+            request(&mut c, "p2", 1, true).await;
+            ends(&mut c);
+            let p2_since = c.agent.pending["p2"].since;
+            c.agent
+                .expire_pending_requests(start + PENDING_OFFER_LIMIT, &c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![("p1".to_string(), "no_session_request".to_string(), None)]
+            );
+            assert!(!c.agent.pending.contains_key("p1"));
+            assert!(c.agent.pending.contains_key("p2"));
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 1, "only p2 counts now");
+            c.agent
+                .expire_pending_requests(p2_since + PENDING_OFFER_LIMIT, &c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![("p2".to_string(), "no_session_request".to_string(), None)]
+            );
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 0, "nothing holds the windows");
+        }
+
+        const KEY_REASONS: [&str; 9] = [
+            "nonce_stale",
+            "key_required",
+            "key_unknown",
+            "key_unconfirmed",
+            "admit_refused",
+            "key_revoked",
+            "proof_invalid",
+            "fingerprint_changed",
+            "key_list_damaged",
+        ];
+
+        /// Make the decided session live (its peer may not come up from a test SDP).
+        fn make_live(c: &mut Ctx, sid: &str) -> FakePeer {
+            c.agent.pending.remove(sid);
+            live_session(&mut c.agent, sid)
+        }
+
+        /// Strict mode: a session signed by the owner's confirmed key is admitted — none of the key
+        /// reasons is sent — with its person and role from the key record, and it is the one session
+        /// that does not count against the trusted devices' window and whose input reaches the trust
+        /// windows (`Pin::owner_key`). The guest's signed session is admitted too, but counts and
+        /// does not reach them.
+        #[tokio::test]
+        async fn strict_admits_a_signed_owner_with_the_records_role() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-owner", 1, true).await;
+            let p = proof(&c, &c.owner, "s-owner", &nonce);
+            offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+            let refused: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert!(refused.is_empty(), "admitted: {refused:?}");
+            let (signed, verdict, id) = c.agent.admission.session("s-owner").expect("known");
+            assert!(signed);
+            assert_eq!(verdict, Verdict::SIGNED);
+            assert!(id.from_record && id.role == afklink_protocol::BindingRole::Owner);
+            assert_eq!(c.agent.keyed["s-owner"].summary.verdict, "signed");
+            assert!(c.agent.keyed["s-owner"]
+                .ks
+                .as_deref()
+                .is_some_and(|k| k.contains("\"signed\"")));
+            let pin = c.agent.admission_pin("s-owner").expect("pinned");
+            assert!(pin.owner_key);
+
+            let nonce = request(&mut c, "s-guest", 2, true).await;
+            let p = proof(&c, &c.guest, "s-guest", &nonce);
+            offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+            let pin = c.agent.admission_pin("s-guest").expect("pinned");
+            assert!(
+                !pin.owner_key,
+                "a guest's key does not reach the trust windows"
+            );
+            assert_eq!(pin.role, crate::game_access::ViewerRole::Guest);
+
+            let _owner = make_live(&mut c, "s-owner");
+            let _guest = make_live(&mut c, "s-guest");
+            assert_eq!(
+                c.agent.trust_window_live(),
+                1,
+                "only the guest's session counts"
+            );
+        }
+
+        /// Strict mode refuses an offer without a proof after a nonce: `key_required:no_proof`, and
+        /// the request is gone; an owner as the server says is no exception.
+        #[tokio::test]
+        async fn strict_refuses_an_offer_without_a_proof() {
+            let mut c = ctx(true);
+            request(&mut c, "s1", 1, true).await;
+            offer_with(&mut c, "s1", &FP, None).await;
+            assert_eq!(
+                ends(&mut c),
+                vec![("s1".into(), "key_required".into(), Some("no_proof".into()))]
+            );
+            assert!(!c.agent.pending.contains_key("s1"));
+            assert!(c.agent.admission.session("s1").is_none());
+        }
+
+        /// Strict mode: a forged signature (the guest's key over the owner's key id) and a nonce the
+        /// PC never issued are refused before anything else happens.
+        #[tokio::test]
+        async fn strict_refuses_a_forged_proof_and_a_foreign_nonce() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s1", 1, true).await;
+            let mut p = proof(&c, &c.guest, "s1", &nonce);
+            p["key_id"] = c.owner.1.as_str().into();
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            let e = ends(&mut c);
+            assert_eq!(e.len(), 1);
+            assert_eq!(e[0].1, "proof_invalid", "{e:?}");
+
+            request(&mut c, "s2", 1, true).await;
+            let foreign = b64(&[7u8; 16]);
+            let p = proof(&c, &c.owner, "s2", &foreign);
+            offer_with(&mut c, "s2", &FP, Some(p)).await;
+            let e = ends(&mut c);
+            assert_eq!(
+                e,
+                vec![(
+                    "s2".into(),
+                    "nonce_stale".into(),
+                    Some("nonce_unknown".into())
+                )]
+            );
+        }
+
+        /// Observe mode admits an unsigned offer by the binding, as before keys, with its verdict
+        /// (`unsigned`, spec §11.1) for the summary and no `ks` (nothing signed).
+        #[tokio::test]
+        async fn observe_admits_by_the_binding_with_the_verdict() {
+            let mut c = ctx(false);
+            request(&mut c, "s1", 2, true).await;
+            offer_with(&mut c, "s1", &FP, None).await;
+            let refused: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert!(refused.is_empty(), "admitted: {refused:?}");
+            let k = &c.agent.keyed["s1"];
+            assert_eq!(k.summary.verdict, "unsigned");
+            assert_eq!(k.summary.detail, None);
+            assert_eq!(
+                k.summary.mode,
+                afklink_protocol::viewer_keys::KeyMode::Observe
+            );
+            assert!(k.ks.is_none());
+            assert!(
+                c.agent.admission_pin("s1").is_none(),
+                "the server's role, unpinned"
+            );
+        }
+
+        /// A re-offer with another DTLS fingerprint ends the live session `fingerprint_changed`
+        /// (spec §3.5), even a signed one; the same fingerprint goes to the peer.
+        #[tokio::test]
+        async fn a_reoffer_with_another_fingerprint_ends_the_session() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s1", 1, true).await;
+            let p = proof(&c, &c.owner, "s1", &nonce);
+            offer_with(&mut c, "s1", &FP, Some(p.clone())).await;
+            ends(&mut c);
+            let mut peer = make_live(&mut c, "s1");
+            offer_with(&mut c, "s1", &FP, Some(p.clone())).await;
+            assert!(
+                matches!(peer.signals.try_recv(), Ok(PeerSignal::Renegotiate(_))),
+                "the same fingerprint renegotiates"
+            );
+            offer_with(&mut c, "s1", &OTHER_FP, Some(p)).await;
+            let e = ends(&mut c);
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert_eq!(e[0].1, "fingerprint_changed");
+            assert!(!c.agent.sessions.contains_key("s1"));
+        }
+
+        /// Turning strict mode on ends the live unsigned sessions (`key_required:no_proof`); the
+        /// owner's signed one carries on.
+        #[tokio::test]
+        async fn strict_on_ends_the_unsigned_sessions() {
+            let mut c = ctx(false);
+            request(&mut c, "s-unsigned", 1, true).await;
+            offer_with(&mut c, "s-unsigned", &FP, None).await;
+            let nonce = request(&mut c, "s-signed", 1, true).await;
+            let p = proof(&c, &c.owner, "s-signed", &nonce);
+            offer_with(&mut c, "s-signed", &FP, Some(p)).await;
+            let _a = make_live(&mut c, "s-unsigned");
+            let _b = make_live(&mut c, "s-signed");
+            ends(&mut c);
+            // The touches of the signed offer written first: one change at a time.
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.sweep_keys(&c.tx);
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("store")
+                .set_trusted_devices_mode(true)
+                .expect("strict");
+            c.agent.sweep_keys(&c.tx);
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(
+                e,
+                vec![(
+                    "s-unsigned".into(),
+                    "key_required".into(),
+                    Some("no_proof".into())
+                )]
+            );
+            assert!(c.agent.sessions.contains_key("s-signed"));
+        }
+
+        /// `key_mode` (spec §12): after `device_name` on a nonce-pool connection, again at every
+        /// switch, never on a connection without the pool — not at the connect, not at a switch;
+        /// a new connection is told afresh.
+        #[tokio::test]
+        async fn key_mode_follows_the_connection_and_every_switch() {
+            fn sent(c: &mut Ctx) -> Vec<String> {
+                let mut out = Vec::new();
+                while let Ok(m) = c.rx.try_recv() {
+                    match m {
+                        AgentToServer::DeviceName { .. } => out.push("name".into()),
+                        AgentToServer::KeyMode { mode } => out.push(mode.as_str().into()),
+                        _ => {}
+                    }
+                }
+                out
+            }
+            fn set_strict(c: &mut Ctx, on: bool) {
+                c.agent
+                    .trusted
+                    .store_mut()
+                    .expect("store")
+                    .set_trusted_devices_mode(on)
+                    .expect("switched");
+            }
+            let mut c = ctx(false);
+            // No pool: an older server would answer bad_message — no `key_mode` at all.
+            c.agent.announce_after_connect(1, &c.tx);
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(sent(&mut c), ["name"], "no pool: the name only");
+            set_strict(&mut c, true);
+            c.agent.sweep_keys(&c.tx);
+            set_strict(&mut c, false);
+            c.agent.sweep_keys(&c.tx);
+            assert!(
+                sent(&mut c).is_empty(),
+                "no pool: no key_mode at a switch either"
+            );
+            // A pool (as `agent_ready` says, before the announce): the name, then the mode.
+            c.agent.nonce_pool = true;
+            c.agent.announce_after_connect(2, &c.tx);
+            assert_eq!(sent(&mut c), ["name", "observe"]);
+            c.agent.sweep_keys(&c.tx);
+            assert!(sent(&mut c).is_empty(), "no switch, nothing sent");
+            set_strict(&mut c, true);
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(sent(&mut c), ["strict"], "a second key_mode at the switch");
+            c.agent.sweep_keys(&c.tx);
+            assert!(sent(&mut c).is_empty());
+            // A new connection: the server reset its mode at agent_ready; told again.
+            c.agent.key_mode_sent = None;
+            c.agent.announce_after_connect(3, &c.tx);
+            assert_eq!(sent(&mut c), ["name", "strict"]);
+        }
+
+        /// `grant_token` (§7 «Токен выдачи»): only on a connection whose `agent_ready` said
+        /// `grant_token`, after `key_mode`, and always the file's token (`""` on a PC that removed
+        /// nobody). A removal replaces it in memory and nothing goes until that write lands; then
+        /// the written one, once (no repeat without a change). A new connection is told afresh.
+        /// A damaged list sends none; the restore's write sends the new one it wrote.
+        #[tokio::test]
+        async fn grant_token_follows_the_connection_and_every_write_that_replaced_it() {
+            use crate::viewer_keys::GrantToken;
+            fn sent(c: &mut Ctx) -> Vec<String> {
+                let mut out = Vec::new();
+                while let Ok(m) = c.rx.try_recv() {
+                    match m {
+                        AgentToServer::KeyMode { .. } => out.push("key_mode".into()),
+                        AgentToServer::GrantToken { token } => {
+                            out.push(format!("token {}", token.0));
+                        }
+                        _ => {}
+                    }
+                }
+                out
+            }
+            let on_disk = |c: &Ctx| {
+                TrustStore::open_in(&c.dir)
+                    .grant_token()
+                    .map(GrantToken::to_wire)
+            };
+            let mut c = ctx(false);
+            c.agent.nonce_pool = true;
+            // An older server: no grant_token at all.
+            c.agent.announce_after_connect(1, &c.tx);
+            assert_eq!(sent(&mut c), ["key_mode"]);
+            // `agent_ready` said grant_token: after key_mode, the file's `""`.
+            c.agent.key_mode_sent = None;
+            c.agent.grant_token_on = true;
+            c.agent.announce_after_connect(2, &c.tx);
+            assert_eq!(sent(&mut c), ["key_mode", "token "]);
+            // The server removes guest 2: a new token in memory, none sent until it is written.
+            // Its value is in no log line, from the rotation through the send.
+            let logs = LogCapture::start();
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            let memory = c.agent.trusted.store().expect("store").grant_token();
+            assert!(memory.is_some_and(|t| !t.is_empty()), "replaced in memory");
+            assert!(
+                !sent(&mut c).iter().any(|f| f.starts_with("token")),
+                "not before its write"
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let written = on_disk(&c).expect("a list");
+            assert_eq!(Some(written.clone()), memory.map(GrantToken::to_wire));
+            let frames = sent(&mut c);
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|f| f.starts_with("token"))
+                    .collect::<Vec<_>>(),
+                [&format!("token {written}")],
+                "the written one, once"
+            );
+            let said = logs.text();
+            drop(logs);
+            assert!(said.contains("grant_token sent"), "{said}");
+            assert!(
+                said.contains("the grant token replaced"),
+                "the rotation: {said}"
+            );
+            assert!(!said.contains(&written), "{said}");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.sweep_keys(&c.tx);
+            assert!(sent(&mut c).is_empty(), "no change, nothing sent");
+            // A new connection: told afresh.
+            c.agent.key_mode_sent = None;
+            c.agent.grant_token_sent = None;
+            c.agent.announce_after_connect(3, &c.tx);
+            assert_eq!(
+                sent(&mut c),
+                ["key_mode".to_string(), format!("token {written}")]
+            );
+            // Damaged: none, on this connection or the next.
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("garbage");
+            let (now, _rx) = ask_now(
+                &mut c,
+                crate::trusted::TrustedAsk::Repair(crate::trusted::RepairAction::Reopen),
+            )
+            .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(!matches!(now, Some(Err(_))), "{now:?}");
+            assert!(c.agent.trusted.store().expect("store").is_damaged());
+            c.agent.key_mode_sent = None;
+            c.agent.grant_token_sent = None;
+            c.agent.announce_after_connect(4, &c.tx);
+            assert!(
+                !sent(&mut c).iter().any(|f| f.starts_with("token")),
+                "a damaged list sends none"
+            );
+            // The restore writes a new token: that one goes.
+            let token = c.agent.trusted.window_token();
+            let (_, mut restored) = ask_now(
+                &mut c,
+                crate::trusted::TrustedAsk::Repair(crate::trusted::RepairAction::Restore { token }),
+            )
+            .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(
+                matches!(restored.try_recv(), Ok(Ok(_))),
+                "restored from the backup"
+            );
+            let after = on_disk(&c).expect("a list");
+            assert!(
+                after != written && !after.is_empty(),
+                "a new token in the restore's write"
+            );
+            assert_eq!(
+                sent(&mut c)
+                    .iter()
+                    .filter(|f| f.starts_with("token"))
+                    .collect::<Vec<_>>(),
+                [&format!("token {after}")]
+            );
+        }
+
+        /// `key_mode` on the wire, through the real signaling client: on a connection whose
+        /// `agent_ready` says `nonce_pool`, the agent's frames after the handshake open with
+        /// `device_name` then `key_mode` (observe); the window turning «Доверенные устройства» on
+        /// sends a second `key_mode` (strict) on the same connection.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn key_mode_on_the_wire_follows_agent_ready_and_device_name() {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::tungstenite::Message;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let url = format!("ws://{}/ws/agent", listener.local_addr().expect("addr"));
+            let dir = std::env::temp_dir()
+                .join(format!("afklink-agent-key-mode-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("scratch");
+            // The owner's own confirmed device: strict mode goes on only over one (§10.2).
+            let mut store = TrustStore::open_in(&dir);
+            {
+                use crate::viewer_keys::{ClientKind, Ground, NewKey, Person, Platform, ViewerKey};
+                use aws_lc_rs::signature::{
+                    EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING,
+                };
+                const PREFIX: [u8; 26] = [
+                    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+                ];
+                let pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).expect("key");
+                let mut spki = PREFIX.to_vec();
+                spki.extend_from_slice(pair.public_key().as_ref());
+                store
+                    .add(
+                        NewKey {
+                            key: ViewerKey::from_spki(&spki).expect("spki"),
+                            rpk: None,
+                            kind: ClientKind::parse("telegram").expect("kind"),
+                            platform: Platform::parse("android").expect("platform"),
+                        },
+                        Ground::Pair {
+                            person: Person {
+                                telegram_user_id: 1,
+                                first_name: None,
+                                username: None,
+                            },
+                            role: afklink_protocol::BindingRole::Owner,
+                            unconfirmed: false,
+                        },
+                        1_731_400_000_000,
+                    )
+                    .expect("added");
+            }
+            let (agent, control) = test_agent(Some(url));
+            let mut agent = agent.with_trust_store(store);
+            agent.trusted.set_write_limit(TEST_WRITE_LIMIT);
+            let running = tokio::spawn(agent.run());
+            let (tcp, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                .await
+                .expect("the agent connects in time")
+                .expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(tcp)
+                .await
+                .expect("ws accept");
+            assert_eq!(next_frame(&mut ws).await["type"], "agent_hello");
+            ws.send(Message::text(CHALLENGE_FRAME))
+                .await
+                .expect("challenge");
+            assert_eq!(next_frame(&mut ws).await["type"], "agent_auth");
+            ws.send(Message::text(format!(
+                r#"{{"type":"agent_ready","protocol_version":{v},"min_supported_protocol":{v},"bindings":[],"nonce_pool":true}}"#,
+                v = afklink_protocol::PROTOCOL_VERSION
+            )))
+            .await
+            .expect("agent_ready");
+            assert_eq!(next_frame(&mut ws).await["type"], "device_name");
+            let first = next_frame(&mut ws).await;
+            assert_eq!(
+                (first["type"].as_str(), first["mode"].as_str()),
+                (Some("key_mode"), Some("observe")),
+                "{first}"
+            );
+            let token = control.trusted_view().token;
+            assert_eq!(
+                control
+                    .ask_trusted(crate::trusted::TrustedAsk::SetMode {
+                        on: true,
+                        token: Some(token),
+                    })
+                    .await,
+                Ok(0),
+                "strict on"
+            );
+            // Other frames may go meanwhile (a nonce batch); the next `key_mode` is the switch's.
+            let second = loop {
+                let f = next_frame(&mut ws).await;
+                if f["type"] == "key_mode" {
+                    break f;
+                }
+            };
+            assert_eq!(second["mode"], "strict", "{second}");
+            drop(control);
+            close_and_drain(ws).await;
+            tokio::time::timeout(Duration::from_secs(10), running)
+                .await
+                .expect("the agent stops")
+                .expect("no panic")
+                .expect("clean");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// The window's ask through the orchestrator's command; its answer when it came at once.
+        async fn ask_now(
+            c: &mut Ctx,
+            ask: crate::trusted::TrustedAsk,
+        ) -> (
+            Option<crate::trusted::TrustedReply>,
+            tokio::sync::oneshot::Receiver<crate::trusted::TrustedReply>,
+        ) {
+            let (reply, mut answer) = tokio::sync::oneshot::channel();
+            c.agent
+                .handle_command(
+                    AgentCommand::Trusted(crate::trusted::TrustedRequest { ask, reply }),
+                    &c.tx,
+                )
+                .await;
+            (answer.try_recv().ok(), answer)
+        }
+
+        /// F4 (window races through the product path, not the harness's `quiet`): while a new
+        /// device's key waits for its write, the offer's own request counts against the window,
+        /// so every trust command of the window — «Разрешить» on an attempt, «Удалить»,
+        /// «Удалить человека», «Подтвердить», the switch — is refused `session` and changes
+        /// nothing; the endorse lands as decided and admits. Once the session is gone the same
+        /// «Разрешить» goes through. Mirrors the harness's `key_changed_during_the_endorse_check`,
+        /// `key_allowed_for_a_marked_person_during_the_endorse_check`,
+        /// `signer_deleted_while_the_endorse_signature_is_checked` and
+        /// `unconfirmed_key_lands_and_strict_switches_during_the_endorse_check`, whose nested
+        /// window steps the harness lets in only because `quiet` keeps the offer from counting:
+        /// the product never reaches those states from the window.
+        #[tokio::test]
+        async fn window_changes_while_an_offers_key_is_written_are_refused_session() {
+            use crate::trusted::{TrustedAsk, TrustedError};
+            use crate::viewer_keys::Lookup;
+            let mut c = ctx(true);
+            // Another device of the guest's tried (key_unknown): an attempt for «Разрешить».
+            let (pair, kid_x, spki) = new_key();
+            let nonce = request(&mut c, "s0", 2, true).await;
+            let card = key_card(&pair, &kid_x, &spki);
+            let mut p = proof(&c, &(pair, kid_x.clone()), "s0", &nonce);
+            p["key_reg"] = card;
+            offer_with(&mut c, "s0", &FP, Some(p)).await;
+            assert_eq!(ends(&mut c)[0].1, "key_unknown");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(c.agent.trusted.attempts_of(2).len(), 1);
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 0, "clean before the offer");
+            // The owner's new device on his endorse: its key's write waits; its request counts.
+            let nonce = request(&mut c, "s-new", 1, true).await;
+            let (_p, kid_new) = endorsed_offer(&mut c, "s-new", &nonce).await;
+            assert!(c.agent.offers_waiting.contains_key("s-new"));
+            c.agent.reconcile_admission();
+            assert_eq!(
+                c.agent.trust_window_live(),
+                1,
+                "the offer's own request counts"
+            );
+            let token = c.agent.trusted.window_token();
+            for ask in [
+                TrustedAsk::AttemptAllow {
+                    telegram_user_id: 2,
+                    key_id: kid_x.clone(),
+                    token,
+                    second_step: true,
+                    role: afklink_protocol::BindingRole::Guest,
+                },
+                TrustedAsk::Remove {
+                    key_id: c.owner.1.clone(),
+                },
+                TrustedAsk::RemovePerson {
+                    telegram_user_id: 2,
+                },
+                TrustedAsk::Confirm {
+                    key_id: c.guest.1.clone(),
+                    token,
+                },
+                TrustedAsk::SetMode {
+                    on: false,
+                    token: None,
+                },
+            ] {
+                let (now, _) = ask_now(&mut c, ask.clone()).await;
+                assert_eq!(now, Some(Err(TrustedError::Session)), "{ask:?}");
+            }
+            // Nothing changed: the signer, the guest, the attempt, the switch.
+            let store = c.agent.trusted.store().expect("store");
+            assert!(matches!(store.lookup(&c.owner.1), Lookup::Active(_)));
+            assert!(matches!(store.lookup(&c.guest.1), Lookup::Active(_)));
+            assert!(matches!(store.lookup(&kid_x), Lookup::Unknown));
+            assert!(store.switches().expect("healthy").trusted_devices_mode);
+            assert_eq!(c.agent.trusted.attempts_of(2).len(), 1);
+            // The endorse lands as it was decided: the owner's new device is admitted.
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(c.agent.admitted_ready.contains(&"s-new".to_string()));
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&kid_new),
+                Lookup::Active(_)
+            ));
+            // The session gone, the window is clean again: «Разрешить» goes through.
+            c.agent.admitted_ready.clear();
+            c.agent.offers_waiting.remove("s-new");
+            c.agent.end_session("s-new", true, "viewer_ended", &c.tx);
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 0);
+            let token = c.agent.trusted.window_token();
+            let (_, mut answer) = ask_now(
+                &mut c,
+                TrustedAsk::AttemptAllow {
+                    telegram_user_id: 2,
+                    key_id: kid_x.clone(),
+                    token,
+                    second_step: true,
+                    role: afklink_protocol::BindingRole::Guest,
+                },
+            )
+            .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(matches!(answer.try_recv(), Ok(Ok(_))), "allowed once clean");
+            match c.agent.trusted.store().expect("store").lookup(&kid_x) {
+                Lookup::Active(r) => assert_eq!(r.person.telegram_user_id, 2),
+                other => panic!("the allowed key is not active: {other:?}"),
+            }
+        }
+
+        /// F4 (window races through the product path): a change that reaches the list through
+        /// the queue itself — the server's `binding_removed` of a guest, not the window's, so no
+        /// `session` gate — while the guest's new device on his own endorse waits for its key's
+        /// write: the key leaves at its install with the guest's key it descends from
+        /// (`key_revoked`), both `server`. Mirrors the harness's `removal_while_the_offer_signature_is_checked`
+        /// (`binding_removed` nested) and `key_changed_during_the_endorse_check` (the key
+        /// changed during the endorse's check), here at the product's one real wait.
+        #[tokio::test]
+        async fn a_server_removal_during_an_endorses_write_refuses_the_new_key() {
+            use crate::viewer_keys::Lookup;
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-g", 2, true).await;
+            let (_p, kid_new) = endorsed_offer_by(&mut c, "s-g", &nonce, true).await;
+            assert!(
+                c.agent.offers_waiting.contains_key("s-g"),
+                "{:?}",
+                ends(&mut c)
+            );
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(s, _, _)| s == "s-g")
+                .collect();
+            assert_eq!(
+                e,
+                vec![("s-g".to_string(), "key_revoked".to_string(), None)]
+            );
+            assert!(!c.agent.admitted_ready.contains(&"s-g".to_string()));
+            let store = c.agent.trusted.store().expect("store");
+            for k in [&kid_new, &c.guest.1] {
+                match store.lookup(k) {
+                    Lookup::Removed(t) => assert_eq!(t.origin.as_str(), "server", "{k:?}"),
+                    other => panic!("{k:?} not removed: {other:?}"),
+                }
+            }
+            assert!(!store.notes_unsaved());
+            assert!(matches!(store.lookup(&c.owner.1), Lookup::Active(_)));
+        }
+
+        /// Turning strict mode on ends a Pending request too (§10, after
+        /// the live sessions): it leaves `pending`, the server hears `key_required:no_proof`, and
+        /// it stops holding the trust windows.
+        #[tokio::test]
+        async fn strict_on_ends_a_pending_request_and_frees_the_windows() {
+            let mut c = ctx(false);
+            request(&mut c, "s-unsigned", 1, true).await;
+            offer_with(&mut c, "s-unsigned", &FP, None).await;
+            let _a = make_live(&mut c, "s-unsigned");
+            request(&mut c, "p1", 2, true).await;
+            ends(&mut c);
+            c.agent.reconcile_admission();
+            assert!(c.agent.pending.contains_key("p1"));
+            assert_eq!(
+                c.agent.trust_window_live(),
+                2,
+                "the session and the request"
+            );
+            c.agent.sweep_keys(&c.tx);
+            assert!(ends(&mut c).is_empty(), "no switch yet");
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("store")
+                .set_trusted_devices_mode(true)
+                .expect("strict");
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![
+                    (
+                        "s-unsigned".into(),
+                        "key_required".into(),
+                        Some("no_proof".into())
+                    ),
+                    ("p1".into(), "key_required".into(), Some("no_proof".into())),
+                ]
+            );
+            assert!(!c.agent.pending.contains_key("p1"));
+            assert!(c.agent.admission.session("p1").is_none());
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 0, "nothing holds the windows");
+        }
+
+        /// The mode a strict PC's list starts in is not a switch — the first
+        /// sweep (here a key's write landing) ends no Pending request and no signed session.
+        #[tokio::test]
+        async fn the_first_sweep_on_a_strict_pc_is_not_a_switch() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-owner", 1, true).await;
+            let p = proof(&c, &c.owner, "s-owner", &nonce);
+            offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+            let _o = make_live(&mut c, "s-owner");
+            request(&mut c, "p1", 2, true).await;
+            ends(&mut c);
+            c.agent.sweep_keys(&c.tx);
+            assert!(ends(&mut c).is_empty(), "nothing ends at the first sweep");
+            assert!(c.agent.pending.contains_key("p1"), "still Pending");
+            assert!(c.agent.sessions.contains_key("s-owner"));
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 1, "p1 still counts");
+            // An observe PC switched on after its start is a switch (the owner's touch written
+            // first: one change at a time).
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(ends(&mut c).is_empty());
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("store")
+                .set_trusted_devices_mode(false)
+                .expect("observe");
+            c.agent.sweep_keys(&c.tx);
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("store")
+                .set_trusted_devices_mode(true)
+                .expect("strict");
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![("p1".into(), "key_required".into(), Some("no_proof".into()))]
+            );
+        }
+
+        /// A request kept across a break is dropped after 30 s offline too
+        /// (the pairing tick of the offline wait), its end held in the outbox; the windows free.
+        #[tokio::test]
+        async fn a_pending_request_ends_after_30_s_while_offline() {
+            let mut c = ctx(true);
+            request(&mut c, "p1", 1, true).await;
+            ends(&mut c);
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 1);
+            c.agent.pending.get_mut("p1").expect("pending").since = Instant::now()
+                .checked_sub(PENDING_OFFER_LIMIT + Duration::from_secs(1))
+                .expect("a clock this old");
+            let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+            let (_sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+            let outbox = c.tx.clone();
+            let end = tokio::time::timeout(
+                Duration::from_secs(5),
+                c.agent.wait_offline(
+                    crate::reconnect::Wait::Backoff(Duration::from_millis(200)),
+                    &mut cmd_rx,
+                    &mut sig_rx,
+                    &outbox,
+                ),
+            )
+            .await
+            .expect("the wait ends");
+            assert!(matches!(end, WaitEnd::Elapsed));
+            assert_eq!(
+                ends(&mut c),
+                vec![("p1".to_string(), "no_session_request".to_string(), None)]
+            );
+            assert!(!c.agent.pending.contains_key("p1"));
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 0, "nothing holds the windows");
+        }
+
+        /// Past 30 s a request whose offer came stays — one admitted (its peer
+        /// on its way: `admission.offered`) and one whose offer waits for its key's write
+        /// (`offers_waiting`); the bare request beside them ends. Each guard alone keeps its own.
+        #[tokio::test]
+        async fn thirty_seconds_keep_a_request_whose_offer_came() {
+            let mut c = ctx(true);
+            // Admitted, held as a request while its peer is made (`hold_peers`).
+            let nonce = request(&mut c, "p-offered", 1, true).await;
+            let p = proof(&c, &c.owner, "p-offered", &nonce);
+            offer_with(&mut c, "p-offered", &FP, Some(p)).await;
+            assert!(c.agent.pending.contains_key("p-offered"));
+            assert!(c.agent.admission.offered("p-offered"));
+            assert!(!c.agent.offers_waiting.contains_key("p-offered"));
+            // Its offer waiting for a write, which the admission does not know as offered here:
+            // only `offers_waiting` keeps it.
+            request(&mut c, "p-waiting", 1, true).await;
+            c.agent.offers_waiting.insert("p-waiting".into(), sdp(&FP));
+            assert!(!c.agent.admission.offered("p-waiting"));
+            request(&mut c, "p-bare", 1, true).await;
+            ends(&mut c);
+            let late = Instant::now() + PENDING_OFFER_LIMIT + Duration::from_secs(1);
+            c.agent.expire_pending_requests(late, &c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![("p-bare".to_string(), "no_session_request".to_string(), None)]
+            );
+            assert!(c.agent.pending.contains_key("p-offered"));
+            assert!(c.agent.pending.contains_key("p-waiting"));
+            c.agent.offers_waiting.remove("p-waiting");
+        }
+
+        /// A key removed from the list ends the session it signed (`key_revoked`), and only that one.
+        #[tokio::test]
+        async fn a_removed_key_ends_its_session() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-guest", 2, true).await;
+            let p = proof(&c, &c.guest, "s-guest", &nonce);
+            offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+            let nonce = request(&mut c, "s-owner", 1, true).await;
+            let p = proof(&c, &c.owner, "s-owner", &nonce);
+            offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+            let _g = make_live(&mut c, "s-guest");
+            let _o = make_live(&mut c, "s-owner");
+            ends(&mut c);
+            let live = c.agent.trust_window_live();
+            c.agent.trusted.untrust_guest(2, live);
+            c.agent.sweep_keys(&c.tx);
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(e, vec![("s-guest".into(), "key_revoked".into(), None)]);
+            assert!(c.agent.sessions.contains_key("s-owner"));
+        }
+
+        /// With the mode off too, «Удалить из доверенных» in the window ends the live session its
+        /// key signed at once (`key_revoked`): the dialog's «Сеанс с него прервётся сразу» holds
+        /// in both modes. Only an owner's confirmed key's session can be live
+        /// while the window takes a command, so it is the owner's own device here.
+        #[tokio::test]
+        async fn a_window_removal_ends_its_session_with_the_mode_off_too() {
+            for strict in [false, true] {
+                let mut c = ctx(strict);
+                let nonce = request(&mut c, "s-owner", 1, true).await;
+                let p = proof(&c, &c.owner, "s-owner", &nonce);
+                offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+                let _o = make_live(&mut c, "s-owner");
+                settle_trusted(&mut c.agent, &c.tx).await;
+                c.agent.reconcile_admission();
+                assert_eq!(c.agent.trust_window_live(), 0, "strict {strict}");
+                c.agent.trusted.sync_live(0);
+                ends(&mut c);
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                c.agent
+                    .handle_command(
+                        AgentCommand::Trusted(crate::trusted::TrustedRequest {
+                            ask: crate::trusted::TrustedAsk::Remove {
+                                key_id: c.owner.1.clone(),
+                            },
+                            reply: reply_tx,
+                        }),
+                        &c.tx,
+                    )
+                    .await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                c.agent.sweep_keys(&c.tx);
+                assert!(
+                    matches!(reply_rx.await.ok(), Some(Ok(n)) if n >= 1),
+                    "strict {strict}"
+                );
+                let e: Vec<_> = ends_with_mode(&mut c)
+                    .into_iter()
+                    .filter(|(_, r, _, _)| KEY_REASONS.contains(&r.as_str()))
+                    .collect();
+                // The server's copy of the mode learns it from the end: observe ends too.
+                let mode = if strict { "strict" } else { "observe" };
+                assert_eq!(
+                    e,
+                    vec![(
+                        "s-owner".into(),
+                        "key_revoked".into(),
+                        None,
+                        Some(mode.into())
+                    )],
+                    "strict {strict}"
+                );
+                assert!(!c.agent.sessions.contains_key("s-owner"), "strict {strict}");
+            }
+        }
+
+        /// `session_end.detail.key_mode` (spec §11, §12): a strict refusal says strict, and an
+        /// observe PC's ends of device keys say observe — a live session's `fingerprint_changed`, and
+        /// `nonce_stale:no_nonce`, whose decision is made before the list is read.
+        #[tokio::test]
+        async fn an_end_of_device_keys_says_the_pcs_mode() {
+            let mut c = ctx(true);
+            request(&mut c, "s1", 1, true).await;
+            offer_with(&mut c, "s1", &FP, None).await;
+            assert_eq!(
+                ends_with_mode(&mut c),
+                vec![(
+                    "s1".into(),
+                    "key_required".into(),
+                    Some("no_proof".into()),
+                    Some("strict".into())
+                )]
+            );
+
+            let mut c = ctx(false);
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            ends(&mut c);
+            let _peer = make_live(&mut c, "s-guest");
+            offer_with(&mut c, "s-guest", &OTHER_FP, None).await;
+            let e: Vec<_> = ends_with_mode(&mut c)
+                .into_iter()
+                .filter(|(_, r, _, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert_eq!(e[0].1, "fingerprint_changed");
+            assert_eq!(e[0].3.as_deref(), Some("observe"));
+
+            // An offer the admission holds no request for: refused before the list is read, in
+            // either mode — the mode still is the PC's.
+            request(&mut c, "s-lost", 2, true).await;
+            c.agent
+                .admission
+                .session_ended(&mut c.agent.trusted, "s-lost");
+            ends(&mut c);
+            offer_with(&mut c, "s-lost", &FP, None).await;
+            assert_eq!(
+                ends_with_mode(&mut c),
+                vec![(
+                    "s-lost".into(),
+                    "nonce_stale".into(),
+                    Some("no_nonce".into()),
+                    Some("observe".into())
+                )]
+            );
+        }
+
+        /// The mode is the list's at the moment of the end, whatever verdict ended it: an observe
+        /// PC refusing a person it does not see as bound with their key's verdict (spec §11) says
+        /// observe. Through the wire such a person's request ends `unbound` first, so the refusal
+        /// is driven here directly.
+        #[tokio::test]
+        async fn an_unbound_persons_key_verdict_says_observe() {
+            let mut c = ctx(false);
+            c.agent
+                .refuse_offer("s-stranger".into(), Verdict::KEY_REVOKED, &c.tx);
+            assert_eq!(
+                ends_with_mode(&mut c),
+                vec![(
+                    "s-stranger".into(),
+                    "key_revoked".into(),
+                    None,
+                    Some("observe".into())
+                )]
+            );
+        }
+
+        /// A damaged list: the mode is its mode file's — observe when it says observe, strict when
+        /// it says strict or nothing (the store's fail-closed rule).
+        #[tokio::test]
+        async fn a_damaged_lists_end_says_its_mode_files_mode() {
+            // Observe: a bound person is let in by the binding; a live session's
+            // `fingerprint_changed` is the end of device keys there.
+            let mut c = ctx(false);
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("damaged");
+            let store = c.agent.trusted.store_mut().expect("store");
+            let _ = store.reopen();
+            assert_eq!(store.damaged_mode(), Some(false));
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            ends(&mut c);
+            let _peer = make_live(&mut c, "s-guest");
+            offer_with(&mut c, "s-guest", &OTHER_FP, None).await;
+            let e: Vec<_> = ends_with_mode(&mut c)
+                .into_iter()
+                .filter(|(_, r, _, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert_eq!(e[0].1, "fingerprint_changed");
+            assert_eq!(e[0].3.as_deref(), Some("observe"));
+
+            for (says, lose_mode_file) in [("strict", false), ("nothing", true)] {
+                let mut c = ctx(true);
+                std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage")
+                    .expect("damaged");
+                if lose_mode_file {
+                    std::fs::remove_file(c.dir.join(crate::viewer_keys::MODE_FILE_NAME))
+                        .expect("the mode file removed");
+                }
+                let store = c.agent.trusted.store_mut().expect("store");
+                let _ = store.reopen();
+                assert!(store.is_damaged(), "{says}");
+                assert_eq!(
+                    store.damaged_mode(),
+                    (!lose_mode_file).then_some(true),
+                    "{says}"
+                );
+                request(&mut c, "s1", 1, true).await;
+                offer_with(&mut c, "s1", &FP, None).await;
+                let e: Vec<_> = ends_with_mode(&mut c)
+                    .into_iter()
+                    .filter(|(_, r, _, _)| KEY_REASONS.contains(&r.as_str()))
+                    .collect();
+                assert_eq!(e.len(), 1, "{says}: {e:?}");
+                assert_eq!(e[0].1, "key_list_damaged", "{says}");
+                assert_eq!(
+                    e[0].3.as_deref(),
+                    Some("strict"),
+                    "the mode file says {says}"
+                );
+            }
+        }
+
+        /// Only an end of device keys carries the mode: an `unbound` refusal and the agent's own
+        /// end of a live session say nothing of it.
+        #[tokio::test]
+        async fn an_end_outside_device_keys_carries_no_mode() {
+            let mut c = ctx(false);
+            request(&mut c, "s-stranger", 77, true).await;
+            assert_eq!(
+                ends_with_mode(&mut c),
+                vec![("s-stranger".into(), "unbound".into(), None, None)]
+            );
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            ends(&mut c);
+            let _peer = make_live(&mut c, "s-guest");
+            c.agent
+                .end_session_with("s-guest", true, end_reason::AGENT_ENDED, None, &c.tx);
+            let e = ends_with_mode(&mut c);
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert_eq!(e[0].1, end_reason::AGENT_ENDED);
+            assert_eq!(e[0].3, None, "{e:?}");
+        }
+
+        /// The window's trust commands are refused (`session`) while an unsigned session is live,
+        /// and taken once only a session signed by the owner's confirmed key is.
+        #[tokio::test]
+        async fn trust_commands_wait_for_unsigned_sessions_only() {
+            let mut c = ctx(false);
+            request(&mut c, "s-unsigned", 1, true).await;
+            offer_with(&mut c, "s-unsigned", &FP, None).await;
+            let _u = make_live(&mut c, "s-unsigned");
+            c.agent.reconcile_admission();
+            assert_eq!(c.agent.trust_window_live(), 1);
+            c.agent.trusted.sync_live(c.agent.trust_window_live());
+            let token = c.agent.trusted.window_token();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            c.agent
+                .handle_command(
+                    AgentCommand::Trusted(crate::trusted::TrustedRequest {
+                        ask: crate::trusted::TrustedAsk::SetMode {
+                            on: true,
+                            token: Some(token),
+                        },
+                        reply: reply_tx,
+                    }),
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(
+                reply_rx.await.ok(),
+                Some(Err(crate::trusted::TrustedError::Session))
+            );
+            c.agent
+                .end_session("s-unsigned", true, "viewer_ended", &c.tx);
+            c.agent.reconcile_admission();
+            let nonce = request(&mut c, "s-signed", 1, true).await;
+            let p = proof(&c, &c.owner, "s-signed", &nonce);
+            offer_with(&mut c, "s-signed", &FP, Some(p)).await;
+            let _s = make_live(&mut c, "s-signed");
+            c.agent.reconcile_admission();
+            assert_eq!(
+                c.agent.trust_window_live(),
+                0,
+                "the owner's signed session is exempt"
+            );
+        }
+
+        /// A new device vouched for by the owner's key (`endorse`): the session waits for the key's
+        /// write — nothing is sent and nothing is journaled before it lands — and is admitted, with
+        /// «Новое устройство» in the journal, once it has.
+        #[tokio::test]
+        async fn an_endorsed_key_is_admitted_and_journaled_only_after_its_write() {
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = Arc::new(crate::journal::Journal::open(
+                None,
+                crate::journal::now_ms(),
+            ));
+            c.agent.journal = Some(journal.clone());
+            let pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).expect("key");
+            let mut spki = SPKI_PREFIX.to_vec();
+            spki.extend_from_slice(pair.public_key().as_ref());
+            let kid = ViewerKey::from_spki(&spki).expect("spki").key_id().clone();
+            let rng = aws_lc_rs::rand::SystemRandom::new();
+            let reg_sig = pair
+                .sign(
+                    &rng,
+                    &crate::viewer_keys::wire::key_reg_message(&kid, "telegram", "iphone", None),
+                )
+                .expect("signed");
+            let endorse_id = [9u8; 16];
+            let issued_at = u64::try_from(crate::journal::now_ms()).expect("now");
+            let e_sig = c
+                .owner
+                .0
+                .sign(
+                    &rng,
+                    &crate::viewer_keys::wire::endorse_message(
+                        &kid,
+                        &c.owner.1,
+                        &endorse_id,
+                        issued_at,
+                    ),
+                )
+                .expect("signed");
+            let nonce = request(&mut c, "s-new", 1, true).await;
+            let mut p = proof(&c, &(pair, kid.clone()), "s-new", &nonce);
+            p["key_reg"] = serde_json::json!({
+                "spki": b64(&spki),
+                "kind": "telegram",
+                "platform": "iphone",
+                "sig": b64(reg_sig.as_ref()),
+            });
+            p["admit"] = serde_json::json!([{
+                "kind": "endorse",
+                "endorse": {
+                    "v": 1,
+                    "key_id": kid.as_str(),
+                    "by": c.owner.1.as_str(),
+                    "endorse_id": b64(&endorse_id),
+                    "issued_at": issued_at,
+                    "sig": b64(e_sig.as_ref()),
+                },
+            }]);
+            offer_with(&mut c, "s-new", &FP, Some(p)).await;
+            assert!(ends(&mut c).is_empty(), "nothing before the write");
+            assert!(
+                c.agent.offers_waiting.contains_key("s-new"),
+                "the offer waits"
+            );
+            assert!(c.agent.pending.contains_key("s-new"));
+            assert!(
+                !journal
+                    .entries()
+                    .iter()
+                    .any(|v| v.entry.kind == Kind::DeviceAdded),
+                "no journal before the write"
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(c.agent.admitted_ready, vec!["s-new".to_string()]);
+            let added: Vec<_> = journal
+                .entries()
+                .into_iter()
+                .filter(|v| v.entry.kind == Kind::DeviceAdded)
+                .collect();
+            assert_eq!(added.len(), 1);
+            let d = added[0].entry.trusted_device.as_ref().expect("the device");
+            assert_eq!(
+                (d.kind.as_str(), d.platform.as_str(), d.source.as_str()),
+                ("telegram", "iphone", "endorse")
+            );
+            assert_eq!(added[0].entry.user, 1);
+            assert_eq!(c.agent.keyed["s-new"].summary.admit, Some("endorse"));
+        }
+
+        /// Strict mode: a person's refusals go into the journal once an hour each kind
+        /// («Отклонено: нет ключа доступа»), however often the viewer retries.
+        #[tokio::test]
+        async fn strict_refusals_are_journaled_once_an_hour() {
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = Arc::new(crate::journal::Journal::open(
+                None,
+                crate::journal::now_ms(),
+            ));
+            c.agent.journal = Some(journal.clone());
+            for sid in ["s1", "s2", "s3"] {
+                request(&mut c, sid, 2, true).await;
+                offer_with(&mut c, sid, &FP, None).await;
+            }
+            assert_eq!(ends(&mut c).len(), 3);
+            let declined: Vec<_> = journal
+                .entries()
+                .into_iter()
+                .filter(|v| v.entry.kind == Kind::DeclinedNoKey)
+                .collect();
+            assert_eq!(declined.len(), 1);
+            assert_eq!(declined[0].entry.user, 2);
+        }
+
+        /// The keys of live signed sessions reach the window (`in_session`) with a new generation.
+        #[tokio::test]
+        async fn live_keys_follow_the_signed_sessions() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let p = proof(&c, &c.guest, "s1", &nonce);
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            let _p = make_live(&mut c, "s1");
+            c.agent.reconcile_admission();
+            let shared = lock(&c.agent.live_keys);
+            assert!(shared.keys.contains(c.guest.1.as_str()));
+            assert!(shared.generation > 0);
+        }
+
+        /// A new key pair, its id and SPKI.
+        fn new_key() -> (EcdsaKeyPair, KeyId, Vec<u8>) {
+            let pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).expect("key");
+            let mut spki = SPKI_PREFIX.to_vec();
+            spki.extend_from_slice(pair.public_key().as_ref());
+            let kid = ViewerKey::from_spki(&spki).expect("spki").key_id().clone();
+            (pair, kid, spki)
+        }
+
+        /// The key card (`key_reg`) of a Telegram on iPhone, signed by its key.
+        fn key_card(pair: &EcdsaKeyPair, kid: &KeyId, spki: &[u8]) -> serde_json::Value {
+            let sig = pair
+                .sign(
+                    &aws_lc_rs::rand::SystemRandom::new(),
+                    &crate::viewer_keys::wire::key_reg_message(kid, "telegram", "iphone", None),
+                )
+                .expect("signed");
+            serde_json::json!({
+                "spki": b64(spki),
+                "kind": "telegram",
+                "platform": "iphone",
+                "sig": b64(sig.as_ref()),
+            })
+        }
+
+        /// A first offer of `sid` (with `nonce`) from a new device the owner's key vouches for
+        /// (`endorse`): it waits for its key's write. The new key's id.
+        async fn endorsed_offer(c: &mut Ctx, sid: &str, nonce: &str) -> (serde_json::Value, KeyId) {
+            endorsed_offer_by(c, sid, nonce, false).await
+        }
+
+        /// [`endorsed_offer`], vouched for by the guest's key instead when `by_guest` (a guest's
+        /// new device: it takes the guest's person and role).
+        async fn endorsed_offer_by(
+            c: &mut Ctx,
+            sid: &str,
+            nonce: &str,
+            by_guest: bool,
+        ) -> (serde_json::Value, KeyId) {
+            let (pair, kid, spki) = new_key();
+            let endorse_id = [9u8; 16];
+            let issued_at = u64::try_from(crate::journal::now_ms()).expect("now");
+            let by = if by_guest { &c.guest } else { &c.owner };
+            let e_sig =
+                by.0.sign(
+                    &aws_lc_rs::rand::SystemRandom::new(),
+                    &crate::viewer_keys::wire::endorse_message(&kid, &by.1, &endorse_id, issued_at),
+                )
+                .expect("signed");
+            let by_id = by.1.clone();
+            let card = key_card(&pair, &kid, &spki);
+            let mut p = proof(c, &(pair, kid.clone()), sid, nonce);
+            p["key_reg"] = card;
+            p["admit"] = serde_json::json!([{
+                "kind": "endorse",
+                "endorse": {
+                    "v": 1,
+                    "key_id": kid.as_str(),
+                    "by": by_id.as_str(),
+                    "endorse_id": b64(&endorse_id),
+                    "issued_at": issued_at,
+                    "sig": b64(e_sig.as_ref()),
+                },
+            }]);
+            offer_with(c, sid, &FP, Some(p.clone())).await;
+            (p, kid)
+        }
+
+        fn journal_of(c: &mut Ctx) -> Arc<crate::journal::Journal> {
+            let journal = Arc::new(crate::journal::Journal::open(
+                None,
+                crate::journal::now_ms(),
+            ));
+            c.agent.journal = Some(journal.clone());
+            journal
+        }
+
+        fn entries_of(
+            journal: &crate::journal::Journal,
+            kind: crate::journal::Kind,
+        ) -> Vec<crate::journal::Entry> {
+            journal
+                .entries()
+                .into_iter()
+                .filter(|v| v.entry.kind == kind)
+                .map(|v| v.entry)
+                .collect()
+        }
+
+        /// Finding 1, and the second first offer (§2.6): a candidate that comes while the first
+        /// offer waits for its key's write is kept — not dropped as before — and reaches the
+        /// peer once the session starts; the same offer again meanwhile is a duplicate (nothing
+        /// ends, nothing is decided again); the session starts with the landed key's record.
+        #[tokio::test]
+        async fn candidates_while_the_offer_waits_reach_the_peer() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-new", 1, true).await;
+            let (p, kid) = endorsed_offer(&mut c, "s-new", &nonce).await;
+            assert!(c.agent.offers_waiting.contains_key("s-new"));
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::Ice {
+                        session_id: "s-new".into(),
+                        candidate: relay_candidate(3478),
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(c.agent.ice_waiting["s-new"].0.len(), 1, "kept, not dropped");
+            offer_with(&mut c, "s-new", &FP, Some(p)).await;
+            assert!(ends(&mut c).is_empty(), "a duplicate ends nothing");
+            assert!(c.agent.offers_waiting.contains_key("s-new"));
+
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(c.agent.admitted_ready, vec!["s-new".to_string()]);
+            let k = &c.agent.keyed["s-new"];
+            assert_eq!(k.kid.as_ref(), Some(&kid), "the landed key");
+            assert!(k.identity.as_ref().is_some_and(|i| i.from_record
+                && i.telegram_user_id == 1
+                && i.first_name.as_deref() == Some("Owner")));
+            assert!(k.ks.as_deref().is_some_and(|ks| ks.contains(kid.as_str())));
+
+            // The start, as `start_admitted` does it, with a test peer in place of a real one.
+            c.agent.admitted_ready.clear();
+            c.agent.offers_waiting.remove("s-new");
+            let candidates = c.agent.ice_waiting.remove("s-new");
+            let mut peer = make_live(&mut c, "s-new");
+            c.agent.replay_candidates("s-new", candidates);
+            assert!(matches!(
+                peer.signals.try_recv(),
+                Ok(PeerSignal::AddRemoteIce(cand)) if cand.candidate.contains("3478")
+            ));
+        }
+
+        /// A re-offer with another fingerprint while the first waits for its write ends the
+        /// session `fingerprint_changed` and drops what waited with it; the landing after that
+        /// answers nothing.
+        #[tokio::test]
+        async fn a_changed_reoffer_while_waiting_refuses_and_drops_the_candidates() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-new", 1, true).await;
+            let (p, _kid) = endorsed_offer(&mut c, "s-new", &nonce).await;
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::Ice {
+                        session_id: "s-new".into(),
+                        candidate: relay_candidate(3478),
+                    },
+                    &c.tx,
+                )
+                .await;
+            offer_with(&mut c, "s-new", &OTHER_FP, Some(p)).await;
+            assert_eq!(
+                ends(&mut c),
+                vec![("s-new".into(), "fingerprint_changed".into(), None)]
+            );
+            assert!(!c.agent.offers_waiting.contains_key("s-new"));
+            assert!(!c.agent.ice_waiting.contains_key("s-new"));
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(c.agent.admitted_ready.is_empty(), "nothing starts");
+            assert!(ends(&mut c).is_empty(), "nothing is ended twice");
+        }
+
+        /// Finding 2: strict mode, a thousand offers without a proof under ids nobody bound —
+        /// which the server can invent — put nothing in the journal and leave nothing
+        /// remembered; neither do requests while paused. A bound person still gets one line.
+        #[tokio::test]
+        async fn unbound_strangers_never_reach_the_journal() {
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            for uid in 1000..2000 {
+                let sid = format!("s{uid}");
+                request(&mut c, &sid, uid, true).await;
+                offer_with(&mut c, &sid, &FP, None).await;
+            }
+            assert_eq!(ends(&mut c).len(), 1000, "every one refused");
+            assert!(entries_of(&journal, Kind::DeclinedNoKey).is_empty());
+            assert!(c.agent.declined_journaled.is_empty());
+            assert!(c.agent.declined_hour.is_empty());
+
+            lock(&c.agent.state).paused = true;
+            for uid in 3000..3500 {
+                request(&mut c, &format!("p{uid}"), uid, true).await;
+            }
+            assert!(entries_of(&journal, Kind::Paused).is_empty());
+            assert!(c.agent.paused_journaled.is_empty());
+            lock(&c.agent.state).paused = false;
+
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            assert_eq!(entries_of(&journal, Kind::DeclinedNoKey).len(), 1);
+        }
+
+        /// Finding 2: the hour's refusals for everyone together are bounded, however many bound
+        /// people try.
+        #[tokio::test]
+        async fn the_journals_refusals_are_bounded_an_hour() {
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            lock(&c.agent.state).bindings.extend(
+                (10..60).map(|uid| role_binding(uid, Some(afklink_protocol::BindingRole::Guest))),
+            );
+            for uid in 10..60 {
+                let sid = format!("s{uid}");
+                request(&mut c, &sid, uid, true).await;
+                offer_with(&mut c, &sid, &FP, None).await;
+            }
+            assert_eq!(
+                entries_of(&journal, Kind::DeclinedNoKey).len(),
+                DECLINED_JOURNAL_PER_HOUR
+            );
+        }
+
+        /// Finding 3: a live signed session whose key is not active any more ends — the list
+        /// damaged (`key_list_damaged:read_failed`), or reset without its key (`key_revoked`).
+        #[tokio::test]
+        async fn a_live_signed_session_ends_when_its_key_is_not_active() {
+            // Reset without its key: the key is unknown now.
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-guest", 2, true).await;
+            let p = proof(&c, &c.guest, "s-guest", &nonce);
+            offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+            let _g = make_live(&mut c, "s-guest");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.sweep_keys(&c.tx);
+            ends(&mut c);
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("damaged");
+            let store = c.agent.trusted.store_mut().expect("store");
+            let _ = store.reopen();
+            store
+                .reset_to_empty(crate::journal::now_ms())
+                .expect("reset");
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![("s-guest".into(), "key_revoked".into(), None)]
+            );
+            assert!(!c.agent.sessions.contains_key("s-guest"));
+
+            // Damaged: the list cannot say the key.
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-owner", 1, true).await;
+            let p = proof(&c, &c.owner, "s-owner", &nonce);
+            offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+            let _o = make_live(&mut c, "s-owner");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.sweep_keys(&c.tx);
+            ends(&mut c);
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("damaged");
+            let _ = c.agent.trusted.store_mut().expect("store").reopen();
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![(
+                    "s-owner".into(),
+                    "key_list_damaged".into(),
+                    Some("read_failed".into())
+                )]
+            );
+        }
+
+        /// Finding 4: a signed session is the key record's person by name too — a binding of
+        /// that id renamed to someone else's name is not what the toasts and the journal say.
+        #[tokio::test]
+        async fn a_signed_sessions_names_are_the_records() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-guest", 2, true).await;
+            let p = proof(&c, &c.guest, "s-guest", &nonce);
+            offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+            let mut bindings = lock(&c.agent.state).bindings.clone();
+            bindings[1].first_name = Some("Owner".into());
+            bindings[1].username = Some("owner".into());
+            let names = c
+                .agent
+                .session_names_of(&bindings, "s-guest", 2, Some("owner".into()));
+            assert_eq!(names, (Some("Guest".into()), None));
+            // An unsigned session (observe) keeps the binding's.
+            let mut c = ctx(false);
+            request(&mut c, "s1", 2, true).await;
+            offer_with(&mut c, "s1", &FP, None).await;
+            let names = c.agent.session_names_of(&bindings, "s1", 2, None);
+            assert_eq!(names, (Some("Owner".into()), Some("owner".into())));
+        }
+
+        /// Finding 5: a refusal of an unconfirmed key goes into the journal under the key
+        /// record's person, not the person the server named.
+        #[tokio::test]
+        async fn an_unconfirmed_keys_refusal_is_journaled_under_its_records_person() {
+            use crate::journal::Kind;
+            let (pair, kid, spki) = new_key();
+            let mut c = ctx_with(true, |store| {
+                store
+                    .add(
+                        NewKey {
+                            key: ViewerKey::from_spki(&spki).expect("spki"),
+                            rpk: None,
+                            kind: ClientKind::parse("telegram").expect("kind"),
+                            platform: Platform::parse("android").expect("platform"),
+                        },
+                        Ground::Pair {
+                            person: Person {
+                                telegram_user_id: 3,
+                                first_name: Some("Vera".into()),
+                                username: None,
+                            },
+                            role: afklink_protocol::BindingRole::Guest,
+                            unconfirmed: true,
+                        },
+                        1_731_400_000_000,
+                    )
+                    .expect("added");
+            });
+            let journal = journal_of(&mut c);
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let p = proof(&c, &(pair, kid), "s1", &nonce);
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            let e = ends(&mut c);
+            assert_eq!(e.len(), 1);
+            assert_eq!(e[0].1, "key_unconfirmed", "{e:?}");
+            let declined = entries_of(&journal, Kind::DeclinedUnknown);
+            assert_eq!(declined.len(), 1);
+            assert_eq!((declined[0].user, declined[0].name.as_str()), (3, "Vera"));
+            assert_eq!(declined[0].reason.as_deref(), Some("key_unconfirmed"));
+        }
+
+        /// §10 «Повтор основания для удалённого ключа»: a device first added by an endorse and
+        /// then removed at the PC offers that spent endorse and an old one (issued before the
+        /// removal), in either order: the session ends `key_revoked` both ways, the journal says
+        /// «Отклонено: удалено из доверенных» (`declined_untrusted`) under the key's person —
+        /// never «неизвестное устройство» — and the key stays removed, nothing newly spent.
+        #[tokio::test]
+        async fn a_removed_keys_refused_endorses_are_journaled_as_removed_in_either_order() {
+            use crate::journal::Kind;
+            use crate::viewer_keys::{GroundId, Lookup, Removal};
+            let removed_at = crate::journal::now_ms() - 60_000;
+            let endorse_of = |by: &EcdsaKeyPair, by_id: &KeyId, kid: &KeyId, n: u8, at: i64| {
+                let issued_at = u64::try_from(at).expect("unix ms");
+                let sig = by
+                    .sign(
+                        &aws_lc_rs::rand::SystemRandom::new(),
+                        &crate::viewer_keys::wire::endorse_message(kid, by_id, &[n; 16], issued_at),
+                    )
+                    .expect("signed");
+                serde_json::json!({"kind": "endorse", "endorse": {
+                    "v": 1, "key_id": kid.as_str(), "by": by_id.as_str(),
+                    "endorse_id": b64(&[n; 16]), "issued_at": issued_at, "sig": b64(sig.as_ref()),
+                }})
+            };
+            for spent_first in [true, false] {
+                let (phone, phone_id, phone_spki) = new_key();
+                let (laptop, laptop_id, laptop_spki) = new_key();
+                let first = GroundId::parse(&b64(&[1; 16])).expect("id");
+                let mut c = ctx_with(true, |store| {
+                    let new = |spki: &[u8]| NewKey {
+                        key: ViewerKey::from_spki(spki).expect("spki"),
+                        rpk: None,
+                        kind: ClientKind::parse("telegram").expect("kind"),
+                        platform: Platform::parse("iphone").expect("platform"),
+                    };
+                    store
+                        .add(
+                            new(&phone_spki),
+                            Ground::Pair {
+                                person: Person {
+                                    telegram_user_id: 2,
+                                    first_name: Some("Guest".into()),
+                                    username: None,
+                                },
+                                role: afklink_protocol::BindingRole::Guest,
+                                unconfirmed: false,
+                            },
+                            removed_at - 200_000,
+                        )
+                        .expect("the phone");
+                    store
+                        .add(
+                            new(&laptop_spki),
+                            Ground::Endorse {
+                                by: phone_id.clone(),
+                                endorse_id: first.clone(),
+                                issued_at: u64::try_from(removed_at - 120_000).expect("ms"),
+                            },
+                            removed_at - 100_000,
+                        )
+                        .expect("the laptop, by its first endorse");
+                    store
+                        .remove(&laptop_id, Removal::Pc, removed_at)
+                        .expect("removed at the PC");
+                });
+                let journal = journal_of(&mut c);
+                let spent = endorse_of(&phone, &phone_id, &laptop_id, 1, removed_at - 120_000);
+                let old = endorse_of(&phone, &phone_id, &laptop_id, 2, removed_at - 1);
+                let nonce = request(&mut c, "s1", 2, true).await;
+                let card = key_card(&laptop, &laptop_id, &laptop_spki);
+                let mut p = proof(&c, &(laptop, laptop_id.clone()), "s1", &nonce);
+                p["key_reg"] = card;
+                p["admit"] = if spent_first {
+                    serde_json::json!([spent, old])
+                } else {
+                    serde_json::json!([old, spent])
+                };
+                offer_with(&mut c, "s1", &FP, Some(p)).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let e = ends(&mut c);
+                assert_eq!(e.len(), 1, "spent first: {spent_first}: {e:?}");
+                assert_eq!(e[0].1, "key_revoked", "spent first: {spent_first}: {e:?}");
+                let untrusted = entries_of(&journal, Kind::DeclinedUntrusted);
+                assert_eq!(untrusted.len(), 1, "spent first: {spent_first}");
+                assert_eq!(
+                    (untrusted[0].user, untrusted[0].name.as_str()),
+                    (2, "Guest")
+                );
+                assert!(
+                    entries_of(&journal, Kind::DeclinedUnknown).is_empty(),
+                    "spent first: {spent_first}: never «неизвестное устройство»"
+                );
+                let store = c.agent.trusted.store().expect("the list");
+                assert!(
+                    matches!(store.lookup(&laptop_id), Lookup::Removed(_)),
+                    "spent first: {spent_first}: still removed"
+                );
+                let (endorses, _, _) = store.spent().expect("spent");
+                assert!(endorses.contains(&first));
+                assert!(
+                    !endorses.contains(&GroundId::parse(&b64(&[2; 16])).expect("id")),
+                    "spent first: {spent_first}: the old endorse is not spent"
+                );
+            }
+        }
+
+        /// §10 «Повтор основания для удалённого ключа»: a guest's device that came in by the
+        /// owner's grant on an invitation is removed at the PC and knocks again with that spent
+        /// invitation: the session ends `key_revoked` (not `admit_refused:grant_spent`), ONE
+        /// «Отклонено: удалено из доверенных» entry (`declined_untrusted`) under the guest, never
+        /// «неизвестное устройство»; the key stays removed, nothing lifted or newly spent.
+        #[tokio::test]
+        async fn a_removed_guests_spent_invitation_is_journaled_as_removed() {
+            use crate::journal::Kind;
+            use crate::viewer_keys::{Lookup, Removal};
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            let (pair, kid, spki) = new_key();
+            let key = (pair, kid.clone());
+            let at = u64::try_from(crate::journal::now_ms()).expect("a time");
+            let invited = grant_entry_at(&c, &kid, 2, 11, at);
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let mut p = proof(&c, &key, "s1", &nonce);
+            p["key_reg"] = key_card(&key.0, &kid, &spki);
+            p["admit"] = serde_json::json!([invited.clone()]);
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let spent_now = |c: &Ctx| {
+                let (e, g, i) = c
+                    .agent
+                    .trusted
+                    .store()
+                    .expect("the list")
+                    .spent()
+                    .expect("spent");
+                (e.clone(), g.clone(), i.clone())
+            };
+            let is = |c: &Ctx, active: bool| match c
+                .agent
+                .trusted
+                .store()
+                .expect("the list")
+                .lookup(&kid)
+            {
+                Lookup::Active(_) => active,
+                Lookup::Removed(_) => !active,
+                _ => false,
+            };
+            assert!(is(&c, true), "came in by the invitation");
+            // «Удалить» at the PC; the removal's sweep ends its session.
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("the list")
+                .remove(&kid, Removal::Pc, crate::journal::now_ms())
+                .expect("removed at the PC");
+            c.agent.sweep_keys(&c.tx);
+            ends(&mut c);
+            let spent_before = spent_now(&c);
+            let declined_before = entries_of(&journal, Kind::DeclinedUntrusted).len();
+            // The same invitation again.
+            let nonce = request(&mut c, "s2", 2, true).await;
+            let mut p = proof(&c, &key, "s2", &nonce);
+            p["key_reg"] = key_card(&key.0, &kid, &spki);
+            p["admit"] = serde_json::json!([invited]);
+            offer_with(&mut c, "s2", &FP, Some(p)).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(s, _, _)| s == "s2")
+                .collect();
+            assert_eq!(e, vec![("s2".to_string(), "key_revoked".to_string(), None)]);
+            let untrusted = entries_of(&journal, Kind::DeclinedUntrusted);
+            assert_eq!(untrusted.len(), declined_before + 1, "{untrusted:?}");
+            let last = untrusted.last().expect("the entry");
+            assert_eq!((last.user, last.name.as_str()), (2, "Guest"));
+            assert!(
+                entries_of(&journal, Kind::DeclinedUnknown).is_empty(),
+                "never «неизвестное устройство»"
+            );
+            assert!(is(&c, false), "still removed");
+            assert_eq!(spent_now(&c), spent_before, "nothing newly spent");
+        }
+
+        /// The reason a journaled refusal carries: a permission given before a removal, a listed
+        /// device not confirmed; every other refusal carries none.
+        #[test]
+        fn a_refusals_journal_reason_is_one_of_two() {
+            use crate::admission::Verdict;
+            assert_eq!(
+                declined_reason(Verdict::admit_refused("grant_stale")),
+                Some("grant_stale")
+            );
+            assert_eq!(
+                declined_reason(Verdict::KEY_UNCONFIRMED),
+                Some("key_unconfirmed")
+            );
+            for v in [
+                Verdict::admit_refused("grant_spent"),
+                Verdict::admit_refused("limit"),
+                Verdict::KEY_UNKNOWN,
+                Verdict::KEY_REVOKED,
+                Verdict::key_required("no_proof"),
+            ] {
+                assert_eq!(declined_reason(v), None, "{v:?}");
+            }
+        }
+
+        /// A bound person's refusals land with their reason; two different reasons within the
+        /// hour are two lines, the same reason again is not a line again, and refusals without a
+        /// reason (`grant_spent`, `key_unknown`) share one line with none.
+        #[tokio::test]
+        async fn a_refusals_reason_reaches_the_journal_once_an_hour_each() {
+            use crate::admission::Verdict;
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            request(&mut c, "s1", 2, true).await;
+            for v in [
+                Verdict::KEY_UNCONFIRMED,
+                Verdict::admit_refused("grant_stale"),
+                Verdict::KEY_UNCONFIRMED,
+                Verdict::admit_refused("grant_spent"),
+                Verdict::KEY_UNKNOWN,
+                Verdict::admit_refused("grant_stale"),
+            ] {
+                c.agent.journal_declined("s1", v, None);
+            }
+            let mut reasons: Vec<(i64, Option<String>)> =
+                entries_of(&journal, Kind::DeclinedUnknown)
+                    .into_iter()
+                    .map(|e| (e.user, e.reason))
+                    .collect();
+            reasons.sort();
+            assert_eq!(
+                reasons,
+                [
+                    (2, None),
+                    (2, Some("grant_stale".into())),
+                    (2, Some("key_unconfirmed".into())),
+                ]
+            );
+        }
+
+        /// Finding 6: a damaged list whose mode file says observe decides in observe: an unbound
+        /// person's request is refused `unbound` at once, as before keys — not let through as
+        /// strict mode would and refused `key_list_damaged` at its offer; a bound person is
+        /// admitted with that verdict.
+        #[tokio::test]
+        async fn a_damaged_observe_list_refuses_the_unbound_as_unbound() {
+            let mut c = ctx(false);
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("damaged");
+            let store = c.agent.trusted.store_mut().expect("store");
+            let _ = store.reopen();
+            assert_eq!(store.damaged_mode(), Some(false));
+            request(&mut c, "s-stranger", 77, true).await;
+            assert_eq!(
+                ends(&mut c),
+                vec![("s-stranger".into(), "unbound".into(), None)]
+            );
+            assert!(!c.agent.pending.contains_key("s-stranger"));
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()) || r == "unbound")
+                .collect();
+            assert!(e.is_empty(), "admitted by the binding: {e:?}");
+            assert_eq!(c.agent.keyed["s-guest"].summary.verdict, "key_list_damaged");
+        }
+
+        /// A repair keeps the switch the window shows: a list
+        /// damaged from the start with its mode file observe, then reset, stays observe — the
+        /// sessions observe let in by the binding carry on, none ends for a key; once the switch
+        /// goes on, they end (`key_required:no_proof`).
+        #[tokio::test]
+        async fn a_repair_keeps_observe_and_its_sessions() {
+            let mut c = ctx(false);
+            std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage").expect("damaged");
+            let _ = c.agent.trusted.store_mut().expect("store").reopen();
+            request(&mut c, "s-guest", 2, true).await;
+            offer_with(&mut c, "s-guest", &FP, None).await;
+            let _g = make_live(&mut c, "s-guest");
+            c.agent.sweep_keys(&c.tx);
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert!(e.is_empty(), "{e:?}");
+            let store = c.agent.trusted.store_mut().expect("store");
+            store
+                .reset_to_empty(crate::journal::now_ms())
+                .expect("reset");
+            assert!(!store.switches().expect("healthy").trusted_devices_mode);
+            c.agent.sweep_keys(&c.tx);
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert!(e.is_empty(), "observe kept: {e:?}");
+            assert!(c.agent.sessions.contains_key("s-guest"));
+            // The switch turned on later (the list readable now): the sessions observe let in end
+            // at the sweep (§10), as the original finding 7 asked of a repair into strict.
+            c.agent
+                .trusted
+                .store_mut()
+                .expect("store")
+                .set_trusted_devices_mode(true)
+                .expect("strict");
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(
+                ends(&mut c),
+                vec![(
+                    "s-guest".into(),
+                    "key_required".into(),
+                    Some("no_proof".into())
+                )]
+            );
+        }
+
+        /// §10: the stored last known list names guest 2; an
+        /// `agent_ready` without them is a `binding_removed` missed while away — their confirmed
+        /// key leaves (origin `server`) and they are marked, compared before the list becomes the
+        /// known one (fails with `trusted.agent_ready` after `sync_game_roles`); their live signed
+        /// session ends at once, and on a reconnect (the run's own earlier list) their waiting
+        /// request is dropped too, as at `binding_removed`. Bound again later, the old key is
+        /// refused in strict mode.
+        #[tokio::test]
+        async fn a_guest_missing_at_agent_ready_is_revoked_marked_and_their_sessions_end() {
+            use crate::viewer_keys::Lookup;
+            use afklink_protocol::BindingRole;
+            for reconnect in [true, false] {
+                let mut c = ctx(true);
+                let nonce = request(&mut c, "s-guest", 2, true).await;
+                let p = proof(&c, &c.guest, "s-guest", &nonce);
+                offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+                let _g = make_live(&mut c, "s-guest");
+                c.agent
+                    .sessions
+                    .get_mut("s-guest")
+                    .expect("live")
+                    .telegram_user_id = 2;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                request(&mut c, "s-wait", 2, true).await;
+                assert!(c.agent.pending.contains_key("s-wait"), "{reconnect}");
+                ends(&mut c);
+                // A reconnect: this run's list was the ctx's. Else the run's first list with no
+                // earlier one in memory: only the trusted list's own (stored) list sees the loss.
+                lock(&c.agent.state).bindings_known = reconnect;
+                let _ = c
+                    .agent
+                    .take_agent_ready(&[role_binding(1, Some(BindingRole::Owner))], &c.tx);
+                let e = ends(&mut c);
+                assert!(
+                    e.iter().any(|(sid, ..)| sid == "s-guest"),
+                    "reconnect {reconnect}: the guest's live session ends at once: {e:?}"
+                );
+                assert!(!c.agent.sessions.contains_key("s-guest"), "{reconnect}");
+                let reason = e
+                    .iter()
+                    .find(|(sid, ..)| sid == "s-guest")
+                    .map(|e| e.1.clone());
+                if reconnect {
+                    assert_eq!(reason.as_deref(), Some("unbound"), "as at binding_removed");
+                } else {
+                    assert!(
+                        reason.as_deref().is_some_and(|r| KEY_REASONS.contains(&r)),
+                        "by the key sweep: {reason:?}"
+                    );
+                }
+                if reconnect {
+                    assert!(
+                        !c.agent.pending.contains_key("s-wait"),
+                        "the waiting request is dropped"
+                    );
+                }
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let store = c.agent.trusted.store().expect("store");
+                match store.lookup(&c.guest.1) {
+                    Lookup::Removed(t) => assert_eq!(t.origin.as_str(), "server", "{reconnect}"),
+                    other => panic!("reconnect {reconnect}: the guest's key {other:?}"),
+                }
+                assert!(matches!(store.lookup(&c.owner.1), Lookup::Active(_)));
+                // Bound again (a new binding): the old key is refused in strict mode.
+                lock(&c.agent.state).bindings = vec![
+                    role_binding(1, Some(BindingRole::Owner)),
+                    role_binding(2, Some(BindingRole::Guest)),
+                ];
+                c.agent.sync_game_roles("test: bound again");
+                let nonce = request(&mut c, "s-again", 2, true).await;
+                let p = proof(&c, &c.guest, "s-again", &nonce);
+                offer_with(&mut c, "s-again", &FP, Some(p)).await;
+                let e = ends(&mut c);
+                assert!(
+                    e.iter()
+                        .any(|(sid, r, _)| sid == "s-again" && KEY_REASONS.contains(&r.as_str())),
+                    "reconnect {reconnect}: refused for the key: {e:?}"
+                );
+            }
+        }
+
+        /// An `agent_ready` while the list is damaged is compared at the repair (the binding
+        /// list's rule at the repair's landing, by that connection's list): guest 2, missing from
+        /// it, loses the key and is marked once the list reads again.
+        #[tokio::test]
+        async fn an_agent_ready_while_the_list_is_damaged_is_compared_at_the_repair() {
+            use crate::trusted::{RepairAction, TrustedAsk};
+            use crate::viewer_keys::Lookup;
+            use afklink_protocol::BindingRole;
+            let mut c = ctx(true);
+            let file = c.dir.join(crate::viewer_keys::FILE_NAME);
+            let good = std::fs::read(&file).expect("the list");
+            std::fs::write(&file, b"garbage").expect("damaged");
+            let _ = c.agent.trusted.store_mut().expect("store").reopen();
+            assert!(c.agent.trusted.store().expect("store").is_damaged());
+            let _ = c
+                .agent
+                .take_agent_ready(&[role_binding(1, Some(BindingRole::Owner))], &c.tx);
+            std::fs::write(&file, &good).expect("readable again");
+            let (now, mut later) = ask_now(&mut c, TrustedAsk::Repair(RepairAction::Reopen)).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let answer = now.or_else(|| later.try_recv().ok());
+            assert!(matches!(answer, Some(Ok(_))), "{answer:?}");
+            let store = c.agent.trusted.store().expect("store");
+            assert!(!store.is_damaged());
+            match store.lookup(&c.guest.1) {
+                Lookup::Removed(t) => assert_eq!(t.origin.as_str(), "server"),
+                other => panic!("the guest's key {other:?}"),
+            }
+            assert!(matches!(store.lookup(&c.owner.1), Lookup::Active(_)));
+        }
+
+        /// Finding 8 and the request window's key line: the panel's token is taken as
+        /// «Привязать» is handled, so a session live then taints the opening even when it ends
+        /// before the request comes — its key will land unconfirmed. A clean opening's does not.
+        #[tokio::test]
+        async fn the_pairing_panel_is_tainted_by_a_session_live_when_it_opened() {
+            for (with_session, unconfirmed) in [(true, true), (false, false)] {
+                let mut c = ctx(false);
+                if with_session {
+                    request(&mut c, "s-guest", 2, true).await;
+                    offer_with(&mut c, "s-guest", &FP, None).await;
+                    let _g = make_live(&mut c, "s-guest");
+                    c.agent.reconcile_admission();
+                    c.agent.trusted.sync_live(c.agent.trust_window_live());
+                }
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                assert!(c.agent.panel_token.is_some(), "taken at the command");
+                if with_session {
+                    c.agent.end_session("s-guest", true, "viewer_ended", &c.tx);
+                }
+                let (pair, kid, spki) = new_key();
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::PairRequest {
+                            request_id: "r1".into(),
+                            telegram_user_id: 5,
+                            username: None,
+                            first_name: Some("Vera".into()),
+                            expires_at: crate::journal::now_ms() + 60_000,
+                            has_owner: Some(true),
+                            viewer_key: Some(key_card(&pair, &kid, &spki)),
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+                assert_eq!(key.request_id, "r1");
+                assert_eq!(key.key_state, "valid");
+                assert_eq!(key.device, Some(("telegram".into(), "iphone".into())));
+                assert_eq!(
+                    key.will_be_unconfirmed, unconfirmed,
+                    "session: {with_session}"
+                );
+            }
+        }
+
+        /// A pairing request's key that was removed from the list earlier comes back
+        /// (`was_removed`); one with a card that does not check is `invalid`; none, `absent`.
+        #[tokio::test]
+        async fn the_request_windows_key_state() {
+            let mut c = ctx(false);
+            let removed = c.guest.1.clone();
+            let live = c.agent.trust_window_live();
+            c.agent.trusted.untrust_guest(2, live);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            // The key line reads the key the admission holds for the request (spec §5: the
+            // first under its id), never a card of its own.
+            let take = |c: &mut Ctx, id: &str, uid: i64, card: Option<&serde_json::Value>| {
+                let outcome = c
+                    .agent
+                    .admission
+                    .pair_request(&crate::admission::PairRequest {
+                        request_id: id,
+                        telegram_user_id: uid,
+                        first_name: None,
+                        username: None,
+                        viewer_key: card,
+                    });
+                (outcome, c.agent.pair_key_view(id, outcome, (1, None)))
+            };
+            use crate::admission::ViewerKeyOutcome as O;
+            let check = |c: &Ctx, outcome| c.agent.pair_key_view("r", outcome, (1, None)).key_state;
+            assert_eq!(check(&c, O::Absent), "absent");
+            assert_eq!(check(&c, O::Invalid), "invalid");
+            assert_eq!(check(&c, O::IgnoredNoPanel), "absent");
+            c.agent.admission.pairing_panel(&c.agent.trusted, true);
+            let (pair, kid, spki) = new_key();
+            let fresh = key_card(&pair, &kid, &spki);
+            let (o, v) = take(&mut c, "r1", 7, Some(&fresh));
+            assert_eq!(
+                (o, v.key_state, v.removed_here_at),
+                (O::Accepted, "valid", None)
+            );
+            assert_eq!(v.device, Some(("telegram".into(), "iphone".into())));
+            // A repeat changes nothing: the first's key stays on the line.
+            let (pair2, kid2, spki2) = new_key();
+            let other = key_card(&pair2, &kid2, &spki2);
+            let (o, v) = take(&mut c, "r1", 8, Some(&other));
+            assert_eq!((o, v.key_state), (O::IgnoredWindowUsed, "valid"));
+            // A keyless first: its repeat with a card stays keyless (the window is used anyway).
+            let (o, v) = take(&mut c, "r2", 9, None);
+            assert_eq!((o, v.key_state), (O::Absent, "absent"));
+            let (o, v) = take(&mut c, "r2", 9, Some(&other));
+            assert_eq!(
+                (o, v.key_state, v.device),
+                (O::IgnoredWindowUsed, "absent", None)
+            );
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&removed),
+                crate::viewer_keys::Lookup::Removed(_)
+            ));
+            // The removed guest's request without a key: the removal line is about the key, so
+            // no date (spec §5).
+            let (_, v) = take(&mut c, "r3", 2, None);
+            assert_eq!(v.removed_here_at, None, "no key, no date");
+        }
+
+        /// Spec §5, §10 «Одно правило возврата»: «Удалено из доверенных: {when}» is the time of
+        /// the removed record of THE REQUEST'S OWN KEY when it was removed at this PC (`pc`) —
+        /// also while the person has another working device; a `server` removal gives no date,
+        /// and neither does a new device of a person whose other device was removed at the PC.
+        #[tokio::test]
+        async fn the_removal_line_is_the_time_of_the_requests_own_key_removed_at_the_pc() {
+            const AT_PC: i64 = 1_731_400_500_000;
+            const AT_SERVER: i64 = 1_731_400_600_000;
+            let at_pc = new_key();
+            let at_server = new_key();
+            let guest_key = |spki: &[u8]| NewKey {
+                key: ViewerKey::from_spki(spki).expect("spki"),
+                rpk: None,
+                kind: ClientKind::parse("telegram").expect("kind"),
+                platform: Platform::parse("iphone").expect("platform"),
+            };
+            let guest = || Ground::Pair {
+                person: Person {
+                    telegram_user_id: 2,
+                    first_name: Some("Guest".into()),
+                    username: None,
+                },
+                role: afklink_protocol::BindingRole::Guest,
+                unconfirmed: false,
+            };
+            let mut c = ctx_with(false, |store| {
+                for (_, _, spki) in [&at_pc, &at_server] {
+                    store
+                        .add(guest_key(spki), guest(), 1_731_400_000_000)
+                        .expect("added");
+                }
+                store
+                    .remove(&at_pc.1, crate::viewer_keys::Removal::Pc, AT_PC)
+                    .expect("removed at the PC");
+                store
+                    .remove(&at_server.1, crate::viewer_keys::Removal::Server, AT_SERVER)
+                    .expect("removed by the server");
+            });
+            // The guest still has a working device (the ctx's key).
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&c.guest.1),
+                crate::viewer_keys::Lookup::Active(_)
+            ));
+            c.agent.admission.pairing_panel(&c.agent.trusted, true);
+            let mut line = |id: &str, card: serde_json::Value| {
+                let outcome = c
+                    .agent
+                    .admission
+                    .pair_request(&crate::admission::PairRequest {
+                        request_id: id,
+                        telegram_user_id: 2,
+                        first_name: None,
+                        username: None,
+                        viewer_key: Some(&card),
+                    });
+                // One request per panel opening: open it again for the next.
+                let v = c.agent.pair_key_view(id, outcome, (1, None));
+                c.agent.admission.pairing_panel(&c.agent.trusted, false);
+                c.agent.admission.pairing_panel(&c.agent.trusted, true);
+                (v.key_state, v.removed_here_at)
+            };
+            assert_eq!(
+                line("r1", key_card(&at_pc.0, &at_pc.1, &at_pc.2)),
+                ("was_removed", Some(AT_PC)),
+                "a pc removal of this key: its time, though the person has a working device"
+            );
+            assert_eq!(
+                line("r2", key_card(&at_server.0, &at_server.1, &at_server.2)),
+                ("was_removed", None),
+                "a server removal: no date"
+            );
+            let fresh = new_key();
+            assert_eq!(
+                line("r3", key_card(&fresh.0, &fresh.1, &fresh.2)),
+                ("valid", None),
+                "a new device of a person whose other device was removed at the PC: no date"
+            );
+        }
+
+        /// Finding 10: another device's attempt as a person who has a key here — its signature
+        /// checked, the key unknown — goes into the journal as its own kind, under that person,
+        /// with no device.
+        #[tokio::test]
+        async fn another_devices_attempt_is_journaled_as_its_own_kind() {
+            use crate::journal::Kind;
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            let (pair, kid, spki) = new_key();
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let card = key_card(&pair, &kid, &spki);
+            let mut p = proof(&c, &(pair, kid), "s1", &nonce);
+            p["key_reg"] = card;
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            let e = ends(&mut c);
+            assert_eq!(e[0].1, "key_unknown", "{e:?}");
+            let attempts = entries_of(&journal, Kind::OtherDeviceAttempt);
+            assert_eq!(attempts.len(), 1);
+            assert_eq!((attempts[0].user, attempts[0].name.as_str()), (2, "Guest"));
+            assert!(attempts[0].trusted_device.is_none());
+            assert_eq!(
+                c.agent.trusted.attempts_of(2).len(),
+                1,
+                "the window's second step has it"
+            );
+        }
+
+        /// Through the product path (the shape of the admission's
+        /// `a_refusal_at_the_queues_turn_is_another_devices_attempt`): a guest's new device on
+        /// the owner's grant passes at the decision and waits behind a change ahead; another
+        /// person's removal replaces the grant token before its turn, so the list refuses the key
+        /// (`admit_refused:grant_stale`). That refusal is another device's attempt: on the window's
+        /// list and in the journal — exactly once, however often the queue settles after.
+        #[tokio::test]
+        async fn a_refusal_at_the_queues_turn_reaches_the_journal_once() {
+            use crate::journal::Kind;
+            // An unconfirmed device of the guest's, confirmed ahead below.
+            let mut waiting = None;
+            let mut c = ctx_with(true, |store| {
+                let (_pair, kid, spki) = new_key();
+                store
+                    .add(
+                        NewKey {
+                            key: ViewerKey::from_spki(&spki).expect("spki"),
+                            rpk: None,
+                            kind: ClientKind::parse("telegram").expect("kind"),
+                            platform: Platform::parse("android").expect("platform"),
+                        },
+                        Ground::Pair {
+                            person: Person {
+                                telegram_user_id: 2,
+                                first_name: Some("Guest".into()),
+                                username: None,
+                            },
+                            role: afklink_protocol::BindingRole::Guest,
+                            unconfirmed: true,
+                        },
+                        1_731_400_000_000,
+                    )
+                    .expect("added");
+                waiting = Some(kid);
+            });
+            let journal = journal_of(&mut c);
+            // A change ahead («Подтвердить»), its write held: the grant's key queues behind it and
+            // is staged only after the removal below.
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            c.agent.trusted.gate_jobs(gate);
+            let token = c.agent.trusted.window_token();
+            let _ahead = ask_now(
+                &mut c,
+                crate::trusted::TrustedAsk::Confirm {
+                    key_id: waiting.expect("added"),
+                    token,
+                },
+            )
+            .await;
+            let (pair, kid, spki) = new_key();
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let card = key_card(&pair, &kid, &spki);
+            let mut p = proof(&c, &(pair, kid.clone()), "s1", &nonce);
+            p["key_reg"] = card;
+            let at = u64::try_from(crate::journal::now_ms()).expect("a time");
+            p["admit"] = serde_json::json!([grant_entry_at(&c, &kid, 2, 11, at)]);
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            assert!(
+                c.agent.offers_waiting.contains_key("s1"),
+                "the grant's write waits: {:?}",
+                ends(&mut c)
+            );
+            assert!(entries_of(&journal, Kind::OtherDeviceAttempt).is_empty());
+            assert!(
+                c.agent.trusted.attempts_of(2).is_empty(),
+                "not before the end"
+            );
+            // Another person's removal replaces the token before the key's turn.
+            let store = c.agent.trusted.store_mut().expect("store");
+            assert!(store.person_removed(777, "test: another removal"));
+            drop(release);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(s, _, _)| s == "s1")
+                .collect();
+            assert_eq!(
+                e,
+                vec![(
+                    "s1".to_string(),
+                    "admit_refused".to_string(),
+                    Some("grant_stale".to_string())
+                )]
+            );
+            let kept = c.agent.trusted.attempts_of(2);
+            assert_eq!(kept.len(), 1, "kept for the window: {kept:?}");
+            assert_eq!(kept[0].key_id, kid);
+            let attempts = entries_of(&journal, Kind::OtherDeviceAttempt);
+            assert_eq!(attempts.len(), 1, "journaled once: {attempts:?}");
+            assert_eq!((attempts[0].user, attempts[0].name.as_str()), (2, "Guest"));
+            assert!(attempts[0].trusted_device.is_none());
+            // The notes' write and any later settle journal nothing more.
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.sweep_keys(&c.tx);
+            assert_eq!(entries_of(&journal, Kind::OtherDeviceAttempt).len(), 1);
+        }
+
+        /// Finding 11: the toasts of a landed key — a vouched-for device names the device that
+        /// vouched; a known guest's new device by the owner's grant says the owner allowed it;
+        /// a new guest's grant (its toast comes from `binding_added`), a pairing and a recovery
+        /// have none.
+        #[tokio::test]
+        async fn a_landed_key_toasts_only_what_nobody_at_the_pc_did() {
+            use crate::admission::JournalEvent;
+            let mut c = ctx(true);
+            let mut events = c.agent.events.subscribe();
+            let nonce = request(&mut c, "s-new", 1, true).await;
+            let (_p, kid) = endorsed_offer(&mut c, "s-new", &nonce).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let mut toasts = Vec::new();
+            while let Ok(ev) = events.try_recv() {
+                if let AgentEvent::NewTrustedDevice {
+                    telegram_user_id,
+                    name,
+                    device,
+                    how,
+                } = ev
+                {
+                    toasts.push((telegram_user_id, name.text, device, how));
+                }
+            }
+            assert_eq!(toasts.len(), 1, "{toasts:?}");
+            assert_eq!(toasts[0].0, 1);
+            assert_eq!(toasts[0].1, "Owner");
+            assert_eq!(
+                (toasts[0].2.platform.as_str(), toasts[0].2.source.as_str()),
+                ("iphone", "endorse")
+            );
+            assert!(matches!(
+                &toasts[0].3,
+                NewDeviceHow::Endorsed { by: Some(by) } if by.platform == "android"
+            ));
+            let _ = kid;
+
+            let added = |ground: &'static str, guest_new_device: bool| JournalEvent::KeyAdded {
+                ground,
+                key_id: c.guest.1.clone(),
+                telegram_user_id: 2,
+                role: afklink_protocol::BindingRole::Guest,
+                unconfirmed: false,
+                by: Some(c.owner.1.clone()),
+                guest_new_device,
+            };
+            for (ground, known, toast) in [
+                ("grant", true, true),
+                ("grant", false, false),
+                ("pair", false, false),
+                ("first_use", false, false),
+            ] {
+                c.agent.note_key_journal(&added(ground, known));
+                let got = std::iter::from_fn(|| events.try_recv().ok())
+                    .filter(|e| matches!(e, AgentEvent::NewTrustedDevice { .. }))
+                    .collect::<Vec<_>>();
+                assert_eq!(got.len(), usize::from(toast), "{ground} {known}");
+                if toast {
+                    assert!(matches!(
+                        &got[0],
+                        AgentEvent::NewTrustedDevice {
+                            how: NewDeviceHow::OwnerAllowed,
+                            ..
+                        }
+                    ));
+                }
+            }
+        }
+
+        /// A guest's binding removed on the server takes their guest keys (origin `server`): the
+        /// session their key signed ends `key_revoked`; the owner's carries on.
+        #[tokio::test]
+        async fn a_guest_removed_on_the_server_loses_their_keys_and_sessions() {
+            let mut c = ctx(true);
+            let nonce = request(&mut c, "s-guest", 2, true).await;
+            let p = proof(&c, &c.guest, "s-guest", &nonce);
+            offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+            let nonce = request(&mut c, "s-owner", 1, true).await;
+            let p = proof(&c, &c.owner, "s-owner", &nonce);
+            offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+            let _g = make_live(&mut c, "s-guest");
+            let _o = make_live(&mut c, "s-owner");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            ends(&mut c);
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(e, vec![("s-guest".into(), "key_revoked".into(), None)]);
+            assert!(c.agent.sessions.contains_key("s-owner"));
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&c.guest.1),
+                crate::viewer_keys::Lookup::Removed(_)
+            ));
+            // §10: the person is marked removed (`server`), and the mark is on disk with the
+            // keys' removal (no note left unsaved).
+            let store = c.agent.trusted.store().expect("store");
+            assert!(!store.notes_unsaved());
+            // The owner's binding removed, and a person the PC does not know: no mark.
+            for uid in [1, 999] {
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::BindingRemoved {
+                            telegram_user_id: uid,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+            }
+        }
+
+        /// Every `pair_response` sent so far: its `key_id`.
+        fn pair_responses(c: &mut Ctx) -> Vec<Option<String>> {
+            let mut out = Vec::new();
+            while let Ok(m) = c.rx.try_recv() {
+                if let AgentToServer::PairResponse { key_id, .. } = m {
+                    out.push(key_id);
+                }
+            }
+            out
+        }
+
+        async fn pair_request_with(
+            c: &mut Ctx,
+            request_id: &str,
+            uid: i64,
+            name: &str,
+            card: serde_json::Value,
+        ) {
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::PairRequest {
+                        request_id: request_id.into(),
+                        telegram_user_id: uid,
+                        username: None,
+                        first_name: Some(name.into()),
+                        expires_at: crate::journal::now_ms() + 60_000,
+                        has_owner: Some(true),
+                        viewer_key: Some(card),
+                    },
+                    &c.tx,
+                )
+                .await;
+        }
+
+        /// The owner's `grant` ground for `key` of guest `uid` on a new invitation (ids from `n`),
+        /// signed by the owner's key (grant and invite) at `at` (unix ms), over the PC's grant
+        /// token as it is now.
+        fn grant_entry_at(c: &Ctx, key: &KeyId, uid: i64, n: u8, at: u64) -> serde_json::Value {
+            use crate::viewer_keys::wire::{grant_message, invite_message, GrantFields};
+            let token = c
+                .agent
+                .trusted
+                .store()
+                .and_then(crate::viewer_keys::TrustStore::grant_token)
+                .unwrap_or_default();
+            let device_id = lock(&c.agent.config).device_id.clone();
+            let (inv_id, grant_id) = ([n; 16], [n.wrapping_add(100); 16]);
+            let sign = |m: &[u8]| {
+                let sig = c
+                    .owner
+                    .0
+                    .sign(&aws_lc_rs::rand::SystemRandom::new(), m)
+                    .expect("signed");
+                b64(sig.as_ref())
+            };
+            let g = grant_message(&GrantFields {
+                device_id: &device_id,
+                key_id: key,
+                telegram_user_id: uid,
+                name: Some("Guest"),
+                username: None,
+                inv_id: Some(&inv_id),
+                grant_id: &grant_id,
+                grant_token: &token,
+                issued_at: at,
+                by: &c.owner.1,
+            });
+            let i = invite_message(&device_id, &inv_id, at, &c.owner.1);
+            serde_json::json!({
+                "kind": "grant",
+                "invite": {"v": 1, "device_id": device_id, "inv_id": b64(&inv_id),
+                           "issued_at": at, "by": c.owner.1.as_str(), "sig": sign(&i)},
+                "grant": {"v": 1, "device_id": device_id, "key_id": key.as_str(),
+                          "telegram_user_id": uid, "name": "Guest", "username": null,
+                          "role": "guest", "inv_id": b64(&inv_id), "grant_id": b64(&grant_id),
+                          "grant_token": token.to_wire(),
+                          "issued_at": at, "by": c.owner.1.as_str(), "sig": sign(&g)},
+            })
+        }
+
+        /// `owner_changed` made the guest the server's owner, then the server
+        /// removed the binding: the owner's `binding_removed` touches no key (§10), but the rule
+        /// by the list run after it takes the guest-role key of a person the list does not name now
+        /// — the key's role decides — and the old key is `key_revoked`.
+        #[tokio::test]
+        async fn a_guest_made_owner_then_unbound_still_loses_the_guest_key() {
+            let mut c = ctx(true);
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::OwnerChanged {
+                        telegram_user_id: Some(2),
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(
+                role_of(&lock(&c.agent.state).bindings, 2),
+                Some(afklink_protocol::BindingRole::Owner),
+                "the server's word moved the binding"
+            );
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&c.guest.1),
+                crate::viewer_keys::Lookup::Removed(_)
+            ));
+            ends(&mut c);
+            let nonce = request(&mut c, "s-old", 2, true).await;
+            let p = proof(&c, &c.guest, "s-old", &nonce);
+            offer_with(&mut c, "s-old", &FP, Some(p)).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(_, r, _)| KEY_REASONS.contains(&r.as_str()))
+                .collect();
+            assert_eq!(e, vec![("s-old".into(), "key_revoked".into(), None)]);
+        }
+
+        /// A peer that cannot be made drops the request and tells the
+        /// admission at once — the trusted devices' window does not stay locked by it, and a later
+        /// offer of the id is answered, not swallowed as a duplicate of the first.
+        #[tokio::test]
+        async fn a_failed_peer_drops_the_request_and_the_admissions_session() {
+            let mut c = ctx(false);
+            c.agent.hold_peers = false;
+            request(&mut c, "s1", 2, true).await;
+            let bad = format!("{}a=garbage-not-sdp\r\n", sdp(&FP));
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::Sdp {
+                        session_id: "s1".into(),
+                        sdp_type: SdpType::Offer,
+                        sdp: bad,
+                        proof: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            let e = ends(&mut c);
+            assert_eq!(e, vec![("s1".into(), "peer_error".into(), None)], "{e:?}");
+            assert!(!c.agent.pending.contains_key("s1"));
+            assert!(!c.agent.keyed.contains_key("s1"));
+            assert!(c.agent.admission.session("s1").is_none());
+            assert!(!c.agent.admission.offered("s1"));
+            assert_eq!(c.agent.trust_window_live(), 0, "the window is not held");
+            offer_with(&mut c, "s1", &FP, None).await;
+            assert!(
+                !ends(&mut c).is_empty(),
+                "a later offer of the id is answered, not dropped as a duplicate"
+            );
+        }
+
+        /// What the core made of each answer is kept by request id
+        /// for the terminal — link down, the owner's second step still needed, held for the key's
+        /// write, sent (accept or decline), not waiting — and a new `pair_request` with the id
+        /// forgets it.
+        #[tokio::test]
+        async fn each_answer_leaves_its_outcome_by_request_id() {
+            use super::PairAnswer;
+            let mut c = ctx(false);
+            let now = crate::journal::now_ms();
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            pair_responses(&mut c);
+            let outcome = |c: &Ctx, id: &str| lock(&c.agent.state).pair_answers.get(id);
+            let press = |id: &str, accept: bool, second_step: bool| AgentCommand::RespondToPair {
+                request_id: id.into(),
+                accept,
+                role: (id == "r1").then_some(afklink_protocol::BindingRole::Owner),
+                second_step,
+                shown: None,
+            };
+            assert_eq!(outcome(&c, "r1"), None, "no answer yet");
+            lock(&c.agent.state)
+                .pending_pair
+                .as_mut()
+                .expect("on screen")
+                .link = crate::pairing::PairLink::Lost { since_ms: now };
+            c.agent
+                .handle_command(press("r1", true, false), &c.tx)
+                .await;
+            assert_eq!(outcome(&c, "r1"), Some(PairAnswer::LinkDown));
+            lock(&c.agent.state)
+                .pending_pair
+                .as_mut()
+                .expect("on screen")
+                .link = crate::pairing::PairLink::Live;
+            c.agent
+                .handle_command(press("r1", true, false), &c.tx)
+                .await;
+            assert_eq!(outcome(&c, "r1"), Some(PairAnswer::SecondStepRequired));
+            c.agent.handle_command(press("r1", true, true), &c.tx).await;
+            assert_eq!(
+                outcome(&c, "r1"),
+                Some(PairAnswer::Held),
+                "waits for its write"
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(pair_responses(&mut c), vec![Some(kid.as_str().to_string())]);
+            assert_eq!(
+                outcome(&c, "r1"),
+                Some(PairAnswer::Sent {
+                    accept: true,
+                    via_pc_allow: false
+                })
+            );
+            c.agent.handle_command(press("r1", true, true), &c.tx).await;
+            assert_eq!(outcome(&c, "r1"), Some(PairAnswer::NotWaiting));
+            // A decline of another request; the first one's outcome stays its own.
+            pair_request_with(
+                &mut c,
+                "r2",
+                6,
+                "Ann",
+                key_card(&new_key().0, &new_key().1, &new_key().2),
+            )
+            .await;
+            c.agent
+                .handle_command(press("r2", false, false), &c.tx)
+                .await;
+            assert_eq!(
+                outcome(&c, "r2"),
+                Some(PairAnswer::Sent {
+                    accept: false,
+                    via_pc_allow: false
+                })
+            );
+            assert_eq!(outcome(&c, "r1"), Some(PairAnswer::NotWaiting));
+            // The same id comes again as a new request: its old outcome says nothing of it.
+            pair_request_with(&mut c, "r1", 7, "Bo", key_card(&pair, &kid, &spki)).await;
+            assert_eq!(outcome(&c, "r1"), None, "forgotten with the new request");
+        }
+
+        /// An answer for a request that is no longer waiting — forgotten at
+        /// `PAIR_WAITING_MAX`, or answered already — is refused: no `pair_response` goes. Here
+        /// the first request is the oldest of `PAIR_WAITING_MAX` + 1 (forgotten), and a stale
+        /// «Разрешить» of it would bind the person with one press; a second «Разрешить» of an
+        /// answered request is ignored.
+        #[tokio::test]
+        async fn an_answer_for_a_request_no_longer_waiting_sends_nothing() {
+            let mut c = ctx(false);
+            async fn keyless(c: &mut Ctx, request_id: &str, uid: i64) {
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::PairRequest {
+                            request_id: request_id.into(),
+                            telegram_user_id: uid,
+                            username: None,
+                            first_name: Some(format!("P{uid}")),
+                            expires_at: crate::journal::now_ms() + 60_000,
+                            has_owner: Some(true),
+                            viewer_key: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+            }
+            let press = |id: &str, second_step| AgentCommand::RespondToPair {
+                request_id: id.into(),
+                accept: true,
+                role: None,
+                second_step,
+                shown: None,
+            };
+            keyless(&mut c, "first", 5).await;
+            for i in 0..crate::admission::PAIR_WAITING_MAX {
+                keyless(&mut c, &format!("r{i}"), 100 + i as i64).await;
+            }
+            assert!(
+                c.agent.admission.pair_waiting("first").is_none(),
+                "the oldest is forgotten at the bound"
+            );
+            pair_responses(&mut c);
+            for second_step in [false, true] {
+                c.agent
+                    .handle_command(press("first", second_step), &c.tx)
+                    .await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(
+                    pair_responses(&mut c).is_empty(),
+                    "step {second_step}: a forgotten request is answered with nothing"
+                );
+                assert_eq!(
+                    lock(&c.agent.state).pair_answers.get("first"),
+                    Some(super::PairAnswer::NotWaiting),
+                    "the terminal hears the answer was not sent"
+                );
+            }
+            // Double «Разрешить»: the first answers, the second sends nothing.
+            c.agent.handle_command(press("r5", false), &c.tx).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(pair_responses(&mut c).len(), 1, "the first answer goes");
+            c.agent.handle_command(press("r5", false), &c.tx).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(
+                pair_responses(&mut c).is_empty(),
+                "a second answer of the same request sends nothing"
+            );
+            assert_eq!(
+                lock(&c.agent.state).pair_answers.get("r5"),
+                Some(super::PairAnswer::NotWaiting)
+            );
+        }
+
+        /// The request's bound passes between the guard
+        /// (`pair_still_waiting`) and the consume (`pair_allow`'s own sweep): `pair_allow` finds
+        /// no waiter and refuses it (`not_waiting`) — no `pair_response` goes (never an accept
+        /// nothing decided), the terminal hears it was not sent. Control: a press without the
+        /// lapse answers.
+        #[tokio::test]
+        async fn a_request_lapsing_between_the_guard_and_the_allow_sends_nothing() {
+            let mut c = ctx(false);
+            for (id, uid) in [("late", 7), ("ok", 8)] {
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::PairRequest {
+                            request_id: id.into(),
+                            telegram_user_id: uid,
+                            username: None,
+                            first_name: Some(format!("P{uid}")),
+                            expires_at: crate::journal::now_ms() + 60_000,
+                            has_owner: Some(true),
+                            viewer_key: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+            }
+            pair_responses(&mut c);
+            let press = |id: &str| AgentCommand::RespondToPair {
+                request_id: id.into(),
+                accept: true,
+                role: None,
+                second_step: false,
+                shown: None,
+            };
+            c.agent.admission.lapse_after_guard = true;
+            c.agent.handle_command(press("late"), &c.tx).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(
+                pair_responses(&mut c).is_empty(),
+                "a request gone between the guard and the allow is answered with nothing"
+            );
+            assert_eq!(
+                lock(&c.agent.state).pair_answers.get("late"),
+                Some(super::PairAnswer::NotWaiting),
+                "the terminal hears the answer was not sent"
+            );
+            c.agent.admission.lapse_after_guard = false;
+            c.agent.handle_command(press("ok"), &c.tx).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(pair_responses(&mut c).len(), 1, "control: the answer goes");
+        }
+
+        /// Every `pair_response` sent so far: its `accept` and its `key_id`.
+        fn pair_answers(c: &mut Ctx) -> Vec<(bool, Option<String>)> {
+            let mut out = Vec::new();
+            while let Ok(m) = c.rx.try_recv() {
+                if let AgentToServer::PairResponse { accept, key_id, .. } = m {
+                    out.push((accept, key_id));
+                }
+            }
+            out
+        }
+
+        /// §5: «Разрешить» in the panel whose key's write is overtaken by a removal of the
+        /// person («Удалить человека», or `binding_removed`): the pairing is the PC's own decision
+        /// and is not token-bound, so its key lands and the approval goes with the key's id —
+        /// never an approval without a key id (the server would bind the person with no key
+        /// here). Control: no removal in between. After «Удалить человека» (the accepted
+        /// residual R6/S1): the pair key is active and confirmed, the person's earlier key removed
+        /// `pc`, and the list shows the new key.
+        #[tokio::test]
+        async fn a_pairing_press_overtaken_by_a_removal_still_answers_with_its_key() {
+            for removal in ["remove_person", "binding_removed", "none"] {
+                let case = removal;
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 2, "Guest", key_card(&pair, &kid, &spki)).await;
+                pair_answers(&mut c);
+                c.agent
+                    .handle_command(
+                        AgentCommand::RespondToPair {
+                            request_id: "r1".into(),
+                            accept: true,
+                            role: None,
+                            second_step: false,
+                            shown: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                assert!(
+                    pair_answers(&mut c).is_empty(),
+                    "{case}: held for its write"
+                );
+                match removal {
+                    "remove_person" => {
+                        let (now, _rx) = ask_now(
+                            &mut c,
+                            crate::trusted::TrustedAsk::RemovePerson {
+                                telegram_user_id: 2,
+                            },
+                        )
+                        .await;
+                        assert!(
+                            !matches!(now, Some(Err(_))),
+                            "{case}: the removal is taken: {now:?}"
+                        );
+                    }
+                    "binding_removed" => {
+                        c.agent
+                            .handle_server_msg(
+                                ServerToAgent::BindingRemoved {
+                                    telegram_user_id: 2,
+                                },
+                                &c.tx,
+                            )
+                            .await;
+                    }
+                    _ => {}
+                }
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let sent = pair_answers(&mut c);
+                assert_eq!(
+                    lock(&c.agent.state).pair_answers.get("r1"),
+                    Some(super::PairAnswer::Sent {
+                        accept: true,
+                        via_pc_allow: false
+                    }),
+                    "{case}: the outcome kept"
+                );
+                assert_eq!(
+                    sent,
+                    vec![(true, Some(kid.as_str().to_string()))],
+                    "{case}: approved with its key"
+                );
+                if removal != "remove_person" {
+                    continue;
+                }
+                // The accepted order (R6/S1, residual): the earlier «Разрешить» is not undone by
+                // the later «Удалить все устройства» — the pair key has no parent the walk could
+                // reach and no grant token: it lands active and confirmed, the person's other key
+                // goes (`pc`), and the list shows the new key. In memory and on disk.
+                for store in [
+                    c.agent.trusted.store().expect("store"),
+                    &TrustStore::open_in(&c.dir),
+                ] {
+                    match store.lookup(&kid) {
+                        crate::viewer_keys::Lookup::Active(r) => {
+                            assert!(!r.unconfirmed, "{case}: confirmed")
+                        }
+                        other => panic!("{case}: the pair key is not active: {other:?}"),
+                    }
+                    match store.lookup(&c.guest.1) {
+                        crate::viewer_keys::Lookup::Removed(t) => {
+                            assert_eq!(t.origin.as_str(), "pc", "{case}")
+                        }
+                        other => panic!("{case}: the other key is not removed: {other:?}"),
+                    }
+                }
+                let view = c.control.trusted_view();
+                let shown: Vec<&KeyId> = view
+                    .people
+                    .iter()
+                    .filter(|p| p.telegram_user_id == 2)
+                    .flat_map(|p| p.devices.iter().map(|d| &d.key_id))
+                    .collect();
+                assert_eq!(shown, vec![&kid], "{case}: the list shows the new key only");
+            }
+        }
+
+        /// The request on screen sent again — after the panel reopened —
+        /// with another key and another person: the window keeps the person and the key line it
+        /// shows, and «Разрешить» writes the shown key, not the re-sent one.
+        #[tokio::test]
+        async fn a_resent_request_keeps_the_shown_key_for_allow() {
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair1, kid1, spki1) = new_key();
+            pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair1, &kid1, &spki1)).await;
+            let shown = lock(&c.agent.state).pair_key.clone().expect("the key line");
+            assert_eq!(shown.key_state, "valid");
+            // The panel closes with the request, and opens again.
+            c.agent.reconcile_admission();
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair2, kid2, spki2) = new_key();
+            pair_request_with(&mut c, "r1", 6, "Mallory", key_card(&pair2, &kid2, &spki2)).await;
+            {
+                let s = lock(&c.agent.state);
+                let p = s.pending_pair.as_ref().expect("on screen");
+                assert_eq!(
+                    (p.telegram_user_id, p.first_name.as_deref()),
+                    (5, Some("Vera"))
+                );
+                assert_eq!(s.pair_key.as_ref(), Some(&shown), "the key line it shows");
+            }
+            pair_responses(&mut c);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: None,
+                        second_step: false,
+                        shown: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert!(
+                pair_responses(&mut c).is_empty(),
+                "the answer waits for its key's write"
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(
+                pair_responses(&mut c),
+                vec![Some(kid1.as_str().to_string())],
+                "«Разрешить» writes the key the window showed"
+            );
+            let store = c.agent.trusted.store().expect("store");
+            assert!(matches!(
+                store.lookup(&kid1),
+                crate::viewer_keys::Lookup::Active(r) if r.person.telegram_user_id == 5
+            ));
+            assert!(matches!(
+                store.lookup(&kid2),
+                crate::viewer_keys::Lookup::Unknown
+            ));
+        }
+
+        /// Strict mode and a session not signed by a confirmed owner key since the panel opened —
+        /// «Разрешить» writes nothing: the key line says so (not «Добавится без подтверждения»),
+        /// and the server hears no `key_id`. Observe mode under the same opening adds it
+        /// unconfirmed and names it.
+        #[tokio::test]
+        async fn strict_and_a_tainted_opening_writes_no_key_and_says_so() {
+            for strict in [true, false] {
+                let mut c = ctx(strict);
+                let nonce = request(&mut c, "s-guest", 2, true).await;
+                let p = proof(&c, &c.guest, "s-guest", &nonce);
+                offer_with(&mut c, "s-guest", &FP, Some(p)).await;
+                let _g = make_live(&mut c, "s-guest");
+                c.agent.reconcile_admission();
+                c.agent.trusted.sync_live(c.agent.trust_window_live());
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+                c.agent.reconcile_admission();
+                let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+                assert_eq!(key.key_state, "valid", "strict {strict}");
+                assert!(key.will_be_unconfirmed, "strict {strict}");
+                assert_eq!(key.not_trusted_session, strict, "strict {strict}");
+                // A guest's session is live: the press would go via `pc_allow`, whose key strict
+                // forgets — not offered there; observe admits by the binding.
+                use crate::admission::PairGives;
+                assert_eq!(
+                    key.gives,
+                    if strict {
+                        PairGives::Session
+                    } else {
+                        PairGives::Connects
+                    },
+                    "strict {strict}: what the press gives"
+                );
+                assert!(
+                    key.via_pc_allow,
+                    "strict {strict}: a guest's session is live"
+                );
+                // The session ends before «Разрешить»: the opening stays tainted, and «Разрешить»
+                // decides here, not through the owner (`pc_allow`).
+                c.agent.end_session("s-guest", true, "viewer_ended", &c.tx);
+                c.agent.reconcile_admission();
+                let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+                assert_eq!(key.not_trusted_session, strict, "strict {strict}: still");
+                assert_eq!(
+                    key.gives,
+                    if strict {
+                        PairGives::Session
+                    } else {
+                        PairGives::Connects
+                    },
+                    "strict {strict}: after the session"
+                );
+                assert!(!key.via_pc_allow, "strict {strict}: no guest's session now");
+                pair_responses(&mut c);
+                c.agent
+                    .handle_command(
+                        AgentCommand::RespondToPair {
+                            request_id: "r1".into(),
+                            accept: true,
+                            role: None,
+                            second_step: false,
+                            shown: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                let sent = pair_responses(&mut c);
+                if strict {
+                    assert_eq!(sent, vec![None], "no key written, none named, at once");
+                } else {
+                    assert!(sent.is_empty(), "the answer waits for its key's write");
+                    settle_trusted(&mut c.agent, &c.tx).await;
+                    assert_eq!(pair_responses(&mut c), vec![Some(kid.as_str().to_string())]);
+                }
+            }
+        }
+
+        /// §5: the request window hears that the requester is an owner on this PC
+        /// (`owner_here`) and what the press gives; «Разрешить» without «Это моё устройство»
+        /// sends nothing and the request waits; with it, the owner's role and his new device lands
+        /// an owner key, confirmed. A guest's request says not an owner.
+        #[tokio::test]
+        async fn the_owners_request_says_so_and_needs_his_step() {
+            use crate::admission::PairGives;
+            let mut c = ctx(true);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            c.agent.reconcile_admission();
+            let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+            assert!(key.owner_here, "an owner key here");
+            assert_eq!(key.gives, PairGives::Connects, "strict, clean: offered");
+            pair_responses(&mut c);
+            let respond = |role, second_step| AgentCommand::RespondToPair {
+                request_id: "r1".into(),
+                accept: true,
+                role,
+                second_step,
+                shown: None,
+            };
+            // A guest's role named (a window that read no owner): refused `role`, nothing sent.
+            c.agent.handle_command(respond(None, true), &c.tx).await;
+            assert!(
+                pair_responses(&mut c).is_empty(),
+                "another role: nothing sent"
+            );
+            assert_eq!(
+                lock(&c.agent.state).pair_answers.get("r1"),
+                Some(super::PairAnswer::RoleRefused)
+            );
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "it still waits"
+            );
+            c.agent
+                .handle_command(
+                    respond(Some(afklink_protocol::BindingRole::Owner), false),
+                    &c.tx,
+                )
+                .await;
+            assert!(pair_responses(&mut c).is_empty(), "no step: nothing sent");
+            assert_eq!(
+                lock(&c.agent.state).pair_answers.get("r1"),
+                Some(super::PairAnswer::SecondStepRequired)
+            );
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "it still waits"
+            );
+            c.agent
+                .handle_command(
+                    respond(Some(afklink_protocol::BindingRole::Owner), true),
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(pair_responses(&mut c), vec![Some(kid.as_str().to_string())]);
+            match c.agent.trusted.store().expect("list").lookup(&kid) {
+                crate::viewer_keys::Lookup::Active(r) => assert_eq!(
+                    (r.role, r.unconfirmed),
+                    (afklink_protocol::BindingRole::Owner, false)
+                ),
+                other => panic!("not written: {other:?}"),
+            }
+
+            let mut c = ctx(true);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r2", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+            c.agent.reconcile_admission();
+            let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+            assert!(!key.owner_here, "a guest");
+        }
+
+        /// A pairing request as the server sends it, `has_owner` its word.
+        async fn pair_request_owned(
+            c: &mut Ctx,
+            request_id: &str,
+            uid: i64,
+            has_owner: Option<bool>,
+            card: Option<serde_json::Value>,
+        ) {
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::PairRequest {
+                        request_id: request_id.into(),
+                        telegram_user_id: uid,
+                        username: None,
+                        first_name: Some("Person".into()),
+                        expires_at: crate::journal::now_ms() + 60_000,
+                        has_owner,
+                        viewer_key: card,
+                    },
+                    &c.tx,
+                )
+                .await;
+        }
+
+        /// §5: «Кто это?» is asked only when this PC derives no role for the person — never on the
+        /// server's `has_owner = false` alone: a working owner-role key here derives a guest's
+        /// role for anyone else (no question, `role` guest, no owner step) and the owner's for the
+        /// owner (his step, as the plan writes his key).
+        #[tokio::test]
+        async fn the_role_question_and_the_owner_step_are_the_cores_reading() {
+            for (uid, owner) in [(5, false), (1, true)] {
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                let card = key_card(&pair, &kid, &spki);
+                pair_request_owned(&mut c, "r1", uid, Some(false), Some(card)).await;
+                c.agent.reconcile_admission();
+                let key = lock(&c.agent.state).pair_key.clone().expect("the key line");
+                assert!(
+                    !key.ask_role,
+                    "uid {uid}: an owner key works here, no question"
+                );
+                assert_eq!(
+                    lock(&c.agent.state).pair_asks_role("r1"),
+                    Some(false),
+                    "uid {uid}: the prompt's reading"
+                );
+                let derived = if owner {
+                    afklink_protocol::BindingRole::Owner
+                } else {
+                    afklink_protocol::BindingRole::Guest
+                };
+                assert_eq!(key.role, Some(derived), "uid {uid}");
+                assert_eq!(key.needs_owner_step, owner, "uid {uid}");
+                assert_eq!(
+                    key.device_line,
+                    crate::admission::PairDevice::Trusted { again: false },
+                    "uid {uid}"
+                );
+            }
+        }
+
+        /// §5: a consent is for what was on screen. The request on screen, ended (`pair_cancelled`)
+        /// and received again under the same id with another key, is another generation; a press
+        /// carrying the old one — «Это моё устройство» given for the first key — sends nothing and
+        /// the request waits. A re-send of the request on screen keeps its generation; the press
+        /// naming the one on screen goes.
+        #[tokio::test]
+        async fn a_consent_holds_only_for_the_request_it_was_given_on() {
+            let mut c = ctx(true);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            c.agent.reconcile_admission();
+            let first = lock(&c.agent.state).pair_shown("r1").expect("shown");
+            // The server re-sends it: the same request, the same generation.
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            assert_eq!(lock(&c.agent.state).pair_shown("r1"), Some(first));
+            // Cancelled, the panel opened again, received again under the id with another key.
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::PairCancelled {
+                        request_id: "r1".into(),
+                        reason: afklink_protocol::PairDeclineReason::Timeout,
+                    },
+                    &c.tx,
+                )
+                .await;
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair2, kid2, spki2) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair2, &kid2, &spki2)).await;
+            c.agent.reconcile_admission();
+            let second = lock(&c.agent.state).pair_shown("r1").expect("shown");
+            assert_ne!(second, first, "another request under the same id");
+            pair_responses(&mut c);
+            let press = |shown| AgentCommand::RespondToPair {
+                request_id: "r1".into(),
+                accept: true,
+                role: Some(afklink_protocol::BindingRole::Owner),
+                second_step: true,
+                shown: Some(shown),
+            };
+            c.agent.handle_command(press(first), &c.tx).await;
+            assert!(
+                pair_responses(&mut c).is_empty(),
+                "the old consent: nothing sent"
+            );
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "it still waits"
+            );
+            c.agent.handle_command(press(second), &c.tx).await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(
+                pair_responses(&mut c),
+                vec![Some(kid2.as_str().to_string())]
+            );
+        }
+
+        /// §5: a press carrying a generation holds only while that generation is on screen under
+        /// its id. The owner's consent was given for the first key of `r1`; `r1` ended, came back
+        /// with another key, and another request then took the window while `r1` still waits — the
+        /// old press arrives: nothing is sent, nothing written, `r1` still waits.
+        #[tokio::test]
+        async fn a_press_for_a_request_not_on_screen_writes_and_sends_nothing() {
+            let mut c = ctx(true);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            c.agent.reconcile_admission();
+            let first = lock(&c.agent.state).pair_shown("r1").expect("shown");
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::PairCancelled {
+                        request_id: "r1".into(),
+                        reason: afklink_protocol::PairDeclineReason::Timeout,
+                    },
+                    &c.tx,
+                )
+                .await;
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair2, kid2, spki2) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair2, &kid2, &spki2)).await;
+            let (pair3, kid3, spki3) = new_key();
+            pair_request_with(&mut c, "r2", 2, "Guest", key_card(&pair3, &kid3, &spki3)).await;
+            c.agent.reconcile_admission();
+            assert_eq!(
+                lock(&c.agent.state).pair_shown("r1"),
+                None,
+                "r2 is on screen"
+            );
+            assert!(c.agent.admission.pair_waiting("r1").is_some());
+            pair_responses(&mut c);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: Some(afklink_protocol::BindingRole::Owner),
+                        second_step: true,
+                        shown: Some(first),
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(pair_responses(&mut c).is_empty(), "nothing sent");
+            assert!(c.agent.held_pairs.is_empty(), "nothing held for a write");
+            let store = c.agent.trusted.store().expect("store");
+            assert!(
+                store.listed(&kid2).is_none(),
+                "the second key is not written"
+            );
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "r1 still waits"
+            );
+        }
+
+        /// §10: at the owner's `binding_removed` nothing changes — the token is kept and the
+        /// stored last binding list keeps the keyless owner's record (no rule runs at that
+        /// message). The next reconciliation (here `owner_changed`, a bindings message without
+        /// him) takes him out of the stored list like any keyless person: the token replaced once,
+        /// and a grant made over the old token is `grant_stale`.
+        #[tokio::test]
+        async fn a_keyless_owners_unbind_keeps_the_token_until_the_next_reconciliation() {
+            let mut c = ctx(true);
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            // 3 is bound, then made the owner (1 keeps its owner-role key): the rule notes him.
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingAdded {
+                        telegram_user_id: 3,
+                        username: None,
+                        first_name: Some("Vera".into()),
+                        role: Some(afklink_protocol::BindingRole::Guest),
+                        via: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::OwnerChanged {
+                        telegram_user_id: Some(3),
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let stored = |c: &Ctx| {
+                c.agent
+                    .trusted
+                    .store()
+                    .and_then(crate::viewer_keys::TrustStore::last_bindings)
+                    .is_some_and(|l| l.iter().any(|b| b.telegram_user_id == 3))
+            };
+            let token_of = |c: &Ctx| {
+                c.agent
+                    .trusted
+                    .store()
+                    .and_then(crate::viewer_keys::TrustStore::grant_token)
+            };
+            assert!(stored(&c), "3 is in the stored list");
+            let before = token_of(&c);
+            // A guest's new device on a grant over the token as it is now.
+            let (pair, kid, spki) = new_key();
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let card = key_card(&pair, &kid, &spki);
+            let mut p = proof(&c, &(pair, kid.clone()), "s1", &nonce);
+            p["key_reg"] = card;
+            let at = u64::try_from(crate::journal::now_ms()).expect("a time");
+            p["admit"] = serde_json::json!([grant_entry_at(&c, &kid, 2, 11, at)]);
+            // (1) The owner's `binding_removed`: nothing changes at the message.
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 3,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(token_of(&c), before, "(1) the token kept");
+            assert!(stored(&c), "(1) the stored record kept");
+            // (2) The next bindings message without him: the stored record goes, a new token.
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::OwnerChanged {
+                        telegram_user_id: Some(1),
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(!stored(&c), "(2) the stored record gone");
+            let after = token_of(&c);
+            assert_ne!(after, before, "(2) the token replaced");
+            // Once: another reconciliation with the same list replaces nothing.
+            c.agent.bring_to_rule("test: again", &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(token_of(&c), after, "replaced once");
+            ends(&mut c);
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(s, _, _)| s == "s1")
+                .collect();
+            assert_eq!(
+                e,
+                vec![(
+                    "s1".to_string(),
+                    "admit_refused".to_string(),
+                    Some("grant_stale".to_string())
+                )],
+                "a grant over the old token"
+            );
+        }
+
+        /// §5: a press that names a role the person does not have now is refused whole, also on the
+        /// `pc_allow` path. A guest's session is live (the press would answer at once and keep
+        /// the key for `BindingAdded`); the requester was the owner by the bindings when the
+        /// window showed the request and is demoted before the press, which carries the former
+        /// owner role: no `pair_response`, no kept key (a later guest binding writes nothing),
+        /// the request still waits.
+        #[tokio::test]
+        async fn a_press_with_a_former_owner_role_keeps_no_key_and_sends_nothing() {
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::OwnerChanged {
+                        telegram_user_id: Some(2),
+                    },
+                    &c.tx,
+                )
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 2, "Guest", key_card(&pair, &kid, &spki)).await;
+            let _peer = super::live_session(&mut c.agent, "s-guest");
+            c.agent.reconcile_admission();
+            let shown = lock(&c.agent.state).pair_shown("r1").expect("shown");
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::OwnerChanged {
+                        telegram_user_id: Some(1),
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(
+                c.agent.trusted.pair_role(2),
+                Some(afklink_protocol::BindingRole::Guest),
+                "demoted before the press"
+            );
+            pair_responses(&mut c);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: Some(afklink_protocol::BindingRole::Owner),
+                        second_step: true,
+                        shown: Some(shown),
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(pair_responses(&mut c).is_empty(), "no pair_response");
+            assert!(c.agent.held_pairs.is_empty(), "nothing held for a write");
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "r1 still waits"
+            );
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingAdded {
+                        telegram_user_id: 2,
+                        username: None,
+                        first_name: Some("Guest".into()),
+                        role: Some(afklink_protocol::BindingRole::Guest),
+                        via: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(
+                c.agent
+                    .trusted
+                    .store()
+                    .expect("store")
+                    .listed(&kid)
+                    .is_none(),
+                "no kept key was written"
+            );
+        }
+
+        /// §5, §14: the role a pairing press named is read again at its write. The press of a
+        /// guest's request (the role derived then: a guest's) waits in the list's queue behind
+        /// another change in flight (the mode switched on); `owner_changed` then names that person the
+        /// owner, so the role derived at the write is the owner's — the press is cancelled whole:
+        /// nothing written, the `pair_response` a decline. Control: an `owner_changed` that leaves
+        /// the role as it was — the approval goes with the key's id.
+        #[tokio::test]
+        async fn a_pairing_press_whose_role_moved_before_its_write_is_declined_as_a_whole() {
+            for moved in [true, false] {
+                let case = if moved { "role moved" } else { "role kept" };
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 2, "Guest", key_card(&pair, &kid, &spki)).await;
+                pair_answers(&mut c);
+                let (release, gate) = std::sync::mpsc::channel::<()>();
+                c.agent.trusted.gate_jobs(gate);
+                let token = c.agent.trusted.window_token();
+                let (_, mut forgot) = ask_now(
+                    &mut c,
+                    crate::trusted::TrustedAsk::SetMode {
+                        on: true,
+                        token: Some(token),
+                    },
+                )
+                .await;
+                c.agent
+                    .handle_command(
+                        AgentCommand::RespondToPair {
+                            request_id: "r1".into(),
+                            accept: true,
+                            role: None,
+                            second_step: false,
+                            shown: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                assert_eq!(c.agent.held_pairs.len(), 1, "{case}: the answer is held");
+                assert!(pair_answers(&mut c).is_empty(), "{case}: nothing sent yet");
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::OwnerChanged {
+                            telegram_user_id: Some(if moved { 2 } else { 1 }),
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                assert_eq!(
+                    c.agent.trusted.pair_role(2),
+                    Some(if moved {
+                        afklink_protocol::BindingRole::Owner
+                    } else {
+                        afklink_protocol::BindingRole::Guest
+                    }),
+                    "{case}: the role derived now"
+                );
+                drop(release);
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(
+                    matches!(forgot.try_recv(), Ok(Ok(_))),
+                    "{case}: the change ahead went"
+                );
+                let sent = pair_answers(&mut c);
+                let active = matches!(
+                    c.agent.trusted.store().expect("store").lookup(&kid),
+                    crate::viewer_keys::Lookup::Active(_)
+                );
+                if moved {
+                    assert_eq!(sent, vec![(false, None)], "{case}: declined as a whole");
+                    assert!(!active, "{case}: nothing written");
+                } else {
+                    assert_eq!(
+                        sent,
+                        vec![(true, Some(kid.as_str().to_string()))],
+                        "{case}: approved with its key"
+                    );
+                    assert!(active, "{case}: written");
+                }
+                assert_eq!(
+                    lock(&c.agent.state).pair_answers.get("r1"),
+                    Some(super::PairAnswer::Sent {
+                        accept: !moved,
+                        via_pc_allow: false
+                    }),
+                    "{case}: the outcome kept"
+                );
+            }
+        }
+
+        /// §5: a `pc_allow` key is decided at `BindingAdded` with that binding applied — a guest
+        /// at the press whom the binding names the owner is an owner on this PC now: the key is
+        /// forgotten, never a guest key for the owner. Control: a guest's binding writes it
+        /// (observe: unconfirmed).
+        #[tokio::test]
+        async fn a_pc_allow_key_of_someone_bound_as_the_owner_is_forgotten() {
+            for owner in [true, false] {
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+                let _peer = super::live_session(&mut c.agent, "s-guest");
+                c.agent.reconcile_admission();
+                c.agent
+                    .handle_command(
+                        AgentCommand::RespondToPair {
+                            request_id: "r1".into(),
+                            accept: true,
+                            role: None,
+                            second_step: false,
+                            shown: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                assert_eq!(
+                    pair_answers(&mut c),
+                    vec![(true, None)],
+                    "owner {owner}: answered at the press via pc_allow"
+                );
+                c.agent
+                    .handle_server_msg(
+                        ServerToAgent::BindingAdded {
+                            telegram_user_id: 5,
+                            username: None,
+                            first_name: Some("Vera".into()),
+                            role: Some(if owner {
+                                afklink_protocol::BindingRole::Owner
+                            } else {
+                                afklink_protocol::BindingRole::Guest
+                            }),
+                            via: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert_eq!(c.agent.trusted.owner_on_pc(5), owner);
+                match c.agent.trusted.store().expect("store").lookup(&kid) {
+                    crate::viewer_keys::Lookup::Active(r) => {
+                        assert!(!owner, "an owner on this PC never gets the guest key");
+                        assert_eq!(
+                            (r.role, r.unconfirmed),
+                            (afklink_protocol::BindingRole::Guest, true)
+                        );
+                    }
+                    other => assert!(owner, "a guest's binding writes the key: {other:?}"),
+                }
+            }
+        }
+
+        /// «Разрешить»'s answer names its key only once the key is in the
+        /// list: held while it is written, then sent with the id; sent without it — once, and
+        /// nothing more when the write lands later — on a refusal, on `slow`, past the limit (on
+        /// the tick, or a landing that comes late), or at the exit.
+        #[tokio::test]
+        async fn the_pairing_answer_names_its_key_only_once_written() {
+            use super::PairAnswer;
+            for end in ["written", "refused", "slow", "limit", "late", "exit"] {
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+                pair_responses(&mut c);
+                c.agent
+                    .handle_command(
+                        AgentCommand::RespondToPair {
+                            request_id: "r1".into(),
+                            accept: true,
+                            role: None,
+                            second_step: false,
+                            shown: None,
+                        },
+                        &c.tx,
+                    )
+                    .await;
+                assert!(pair_responses(&mut c).is_empty(), "{end}: held");
+                assert_eq!(c.agent.held_pairs.len(), 1, "{end}");
+                let ticket = c.agent.held_pairs[0].ticket;
+                match end {
+                    "refused" => c.agent.land_held_pair(
+                        &crate::admission::Landed {
+                            ticket,
+                            slow: false,
+                            result: Err(crate::viewer_keys::StoreError::Removed {
+                                key_id: kid.clone(),
+                                origin: "server",
+                            }),
+                        },
+                        &c.tx,
+                    ),
+                    "slow" => c.agent.land_held_pair(
+                        &crate::admission::Landed {
+                            ticket,
+                            slow: true,
+                            result: Err(crate::viewer_keys::StoreError::Write("slow".into())),
+                        },
+                        &c.tx,
+                    ),
+                    // The write lands after the limit, before the tick sees it.
+                    "late" => {
+                        c.agent.held_pairs[0].until = Instant::now();
+                        settle_trusted(&mut c.agent, &c.tx).await;
+                    }
+                    "exit" => {
+                        let (done, _answer) = std::sync::mpsc::sync_channel(1);
+                        c.agent
+                            .handle_command(
+                                AgentCommand::EndForExit {
+                                    why: crate::goodbye::GoodbyeReason::Quit,
+                                    asked: Instant::now(),
+                                    budget: EXIT_END_BUDGET,
+                                    done,
+                                },
+                                &c.tx,
+                            )
+                            .await;
+                    }
+                    "limit" => {
+                        c.agent.expire_held_pairs(Instant::now(), &c.tx);
+                        assert!(pair_responses(&mut c).is_empty(), "limit: not yet");
+                        c.agent.expire_held_pairs(
+                            Instant::now()
+                                + c.agent.trusted.write_limit()
+                                + Duration::from_millis(1),
+                            &c.tx,
+                        );
+                    }
+                    _ => {}
+                }
+                if end != "written" {
+                    assert_eq!(pair_responses(&mut c), vec![None], "{end}: no key id");
+                }
+                // Sent while its key's write has not landed (past the limit on the tick,
+                // `slow`, the exit) — not «approved» yet; a landing (in time or late) is.
+                let outcome = |c: &Ctx| lock(&c.agent.state).pair_answers.get("r1");
+                let approved = Some(PairAnswer::Sent {
+                    accept: true,
+                    via_pc_allow: false,
+                });
+                match end {
+                    "slow" | "limit" | "exit" => assert_eq!(
+                        outcome(&c),
+                        Some(PairAnswer::SentKeyPending),
+                        "{end}: the key's write has not landed"
+                    ),
+                    "written" => assert_eq!(outcome(&c), Some(PairAnswer::Held), "{end}"),
+                    // The approval went, its key refused: not «approved».
+                    "refused" => assert_eq!(
+                        outcome(&c),
+                        Some(PairAnswer::SentKeyNotWritten {
+                            why: super::KeyNotWritten::Refused
+                        }),
+                        "{end}: landed without the key"
+                    ),
+                    _ => assert_eq!(outcome(&c), approved, "{end}: landed"),
+                }
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let sent = pair_responses(&mut c);
+                if end == "written" {
+                    assert_eq!(sent, vec![Some(kid.as_str().to_string())]);
+                } else {
+                    assert!(sent.is_empty(), "{end}: answered once: {sent:?}");
+                }
+                assert!(c.agent.held_pairs.is_empty(), "{end}");
+                if end == "refused" {
+                    assert_eq!(
+                        outcome(&c),
+                        Some(PairAnswer::SentKeyNotWritten {
+                            why: super::KeyNotWritten::Refused
+                        }),
+                        "{end}: its landing told already"
+                    );
+                } else if end != "exit" {
+                    assert_eq!(outcome(&c), approved, "{end}: the write landed");
+                }
+            }
+        }
+
+        /// An approval that went
+        /// before its key's write landed (past the limit) is told by that landing only while its
+        /// own outcome stands — a newer outcome of the same id (another press: not waiting), or
+        /// the outcome forgotten before a new press (the window, the terminal), is never
+        /// overwritten by the old landing — and the landing tells «approved» only for the key
+        /// in the list: refused (`removed`) is «sent, the key not written».
+        #[tokio::test]
+        async fn a_late_key_landing_keeps_a_newer_outcome_and_tells_a_refused_key() {
+            use super::PairAnswer;
+            for case in ["superseded", "forgotten", "removed", "added"] {
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+                pair_responses(&mut c);
+                let press = || AgentCommand::RespondToPair {
+                    request_id: "r1".into(),
+                    accept: true,
+                    role: None,
+                    second_step: false,
+                    shown: None,
+                };
+                c.agent.handle_command(press(), &c.tx).await;
+                assert_eq!(c.agent.held_pairs.len(), 1, "{case}: held");
+                let ticket = c.agent.held_pairs[0].ticket;
+                // Past the write's limit: the approval goes without a key id, the write goes on.
+                c.agent.expire_held_pairs(
+                    Instant::now() + c.agent.trusted.write_limit() + Duration::from_millis(1),
+                    &c.tx,
+                );
+                assert_eq!(
+                    pair_responses(&mut c),
+                    vec![None],
+                    "{case}: sent, no key id"
+                );
+                let outcome = |c: &Ctx| lock(&c.agent.state).pair_answers.get("r1");
+                assert_eq!(outcome(&c), Some(PairAnswer::SentKeyPending), "{case}");
+                match case {
+                    "superseded" => {
+                        // Another press on the answered request: a newer outcome of the id.
+                        c.agent.handle_command(press(), &c.tx).await;
+                        assert_eq!(outcome(&c), Some(PairAnswer::NotWaiting), "{case}");
+                        settle_trusted(&mut c.agent, &c.tx).await;
+                        assert_eq!(
+                            outcome(&c),
+                            Some(PairAnswer::NotWaiting),
+                            "{case}: the old landing does not overwrite the newer outcome"
+                        );
+                    }
+                    "forgotten" => {
+                        // The window or the terminal forgets it before a new press of its own.
+                        assert!(lock(&c.agent.state).pair_answers.forget("r1"));
+                        settle_trusted(&mut c.agent, &c.tx).await;
+                        assert_eq!(
+                            outcome(&c),
+                            None,
+                            "{case}: the old landing says nothing of the new press"
+                        );
+                    }
+                    "removed" => {
+                        c.agent.land_held_pair(
+                            &crate::admission::Landed {
+                                ticket,
+                                slow: false,
+                                result: Err(crate::viewer_keys::StoreError::Removed {
+                                    key_id: kid.clone(),
+                                    origin: "pc",
+                                }),
+                            },
+                            &c.tx,
+                        );
+                        assert_eq!(
+                            outcome(&c),
+                            Some(PairAnswer::SentKeyNotWritten {
+                                why: super::KeyNotWritten::Refused
+                            }),
+                            "{case}: refused — not «approved»"
+                        );
+                    }
+                    _ => {
+                        settle_trusted(&mut c.agent, &c.tx).await;
+                        assert_eq!(
+                            outcome(&c),
+                            Some(PairAnswer::Sent {
+                                accept: true,
+                                via_pc_allow: false,
+                            }),
+                            "{case}: the key is in the list"
+                        );
+                    }
+                }
+                assert!(pair_responses(&mut c).is_empty(), "{case}: answered once");
+            }
+        }
+
+        /// A held «Разрешить» — its answer waits for its key's
+        /// write, its outcome `held` — is told by that write's landing only while that outcome
+        /// stands: another press on the answered request before the landing (not waiting), or
+        /// the outcome forgotten before a new press (the window, the terminal), is never
+        /// overwritten by the landing. The held answer itself still goes, once, with its key's id.
+        #[tokio::test]
+        async fn a_held_answers_landing_keeps_a_newer_outcome() {
+            use super::PairAnswer;
+            for case in ["superseded", "forgotten"] {
+                let mut c = ctx(false);
+                c.agent
+                    .handle_command(AgentCommand::RequestPairing, &c.tx)
+                    .await;
+                let (pair, kid, spki) = new_key();
+                pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+                pair_responses(&mut c);
+                let press = || AgentCommand::RespondToPair {
+                    request_id: "r1".into(),
+                    accept: true,
+                    role: None,
+                    second_step: false,
+                    shown: None,
+                };
+                c.agent.handle_command(press(), &c.tx).await;
+                assert_eq!(c.agent.held_pairs.len(), 1, "{case}: held");
+                let outcome = |c: &Ctx| lock(&c.agent.state).pair_answers.get("r1");
+                assert_eq!(outcome(&c), Some(PairAnswer::Held), "{case}");
+                let want = if case == "superseded" {
+                    // Another press on the answered request, before the key's write lands.
+                    c.agent.handle_command(press(), &c.tx).await;
+                    assert_eq!(outcome(&c), Some(PairAnswer::NotWaiting), "{case}");
+                    Some(PairAnswer::NotWaiting)
+                } else {
+                    assert!(lock(&c.agent.state).pair_answers.forget("r1"));
+                    None
+                };
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(c.agent.held_pairs.is_empty(), "{case}: landed");
+                assert_eq!(
+                    pair_responses(&mut c),
+                    vec![Some(kid.as_str().to_string())],
+                    "{case}: the held answer went once, with its key's id"
+                );
+                assert_eq!(
+                    outcome(&c),
+                    want,
+                    "{case}: the landing does not overwrite the newer outcome"
+                );
+                assert!(c.agent.answers_unlanded.is_empty(), "{case}");
+            }
+        }
+
+        /// Every `pair_response` sent so far: `(accept, key_id)`.
+        fn pair_answers_sent(c: &mut Ctx) -> Vec<(bool, Option<String>)> {
+            let mut out = Vec::new();
+            while let Ok(m) = c.rx.try_recv() {
+                if let AgentToServer::PairResponse { accept, key_id, .. } = m {
+                    out.push((accept, key_id));
+                }
+            }
+            out
+        }
+
+        /// Guest P (5, bound nowhere yet) asks with a new key; «Разрешить» at the PC; the
+        /// key is written and the answer goes with its id — and is lost (a half-open socket):
+        /// no `binding_added`. Returns P's new key.
+        async fn approved_and_lost(c: &mut Ctx) -> KeyId {
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+            pair_responses(c);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: None,
+                        second_step: false,
+                        shown: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(
+                pair_answers_sent(c),
+                vec![(true, Some(kid.as_str().to_string()))],
+                "the approval went (and is lost)"
+            );
+            assert!(c.agent.approved_here.contains_key(&5));
+            kid
+        }
+
+        /// The server's re-send of request `r1` of P after `agent_ready` (`pairRequests.ts`: the
+        /// same id, kept across the socket's break), with another key card (never taken).
+        async fn resend_r1(c: &mut Ctx) {
+            let (pair, kid, spki) = new_key();
+            pair_request_with(c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+        }
+
+        fn without_p() -> [BindingInfo; 2] {
+            [
+                role_binding(1, Some(afklink_protocol::BindingRole::Owner)),
+                role_binding(2, Some(afklink_protocol::BindingRole::Guest)),
+            ]
+        }
+
+        /// §10 «Запас», §5: the approval's answer is lost; the
+        /// reconnect's list does not name P (the server binds only on the answer) — P's key is
+        /// younger than the grace, so the rule spares P: the key stays, no mark. The server
+        /// re-sends the same request: an ordinary new request — the request window opens again
+        /// and nothing is answered by itself (no memory of answered requests). The binding
+        /// comes: nothing is marked, ever. Refutes a rule that takes a fresh key at once, or a
+        /// re-send answered from memory.
+        #[tokio::test]
+        async fn a_lost_approval_is_spared_by_its_keys_grace_and_a_resend_is_a_new_request() {
+            use crate::viewer_keys::Lookup;
+            let mut c = ctx(false);
+            let kid = approved_and_lost(&mut c).await;
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            {
+                let store = c.agent.trusted.store().expect("store");
+                assert!(
+                    matches!(store.lookup(&kid), Lookup::Active(_)),
+                    "P's key kept"
+                );
+            }
+            resend_r1(&mut c).await;
+            assert!(
+                lock(&c.agent.state)
+                    .pending_pair
+                    .as_ref()
+                    .is_some_and(|p| p.request_id == "r1"),
+                "the re-send is a new request: its window opens"
+            );
+            assert_eq!(
+                pair_answers_sent(&mut c),
+                vec![],
+                "nothing answered by itself"
+            );
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingAdded {
+                        telegram_user_id: 5,
+                        username: None,
+                        first_name: Some("Vera".into()),
+                        role: Some(afklink_protocol::BindingRole::Guest),
+                        via: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            c.agent
+                .forget_old_approvals(Instant::now() + APPROVED_HERE_FOR + Duration::from_secs(1));
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let store = c.agent.trusted.store().expect("store");
+            assert!(matches!(store.lookup(&kid), Lookup::Active(_)));
+        }
+
+        /// The positive control of the grace: the same lost approval, with P's key older than
+        /// the grace when the reconnect's list leaves P out — the rule takes P: the key leaves
+        /// (`server`) and P is marked `server`.
+        #[tokio::test]
+        async fn a_lost_approval_past_its_keys_grace_is_taken() {
+            use crate::viewer_keys::{Lookup, UNBOUND_KEY_GRACE_MS};
+            let mut c = ctx(false);
+            let kid = approved_and_lost(&mut c).await;
+            c.agent
+                .trusted
+                .store_for_notes()
+                .expect("store")
+                .set_wall_now(crate::journal::now_ms() + UNBOUND_KEY_GRACE_MS);
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let store = c.agent.trusted.store().expect("store");
+            assert!(
+                matches!(store.lookup(&kid), Lookup::Removed(t) if t.origin.as_str() == "server"),
+                "P's key leaves"
+            );
+        }
+
+        /// §10 «Запас» through the orchestrator: guest 3's key, written now, is not named by the
+        /// reconnect's list — spared at `agent_ready`; once its grace ends the pairing tick's
+        /// rule takes 3: the key leaves (origin `server`), 3 is marked `server`, and 3's waiting
+        /// request is dropped at once. Refutes a tick whose rule ends nothing it took.
+        #[tokio::test]
+        async fn a_fresh_unnamed_key_leaves_with_its_requests_when_the_grace_ends() {
+            use crate::viewer_keys::{Lookup, UNBOUND_KEY_GRACE_MS};
+            let now = crate::journal::now_ms();
+            let kid3 = std::cell::RefCell::new(None);
+            let mut c = ctx_with(false, |store| {
+                let (_, kid, spki) = new_key();
+                store
+                    .add(
+                        NewKey {
+                            key: ViewerKey::from_spki(&spki).expect("spki"),
+                            rpk: None,
+                            kind: ClientKind::parse("telegram").expect("kind"),
+                            platform: Platform::parse("android").expect("platform"),
+                        },
+                        Ground::Pair {
+                            person: Person {
+                                telegram_user_id: 3,
+                                first_name: None,
+                                username: None,
+                            },
+                            role: afklink_protocol::BindingRole::Guest,
+                            unconfirmed: false,
+                        },
+                        now,
+                    )
+                    .expect("3's key");
+                *kid3.borrow_mut() = Some(kid);
+            });
+            let kid3 = kid3.into_inner().expect("added");
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&kid3),
+                Lookup::Active(_)
+            ));
+            let _ = request(&mut c, "s-wait", 2, true).await;
+            c.agent
+                .pending
+                .get_mut("s-wait")
+                .expect("waiting")
+                .telegram_user_id = 3;
+            c.agent
+                .trusted
+                .store_for_notes()
+                .expect("store")
+                .set_wall_now(now + UNBOUND_KEY_GRACE_MS);
+            c.agent.trusted.tick(Instant::now());
+            c.agent.end_ruled(&c.tx, "test: the pairing tick");
+            assert!(
+                !c.agent.pending.contains_key("s-wait"),
+                "3's waiting request is dropped"
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let store = c.agent.trusted.store().expect("store");
+            assert!(
+                matches!(store.lookup(&kid3), Lookup::Removed(t) if t.origin.as_str() == "server"),
+                "3's key leaves"
+            );
+            assert!(
+                matches!(store.lookup(&c.guest.1), Lookup::Active(_)),
+                "2 named"
+            );
+        }
+
+        /// §10: `binding_removed` acts at once by its own rules — the guest key `server`, the token
+        /// replaced — and the rule run at the end of the same handler, and any run after it, finds
+        /// the person in order: one rotation. Refutes a rule that removes again what the explicit
+        /// removal took.
+        #[tokio::test]
+        async fn binding_removed_then_the_rule_replaces_the_token_once() {
+            use crate::viewer_keys::Lookup;
+            let mut c = ctx(false);
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let token = |c: &Ctx| c.agent.trusted.store().expect("store").grant_token();
+            let before = token(&c);
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            // One new token for the removal, its rule run and its stored-list departure together.
+            let replaced = token(&c);
+            assert_ne!(replaced, before);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            c.agent.bring_to_rule("test: again", &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let store = c.agent.trusted.store().expect("store");
+            assert_eq!(store.grant_token(), replaced, "one rotation");
+            assert_eq!(store.saved_grant_token(), replaced, "written");
+            assert!(
+                matches!(store.lookup(&c.guest.1), Lookup::Removed(t) if t.origin.as_str() == "server"),
+                "the guest key"
+            );
+        }
+
+        /// §5: an approved request's id re-sent naming ANOTHER person while the first answer is still held for its key's write is a
+        /// new request (the panel shows it), not swallowed by the held answer; the first
+        /// approval stays.
+        #[tokio::test]
+        async fn a_held_answer_does_not_swallow_another_persons_resend() {
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+            pair_responses(&mut c);
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            c.agent.trusted.gate_jobs(gate);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: None,
+                        second_step: false,
+                        shown: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(c.agent.held_pairs.len(), 1, "the answer is held");
+            lock(&c.agent.state).pending_pair = None;
+            let (pair, kid2, spki) = new_key();
+            pair_request_with(&mut c, "r1", 6, "Ann", key_card(&pair, &kid2, &spki)).await;
+            assert_eq!(
+                lock(&c.agent.state)
+                    .pending_pair
+                    .as_ref()
+                    .map(|p| p.telegram_user_id),
+                Some(6),
+                "another person under the approved id: a new request on the panel"
+            );
+            assert_eq!(
+                c.agent.approved_here.get(&5).map(|a| a.request_id.as_str()),
+                Some("r1"),
+                "the first approval stays"
+            );
+            assert_eq!(
+                pair_answers_sent(&mut c),
+                vec![],
+                "nothing answered while held"
+            );
+            drop(release);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(
+                pair_answers_sent(&mut c),
+                vec![(true, Some(kid.as_str().to_string()))],
+                "the held answer goes once, with its key id; nothing for the other person"
+            );
+        }
+
+        /// §5: the server re-sends P's approved request while its answer is still held for the
+        /// key's write: no panel and no second answer — the held
+        /// answer goes once, when the write lands.
+        #[tokio::test]
+        async fn a_resend_while_the_answer_is_held_gets_no_second_answer() {
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+            pair_responses(&mut c);
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            c.agent.trusted.gate_jobs(gate);
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: None,
+                        second_step: false,
+                        shown: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(c.agent.held_pairs.len(), 1, "the answer is held");
+            lock(&c.agent.state).pending_pair = None;
+            for _ in 0..2 {
+                resend_r1(&mut c).await;
+                assert!(
+                    lock(&c.agent.state).pending_pair.is_none(),
+                    "no panel for a re-send of the held request"
+                );
+                assert_eq!(
+                    pair_answers_sent(&mut c),
+                    vec![],
+                    "nothing answered while held"
+                );
+            }
+            drop(release);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            assert_eq!(
+                pair_answers_sent(&mut c),
+                vec![(true, Some(kid.as_str().to_string()))],
+                "the held answer goes once"
+            );
+        }
+
+        /// §5: the id of P's approved request (its answer went and was lost) re-sent naming
+        /// ANOTHER person: a new request — the panel shows it, nothing is answered for it; P's
+        /// approval stays, and P's key, younger than the grace, stays unmarked (§10 «Запас»).
+        #[tokio::test]
+        async fn an_approved_id_resent_for_another_person_is_a_new_request() {
+            use crate::viewer_keys::Lookup;
+            let mut c = ctx(false);
+            let kid = approved_and_lost(&mut c).await;
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            lock(&c.agent.state).pending_pair = None;
+            let (pair, kid2, spki) = new_key();
+            pair_request_with(&mut c, "r1", 6, "Ann", key_card(&pair, &kid2, &spki)).await;
+            assert_eq!(
+                lock(&c.agent.state)
+                    .pending_pair
+                    .as_ref()
+                    .map(|p| p.telegram_user_id),
+                Some(6),
+                "another person under the approved id: a new request on the panel"
+            );
+            assert_eq!(pair_answers_sent(&mut c), vec![], "nothing answered for it");
+            assert_eq!(
+                c.agent.approved_here.get(&5).map(|a| a.request_id.as_str()),
+                Some("r1"),
+                "the first approval stays"
+            );
+            let _ = c.agent.take_agent_ready(&without_p(), &c.tx);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let store = c.agent.trusted.store().expect("store");
+            assert!(matches!(store.lookup(&kid), Lookup::Active(_)));
+        }
+
+        /// A loaded machine starts the list's blocking job seconds
+        /// late (here 2.5 s, past the product's 2 s limit). An agent-level test's list answers
+        /// within the tests' limit, not the product's, and the test waits for the queue to settle
+        /// rather than for a short quiet spell: the held «Разрешить» goes with its key's id.
+        #[tokio::test]
+        async fn a_loaded_machine_does_not_make_an_agent_tests_write_slow() {
+            use super::PairAnswer;
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 5, "Vera", key_card(&pair, &kid, &spki)).await;
+            pair_responses(&mut c);
+            let (release, gate) = std::sync::mpsc::channel();
+            c.agent.trusted.gate_jobs(gate);
+            let late = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(2500));
+                drop(release);
+            });
+            c.agent
+                .handle_command(
+                    AgentCommand::RespondToPair {
+                        request_id: "r1".into(),
+                        accept: true,
+                        role: None,
+                        second_step: false,
+                        shown: None,
+                    },
+                    &c.tx,
+                )
+                .await;
+            assert_eq!(c.agent.held_pairs.len(), 1, "held");
+            settle_trusted(&mut c.agent, &c.tx).await;
+            late.join().expect("the release");
+            assert_eq!(
+                pair_responses(&mut c),
+                vec![Some(kid.as_str().to_string())],
+                "the answer names its key: the write was late, not slow"
+            );
+            assert_eq!(
+                lock(&c.agent.state).pair_answers.get("r1"),
+                Some(PairAnswer::Sent {
+                    accept: true,
+                    via_pc_allow: false,
+                })
+            );
+        }
+
+        /// The server re-sends the owner's request that still waits (a
+        /// reconnect) right after the core answered a press on it `second_step_required`: the
+        /// outcome stays — the window's tick brings the request back for the step by it. Only a
+        /// request whose earlier one ended forgets the outcome kept under its id.
+        #[tokio::test]
+        async fn a_retransmit_of_a_waiting_request_keeps_its_second_step_outcome() {
+            use super::PairAnswer;
+            let mut c = ctx(false);
+            c.agent
+                .handle_command(AgentCommand::RequestPairing, &c.tx)
+                .await;
+            let (pair, kid, spki) = new_key();
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            pair_responses(&mut c);
+            let outcome = |c: &Ctx| lock(&c.agent.state).pair_answers.get("r1");
+            let press = |accept: bool| AgentCommand::RespondToPair {
+                request_id: "r1".into(),
+                accept,
+                role: Some(afklink_protocol::BindingRole::Owner),
+                second_step: false,
+                shown: None,
+            };
+            c.agent.handle_command(press(true), &c.tx).await;
+            assert_eq!(outcome(&c), Some(PairAnswer::SecondStepRequired));
+            // The server re-sends it (the same request, still waiting).
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            assert!(
+                c.agent.admission.pair_waiting("r1").is_some(),
+                "still waits"
+            );
+            assert_eq!(
+                outcome(&c),
+                Some(PairAnswer::SecondStepRequired),
+                "kept across the retransmit: the window comes back for the step"
+            );
+            assert!(pair_responses(&mut c).is_empty(), "nothing sent");
+            // Declined: the request ended; the same id again is a new request.
+            c.agent.handle_command(press(false), &c.tx).await;
+            assert_eq!(
+                outcome(&c),
+                Some(PairAnswer::Sent {
+                    accept: false,
+                    via_pc_allow: false
+                })
+            );
+            pair_request_with(&mut c, "r1", 1, "Owner", key_card(&pair, &kid, &spki)).await;
+            assert_eq!(outcome(&c), None, "the earlier request ended: forgotten");
+        }
+
+        /// On the list (§10.2): another device's attempt survives a
+        /// restart — it is kept on the list's notes, written by the
+        /// offer's own write of the notes, and a new agent over the same list (no journal) shows
+        /// it for its person; the journal's lines are no source (one written by hand for another
+        /// person brings nothing back).
+        #[tokio::test]
+        async fn attempts_come_back_after_a_restart() {
+            let mut c = ctx(true);
+            let journal = journal_of(&mut c);
+            let (pair, kid, spki) = new_key();
+            let nonce = request(&mut c, "s1", 2, true).await;
+            let card = key_card(&pair, &kid, &spki);
+            let mut p = proof(&c, &(pair, kid.clone()), "s1", &nonce);
+            p["key_reg"] = card;
+            offer_with(&mut c, "s1", &FP, Some(p)).await;
+            assert_eq!(c.agent.trusted.attempts_of(2).len(), 1);
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let (_, stranger, _) = new_key();
+            journal.other_device_attempt(
+                crate::journal::Person {
+                    user: 777,
+                    name: "x",
+                    username: None,
+                },
+                stranger.as_str(),
+                "key_unknown",
+                crate::journal::now_ms(),
+            );
+            let (agent, _control) = test_agent(None);
+            let agent = agent
+                .with_journal(journal.clone())
+                .with_trust_store(TrustStore::open_in(&c.dir));
+            let kept = agent.trusted.attempts_of(2);
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            assert_eq!(kept[0].key_id, kid);
+            assert_eq!(kept[0].count, 1);
+            assert!(agent.trusted.attempts_of(777).is_empty());
+        }
+
+        /// A grant lifting the server's tombstone of a key waits behind
+        /// another change of the list; that change landing first sweeps the keys — the waiting
+        /// session's key is still removed then, which is its normal state — and the grant lands
+        /// and admits it. The person is marked removed (`server`, §10) by the unbind: only a
+        /// grant over the token the removal wrote lifts the mark, so this one is.
+        #[tokio::test]
+        async fn a_lifting_grant_waiting_behind_another_change_is_admitted() {
+            let mut c = ctx(true);
+            c.agent
+                .handle_server_msg(
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: 2,
+                    },
+                    &c.tx,
+                )
+                .await;
+            settle_trusted(&mut c.agent, &c.tx).await;
+            lock(&c.agent.state)
+                .bindings
+                .push(role_binding(2, Some(afklink_protocol::BindingRole::Guest)));
+            ends(&mut c);
+            // Another change in flight: the owner's new device by endorsement.
+            let nonce = request(&mut c, "s-other", 1, true).await;
+            endorsed_offer(&mut c, "s-other", &nonce).await;
+            // The guest's key again, with the owner's fresh grant: it waits behind.
+            let nonce = request(&mut c, "s-g", 2, true).await;
+            let mut p = proof(&c, &c.guest, "s-g", &nonce);
+            let mut spki = SPKI_PREFIX.to_vec();
+            spki.extend_from_slice(c.guest.0.public_key().as_ref());
+            p["key_reg"] = key_card(&c.guest.0, &c.guest.1, &spki);
+            let now = u64::try_from(crate::journal::now_ms()).expect("a time");
+            p["admit"] = serde_json::json!([grant_entry_at(&c, &c.guest.1, 2, 7, now)]);
+            offer_with(&mut c, "s-g", &FP, Some(p)).await;
+            assert!(
+                c.agent.offers_waiting.contains_key("s-g"),
+                "{:?}",
+                ends(&mut c)
+            );
+            settle_trusted(&mut c.agent, &c.tx).await;
+            let e: Vec<_> = ends(&mut c)
+                .into_iter()
+                .filter(|(s, _, _)| s == "s-g")
+                .collect();
+            assert!(e.is_empty(), "not ended while waiting: {e:?}");
+            assert!(c.agent.admitted_ready.contains(&"s-g".to_string()));
+            assert!(matches!(
+                c.agent.trusted.store().expect("store").lookup(&c.guest.1),
+                crate::viewer_keys::Lookup::Active(_)
+            ));
+        }
     }
 }

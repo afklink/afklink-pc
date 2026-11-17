@@ -35,12 +35,19 @@
 //! The owner's sessions are untouched, and a session whose viewer becomes the owner (or stops being
 //! it) is judged so from its next event: the role is read for every event ([`RoleCell`]).
 //!
+//! **The trust windows** (device keys, spec §3.4 «Органы доверия»): the pairing
+//! request window and the main window while its pairing panel is open ([`TrustWindows`]) take
+//! input only from a session **signed by a confirmed owner key** ([`RoleCell::owner_key`]). The
+//! owner as the server says (an unsigned session, an old Mini App) keeps the rest of the main
+//! window; its trust commands are refused by the agent while such a session is live
+//! (`crate::trusted`).
+//!
 //! Where the window cannot be read (the injector cannot tell, no window there) the event goes:
 //! holding a guest back whenever a read fails would freeze sessions on the lock screen or a UAC
 //! prompt, which are not ours anyway. The first such event of a session is said.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use afklink_protocol::InputMessage;
@@ -59,6 +66,89 @@ pub const OWN_WINDOW_EVERY: Duration = Duration::from_millis(100);
 /// window-manager calls, well under a millisecond, unless the input planner's lock is held by a
 /// stuck injection.
 const SLOW_READ: Duration = Duration::from_millis(250);
+
+/// AFKLink's trust windows by their top-level `HWND` (0: not known): the pairing request window,
+/// and the main window while the pairing panel is open in it. The desktop app says which windows
+/// they are ([`Self::set_pair_request`], [`Self::set_main`]); the orchestrator says when the panel
+/// opens and closes ([`Self::set_panel_open`]). Atomics only: read for every judged event.
+#[derive(Debug, Default)]
+pub struct TrustWindows {
+    pair_request: AtomicUsize,
+    main: AtomicUsize,
+    panel_open: AtomicBool,
+}
+
+impl TrustWindows {
+    /// The process's one ([`OwnWindowGuard::new`] reads it).
+    pub fn global() -> Arc<Self> {
+        static ONE: OnceLock<Arc<TrustWindows>> = OnceLock::new();
+        Arc::clone(ONE.get_or_init(|| Arc::new(Self::default())))
+    }
+
+    /// The pairing request window's `HWND`. 0 (not known) leaves it unguarded: said at `warn`.
+    pub fn set_pair_request(&self, hwnd: usize) {
+        if hwnd == 0 {
+            tracing::warn!(
+                "own windows: the pairing request window's handle is not known; remote input is \
+                 not kept from it as from a trust window"
+            );
+        } else {
+            tracing::debug!("own windows: the pairing request window is a trust window");
+        }
+        self.pair_request.store(hwnd, Ordering::Relaxed);
+    }
+
+    /// The main window's `HWND` (a trust window while the pairing panel is open). 0 (not known)
+    /// leaves it unguarded: said at `warn`.
+    pub fn set_main(&self, hwnd: usize) {
+        if hwnd == 0 {
+            tracing::warn!(
+                "own windows: the main window's handle is not known; remote input is not kept \
+                 from its pairing panel as from a trust window"
+            );
+        } else {
+            tracing::debug!(
+                "own windows: the main window is a trust window while the pairing panel is open"
+            );
+        }
+        self.main.store(hwnd, Ordering::Relaxed);
+    }
+
+    /// The pairing panel opened or closed.
+    pub fn set_panel_open(&self, open: bool) {
+        if self.panel_open.swap(open, Ordering::Relaxed) != open {
+            tracing::debug!(
+                open,
+                "own windows: the pairing panel {}",
+                if open {
+                    "opened: the main window takes input only from a session signed by a confirmed \
+                     owner key"
+                } else {
+                    "closed: the main window is open to the owner's input again"
+                }
+            );
+        }
+    }
+
+    /// `hwnd` is a trust window now.
+    pub fn is_trust(&self, hwnd: usize) -> bool {
+        hwnd != 0
+            && (hwnd == self.pair_request.load(Ordering::Relaxed)
+                || (self.panel_open.load(Ordering::Relaxed)
+                    && hwnd == self.main.load(Ordering::Relaxed)))
+    }
+}
+
+/// Which of our windows a session's input is kept from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Signed by a confirmed owner key: none.
+    Nothing,
+    /// The owner as the server says, not signed by a confirmed owner key: the trust windows.
+    Trust,
+    /// Not the owner: every window of ours.
+    All,
+}
 
 /// What an event is, for the counts and the rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +282,8 @@ struct Stretch {
 #[derive(Debug, Default)]
 struct State {
     stretch: Option<Stretch>,
-    /// The guard applies to the session (its viewer is not the owner), as last said.
-    applies: Option<bool>,
+    /// What the guard keeps the session from, as last said.
+    applies: Option<Scope>,
     /// One of our windows had the front at the watch's last look.
     in_front: bool,
     /// An event whose window could not be read went through: said once a session.
@@ -225,50 +315,81 @@ pub(crate) struct OwnWindowGuard {
     role: Arc<RoleCell>,
     sid: String,
     state: Mutex<State>,
+    /// Which of ours are the trust windows ([`TrustWindows::global`] but in tests).
+    trust: Arc<TrustWindows>,
 }
 
 impl OwnWindowGuard {
     pub(crate) fn new(role: Arc<RoleCell>, sid: &str) -> Self {
-        Self::for_process(std::process::id(), role, sid)
+        Self::with_trust(std::process::id(), role, sid, TrustWindows::global())
     }
 
+    /// A guard of process `pid` whose windows the tests place, with no trust window.
+    #[cfg(test)]
     fn for_process(pid: u32, role: Arc<RoleCell>, sid: &str) -> Self {
+        Self::with_trust(pid, role, sid, Arc::new(TrustWindows::default()))
+    }
+
+    fn with_trust(pid: u32, role: Arc<RoleCell>, sid: &str, trust: Arc<TrustWindows>) -> Self {
         Self {
             pid,
             role,
             sid: sid.to_string(),
             state: Mutex::new(State::default()),
+            trust,
         }
     }
 
-    /// Whether the guard applies now (the viewer is not the owner), saying a change.
-    fn applies(&self, s: &mut State, now: Instant) -> bool {
+    /// What the guard keeps the session from now, saying a change.
+    fn scope(&self, s: &mut State, now: Instant) -> Scope {
         let role = self.role.get();
-        let applies = !role.is_owner();
-        if s.applies != Some(applies) {
+        let owner_key = self.role.owner_key();
+        let scope = if !role.is_owner() {
+            Scope::All
+        } else if owner_key {
+            Scope::Nothing
+        } else {
+            Scope::Trust
+        };
+        if s.applies != Some(scope) {
             tracing::debug!(
                 session = %self.sid,
                 role = role.as_str(),
+                owner_key,
                 pid = self.pid,
                 "own windows: {}",
-                if applies {
-                    "the viewer is not the PC's owner (as the server says): presses, keys and text \
-                     do not reach AFKLink's windows"
-                } else {
-                    "the viewer is the PC's owner: input reaches AFKLink's windows as any other"
+                match scope {
+                    Scope::All => {
+                        "the viewer is not the PC's owner (as the server says): presses, keys and \
+                         text do not reach AFKLink's windows"
+                    }
+                    Scope::Trust => {
+                        "the viewer is the owner as the server says, not signed by a confirmed \
+                         owner key: presses, keys and text do not reach the trust windows (the \
+                         pairing request, the pairing panel); the rest of ours as any other"
+                    }
+                    Scope::Nothing => {
+                        "the viewer is signed by a confirmed owner key: input reaches AFKLink's \
+                         windows as any other"
+                    }
                 }
             );
-            s.applies = Some(applies);
-            if !applies {
-                self.end_stretch(s, now, "the viewer is the PC's owner now");
+            let was = s.applies.replace(scope);
+            if scope == Scope::Nothing || (was == Some(Scope::All) && scope == Scope::Trust) {
+                self.end_stretch(s, now, "the viewer's role changed");
                 s.in_front = false;
             }
         }
-        applies
+        scope
     }
 
-    fn ours(&self, owner: Option<WindowOwner>) -> Option<bool> {
-        owner.map(|o| o.pid == self.pid)
+    /// Whether the guard applies now (anything is kept from the session).
+    fn applies(&self, s: &mut State, now: Instant) -> bool {
+        self.scope(s, now) != Scope::Nothing
+    }
+
+    fn ours(&self, owner: Option<WindowOwner>, scope: Scope) -> Option<bool> {
+        owner.map(|o| o.pid == self.pid && (scope == Scope::All || self.trust.is_trust(o.hwnd)))
     }
 
     /// Mouse Keys as the injector read it (`on`, by [`Self::lands`] without the state's lock), its
@@ -297,10 +418,15 @@ impl OwnWindowGuard {
     /// is not held here: a read can wait (the input planner's lock for the press target), and
     /// whoever else wants the lock (the watch between events, the next event) must not wait with
     /// it.
-    fn lands(&self, kind: Kind, injector: &dyn InputInjector) -> (Lands, Option<Option<bool>>) {
+    fn lands(
+        &self,
+        kind: Kind,
+        scope: Scope,
+        injector: &dyn InputInjector,
+    ) -> (Lands, Option<Option<bool>>) {
         match kind {
             Kind::Key | Kind::Text | Kind::Combo => {
-                let front = self.ours(injector.window_owner(WindowTarget::Foreground));
+                let front = self.ours(injector.window_owner(WindowTarget::Foreground), scope);
                 if front == Some(true) {
                     return (Lands::Ours(Why::OursInFront), None);
                 }
@@ -309,7 +435,8 @@ impl OwnWindowGuard {
                     let on = injector.mouse_keys_on();
                     mouse_keys = Some(on);
                     if on == Some(true) {
-                        let under = self.ours(injector.window_owner(WindowTarget::UnderPress));
+                        let under =
+                            self.ours(injector.window_owner(WindowTarget::UnderPress), scope);
                         if under == Some(true) {
                             return (Lands::Ours(Why::MouseKeysOverOurs), mouse_keys);
                         }
@@ -325,12 +452,13 @@ impl OwnWindowGuard {
                 let Some(under) = injector.window_owner(WindowTarget::UnderPress) else {
                     return (Lands::Unreadable(WindowTarget::UnderPress), None);
                 };
-                if under.pid == self.pid {
+                if self.ours(Some(under), scope) == Some(true) {
                     return (Lands::Ours(Why::OursUnderPress), None);
                 }
                 if kind == Kind::Press
                     && under.no_activate
-                    && self.ours(injector.window_owner(WindowTarget::Foreground)) == Some(true)
+                    && self.ours(injector.window_owner(WindowTarget::Foreground), scope)
+                        == Some(true)
                 {
                     return (Lands::Ours(Why::NoActivateOverOurs), None);
                 }
@@ -351,7 +479,8 @@ impl OwnWindowGuard {
         injector: &dyn InputInjector,
         now: Instant,
     ) -> Admit {
-        if !self.applies(&mut lock(&self.state), now) {
+        let scope = self.scope(&mut lock(&self.state), now);
+        if scope == Scope::Nothing {
             return Admit::Pass;
         }
         let Some(kind) = Kind::of(event) else {
@@ -362,7 +491,7 @@ impl OwnWindowGuard {
         // the runtime's timers and I/O. Only for the events that are judged (presses, keys, text).
         let read_at = Instant::now();
         let (mut lands, mut mouse_keys) =
-            crate::input_session::blocking(|| self.lands(kind, injector));
+            crate::input_session::blocking(|| self.lands(kind, scope, injector));
         let read = read_at.elapsed();
         if read >= SLOW_READ {
             // A slow answer is an old one: the windows may have changed while it waited — one of
@@ -371,7 +500,7 @@ impl OwnWindowGuard {
             // do: a press is judged by the window under it). Still slow, the windows cannot be
             // known now: the guest's event is held back, without beginning a stretch.
             let again_at = Instant::now();
-            let fresh = crate::input_session::blocking(|| self.lands(kind, injector));
+            let fresh = crate::input_session::blocking(|| self.lands(kind, scope, injector));
             let again = again_at.elapsed();
             tracing::warn!(
                 session = %self.sid,
@@ -463,10 +592,11 @@ impl OwnWindowGuard {
     /// The window is read without the state's lock (see [`Self::admit`]): a read stuck on the
     /// planner's lock stalls this watch only, never an event waiting for the lock.
     pub(crate) fn watch(&self, injector: &dyn InputInjector, now: Instant) -> bool {
-        if !self.applies(&mut lock(&self.state), now) {
+        let scope = self.scope(&mut lock(&self.state), now);
+        if scope == Scope::Nothing {
             return false;
         }
-        let front = self.ours(injector.window_owner(WindowTarget::Foreground)) == Some(true);
+        let front = self.ours(injector.window_owner(WindowTarget::Foreground), scope) == Some(true);
         let mut s = lock(&self.state);
         if !self.applies(&mut s, now) {
             return false;
@@ -556,9 +686,11 @@ pub(crate) mod tests {
     use crate::game_access::ViewerRole;
     use std::sync::Mutex as StdMutex;
 
-    /// What the session's viewer is.
+    /// What the session's viewer is. The owner here is a session signed by a confirmed owner key
+    /// (untouched); the owner as the server says without one has its own test
+    /// (`trust_windows_take_input_only_from_a_confirmed_owner_key`).
     fn role(role: ViewerRole) -> Arc<RoleCell> {
-        Arc::new(RoleCell::fixed(role))
+        Arc::new(RoleCell::fixed_key(role, true))
     }
 
     const OURS: u32 = 4242;
@@ -571,6 +703,8 @@ pub(crate) mod tests {
     pub(crate) struct Desk {
         foreground: StdMutex<Option<u32>>,
         under: StdMutex<Option<WindowOwner>>,
+        /// The top-level window placed in front and under the press (0: none of note).
+        hwnd: StdMutex<usize>,
         mouse_keys: StdMutex<Option<bool>>,
         asked: StdMutex<Vec<WindowTarget>>,
         pub(crate) injected: StdMutex<Vec<String>>,
@@ -580,16 +714,25 @@ pub(crate) mod tests {
     impl Desk {
         pub(crate) fn place(&self, foreground: Option<u32>, under: Option<u32>) {
             *self.foreground.lock().unwrap() = foreground;
+            let hwnd = *self.hwnd.lock().unwrap();
             *self.under.lock().unwrap() = under.map(|pid| WindowOwner {
                 pid,
                 no_activate: false,
+                hwnd,
             });
+        }
+
+        /// Our window `hwnd` in front and under the press.
+        fn place_ours(&self, hwnd: usize) {
+            *self.hwnd.lock().unwrap() = hwnd;
+            self.place(Some(OURS), Some(OURS));
         }
 
         fn under_no_activate(&self, pid: u32) {
             *self.under.lock().unwrap() = Some(WindowOwner {
                 pid,
                 no_activate: true,
+                hwnd: 0,
             });
         }
 
@@ -610,9 +753,11 @@ pub(crate) mod tests {
             self.asked.lock().unwrap().push(target);
             match target {
                 WindowTarget::Foreground => {
+                    let hwnd = *self.hwnd.lock().unwrap();
                     self.foreground.lock().unwrap().map(|pid| WindowOwner {
                         pid,
                         no_activate: false,
+                        hwnd,
                     })
                 }
                 WindowTarget::UnderPress => *self.under.lock().unwrap(),
@@ -1249,5 +1394,74 @@ pub(crate) mod tests {
         );
         let owner = OwnWindowGuard::for_process(OURS, role(ViewerRole::Owner), "s2");
         assert_eq!(owner.admit(&key(1), &*gated, Instant::now()), Admit::Pass);
+    }
+
+    const MAIN: usize = 0x100;
+    const PAIR: usize = 0x200;
+
+    fn trust_guard(cell: RoleCell, trust: &Arc<TrustWindows>) -> OwnWindowGuard {
+        OwnWindowGuard::with_trust(OURS, Arc::new(cell), "s1", Arc::clone(trust))
+    }
+
+    /// The trust windows (spec §3.4 «Органы доверия»): the pairing request window, and the main
+    /// window while the pairing panel is open, take no press, key or text from the owner as the
+    /// server says (unsigned) nor from a guest; a session signed by a confirmed owner key reaches
+    /// them. The unsigned owner keeps the main window while the panel is closed.
+    #[test]
+    fn trust_windows_take_input_only_from_a_confirmed_owner_key() {
+        let trust = Arc::new(TrustWindows::default());
+        trust.set_pair_request(PAIR);
+        trust.set_main(MAIN);
+        let desk = Desk::default();
+        let now = Instant::now();
+        let unsigned_owner = trust_guard(RoleCell::fixed_key(ViewerRole::Owner, false), &trust);
+        let guest = trust_guard(RoleCell::fixed_key(ViewerRole::Guest, false), &trust);
+        let signed_owner = trust_guard(RoleCell::fixed_key(ViewerRole::Owner, true), &trust);
+
+        // The pairing request window: refused to the unsigned owner and to a guest.
+        desk.place_ours(PAIR);
+        for e in [down(), key(1)] {
+            assert!(
+                matches!(unsigned_owner.admit(&e, &desk, now), Admit::HoldBack { .. }),
+                "unsigned owner {e:?}"
+            );
+            assert!(
+                matches!(guest.admit(&e, &desk, now), Admit::HoldBack { .. }),
+                "guest {e:?}"
+            );
+            assert_eq!(
+                signed_owner.admit(&e, &desk, now),
+                Admit::Pass,
+                "signed {e:?}"
+            );
+        }
+
+        // The main window, the panel closed: the unsigned owner's input goes; a guest's does not.
+        desk.place_ours(MAIN);
+        assert_eq!(unsigned_owner.admit(&down(), &desk, now), Admit::Pass);
+        assert!(matches!(
+            guest.admit(&down(), &desk, now),
+            Admit::HoldBack { .. }
+        ));
+
+        // The panel open: the main window is a trust window.
+        trust.set_panel_open(true);
+        assert!(matches!(
+            unsigned_owner.admit(&down(), &desk, now),
+            Admit::HoldBack { .. }
+        ));
+        assert!(matches!(
+            unsigned_owner.admit(&key(1), &desk, now),
+            Admit::HoldBack { .. }
+        ));
+        assert_eq!(signed_owner.admit(&down(), &desk, now), Admit::Pass);
+        assert_eq!(signed_owner.admit(&key(1), &desk, now), Admit::Pass);
+
+        // Closed again: the unsigned owner's input reaches it.
+        trust.set_panel_open(false);
+        assert_eq!(unsigned_owner.admit(&down(), &desk, now), Admit::Pass);
+        // Another window altogether: everyone's goes.
+        desk.place(Some(OTHER), Some(OTHER));
+        assert_eq!(guest.admit(&down(), &desk, now), Admit::Pass);
     }
 }

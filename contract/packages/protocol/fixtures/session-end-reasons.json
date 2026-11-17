@@ -33,5 +33,14 @@
   "peer_error",
   "internal_error",
   "ice_timeout",
-  "ice_restart_failed"
+  "ice_restart_failed",
+  "nonce_stale",
+  "key_required",
+  "key_unknown",
+  "key_unconfirmed",
+  "admit_refused",
+  "key_revoked",
+  "proof_invalid",
+  "fingerprint_changed",
+  "key_list_damaged"
 ]

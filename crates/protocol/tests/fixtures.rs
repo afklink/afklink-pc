@@ -513,7 +513,9 @@ fn clipboard_fixtures_cover_both_answers_and_whole_chunks() {
                 saw_pc = true;
                 assert!(chunk.i < chunk.n && !chunk.text.is_empty(), "{file}");
             }
-            AgentDataMessage::Heartbeat(_) | AgentDataMessage::Cursor(_) => {}
+            AgentDataMessage::Heartbeat(_)
+            | AgentDataMessage::Cursor(_)
+            | AgentDataMessage::KeyStatus(_) => {}
         }
     }
     assert!(
@@ -906,13 +908,32 @@ fn telemetry_v2_fixtures_cover_every_new_shape() {
                 }
                 other => panic!("{file}: a hello with some of the v2 fields: {other:?}"),
             },
-            AgentToServer::SessionEnd { detail, .. } => match detail {
+            AgentToServer::SessionEnd { reason, detail, .. } => match detail {
                 Some(d) => {
                     end_detail = true;
                     let (kept, dropped) = d.clone().keep_valid();
                     assert!(dropped.is_empty(), "{file}: {dropped:?}");
                     assert_eq!(kept, d);
-                    assert!(d.ended_detail.is_some() && d.stage.is_some(), "{file}");
+                    // A device-key refusal (spec §11) may come before any peer: its detail is the
+                    // `ended_detail` alone. Every other end says how far its peer got.
+                    let key_end = afklink_protocol::KeyEndReason::ALL
+                        .iter()
+                        .any(|r| reason.as_deref() == Some(r.as_str()));
+                    assert!(
+                        d.base.ended_detail.is_some() && (d.base.stage.is_some() || key_end),
+                        "{file}"
+                    );
+                    // The PC's mode rides only on an end of device keys, and is one of its words.
+                    match d.key_mode.as_deref() {
+                        Some(m) => assert!(
+                            key_end
+                                && afklink_protocol::KeyMode::ALL
+                                    .iter()
+                                    .any(|k| k.as_str() == m),
+                            "{file}: key_mode {m}"
+                        ),
+                        None => assert!(!key_end, "{file}: an end of device keys says the mode"),
+                    }
                 }
                 None => {
                     end_plain = true;
@@ -1069,6 +1090,9 @@ fn every_message_the_agent_speaks_has_a_fixture() {
         "pairing_cancel",
         "pair_response",
         "device_name",
+        "session_nonces",
+        "key_mode",
+        "grant_token",
         "unbind",
         "owner_request",
         "owner_request_cancel",
@@ -1110,9 +1134,10 @@ fn every_message_the_agent_speaks_has_a_fixture() {
     .into_iter()
     .collect();
 
-    let expected_agent_to_viewer: BTreeSet<&str> = ["hb", "cp", "cb_state", "cb_pc", "cb_ack"]
-        .into_iter()
-        .collect();
+    let expected_agent_to_viewer: BTreeSet<&str> =
+        ["hb", "cp", "cb_state", "cb_pc", "cb_ack", "ks"]
+            .into_iter()
+            .collect();
 
     for (name, expected) in [
         ("agent-to-server", expected_agent_to_server),

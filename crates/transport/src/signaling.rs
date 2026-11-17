@@ -718,6 +718,12 @@ pub struct Signaling {
     pub goodbye: GoodbyeHandle,
     /// Bindings reported at `agent_ready`.
     pub initial_bindings: Vec<BindingInfo>,
+    /// `agent_ready.nonce_pool` (device keys, spec §2.2): this connection takes the PC's
+    /// `session_nonces`. `false` from a server older than device keys (the field absent).
+    pub nonce_pool: bool,
+    /// `agent_ready.grant_token` (device keys, spec §7 «Токен выдачи»): this connection takes the
+    /// PC's `grant_token`. `false` from an older server (the field absent).
+    pub grant_token: bool,
     /// Protocol window the backend reported. Kept so a mismatch is diagnosable
     /// from a log line rather than from a message that silently does nothing.
     pub server_protocol: (u32, u32),
@@ -835,12 +841,14 @@ pub async fn connect_with(
     );
 
     // Step 4: expect agent_ready.
-    let (initial_bindings, server_protocol) =
+    let (initial_bindings, server_protocol, nonce_pool, grant_token) =
         match recv_handshake(&mut ws, "agent_ready", limits.handshake_silence, &mut heard).await? {
             Some(ServerToAgent::AgentReady {
                 bindings,
                 protocol_version,
                 min_supported_protocol,
+                nonce_pool,
+                grant_token,
             }) => {
                 tracing::info!(
                     "backend speaks protocol {min_supported_protocol}..{protocol_version}, \
@@ -856,7 +864,34 @@ pub async fn connect_with(
                         "this build's protocol is outside the backend's window"
                     );
                 }
-                (bindings, (min_supported_protocol, protocol_version))
+                // Only the contract's literal `true` turns the pool on (spec §2.2).
+                let nonce_pool = nonce_pool == Some(true);
+                tracing::debug!(
+                    nonce_pool,
+                    "agent_ready: {}",
+                    if nonce_pool {
+                        "the server keeps a nonce pool; session_nonces go on this connection"
+                    } else {
+                        "no nonce pool (a server older than device keys); no session_nonces"
+                    }
+                );
+                // The same for the grant token (spec §7 «Токен выдачи»): only a literal `true`.
+                let grant_token = grant_token == Some(true);
+                tracing::debug!(
+                    grant_token,
+                    "agent_ready: {}",
+                    if grant_token {
+                        "the server takes the grant token; grant_token goes on this connection"
+                    } else {
+                        "the server does not take the grant token (an older one); none sent"
+                    }
+                );
+                (
+                    bindings,
+                    (min_supported_protocol, protocol_version),
+                    nonce_pool,
+                    grant_token,
+                )
             }
             Some(ServerToAgent::Error { code, message }) => {
                 return Err(refused(code, message, "agent_ready"));
@@ -1092,6 +1127,8 @@ pub async fn connect_with(
         unsent: unsent_rx,
         goodbye: GoodbyeHandle { tx: goodbye_tx },
         initial_bindings,
+        nonce_pool,
+        grant_token,
         server_protocol,
         health,
         peer,

@@ -35,6 +35,11 @@ pub use signaling::{
     LinkHealth, Signaling, SignalingConfig, Signer,
 };
 pub use socket_bytes::SocketBytes;
+/// The str0m this crate is built on, for tests in other crates that hold the agent's DTLS to it
+/// (`afklink-core`'s `tests/dtls_fingerprint.rs`): the very copy and features the peers run on,
+/// with no second dependency to keep in step. Product code goes through this crate's own API.
+#[doc(hidden)]
+pub use str0m;
 pub use stun::stun_servers;
 pub use webrtc::{
     spawn_peer, spawn_peer_with, CloseCause, CloseSignal, KeyframeAsk, MediaSample, Peer,

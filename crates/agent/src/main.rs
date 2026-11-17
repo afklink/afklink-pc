@@ -358,6 +358,15 @@ async fn run_agent(config: Config, opts: Options) -> Result<()> {
         .with_user_agent(build_info().user_agent())
         .with_hello(hello)
         .with_hw_reader(Arc::new(afklink_hw::system));
+    // The PC's trusted devices beside config.json, as the desktop app keeps them (device keys:
+    // every offer goes through the admission). Opening reads the file, and a damaged list's
+    // backup is checked when it is attached: blocking file I/O, so off the runtime's worker
+    // (`block_in_place`, the default multi-thread runtime), before the agent runs.
+    let agent = tokio::task::block_in_place(|| {
+        let store = afklink_core::viewer_keys::TrustStore::open_default();
+        tracing::debug!("trusted devices: the list opened for the CLI");
+        agent.with_trust_store(store)
+    });
     // Clipboard sync as in the desktop app, for viewers that turn it on — not on a bench run that
     // touches nothing of this PC (`--no-input`): its viewer is told the clipboard is unavailable.
     let agent = if opts.no_input {
@@ -447,28 +456,41 @@ async fn run_agent(config: Config, opts: Options) -> Result<()> {
                             p.display_name()
                         );
                     }
-                    TerminalCommand::Answer { pending: p, accept } => {
-                        // Not asked «Кто это?»: an approval makes the person a guest.
+                    TerminalCommand::Answer {
+                        pending: p,
+                        accept: false,
+                    } => {
                         send_command(
                             &control,
                             afklink_core::AgentCommand::RespondToPair {
                                 request_id: p.request_id,
-                                accept,
+                                accept: false,
                                 role: None,
+                                second_step: false,
+                                shown: None,
                             },
                         );
-                        println!("  -> {}\n", if accept { "approved" } else { "declined" });
+                        println!("  -> declined\n");
+                    }
+                    TerminalCommand::Answer {
+                        pending: p,
+                        accept: true,
+                    } => {
+                        // Not asked «Кто это?»: an approval makes the person a guest. The
+                        // line says what the core made of it.
+                        let name = p.display_name();
+                        let outcome = approve_and_wait(&control, p.request_id, None).await;
+                        println!("  -> {}\n", approval_line(outcome, &name, false));
                     }
                     TerminalCommand::AnswerAsOwner(p) => {
-                        send_command(
+                        let name = p.display_name();
+                        let outcome = approve_and_wait(
                             &control,
-                            afklink_core::AgentCommand::RespondToPair {
-                                request_id: p.request_id,
-                                accept: true,
-                                role: Some(afklink_core::BindingRole::Owner),
-                            },
-                        );
-                        println!("  -> approved as the owner\n");
+                            p.request_id,
+                            Some(afklink_core::BindingRole::Owner),
+                        )
+                        .await;
+                        println!("  -> {}\n", approval_line(outcome, &name, true));
                     }
                     TerminalCommand::StillWaiting(p) if p.asks_role() => {
                         println!(
@@ -657,6 +679,17 @@ async fn announce(mut events: broadcast::Receiver<AgentEvent>, device_id: String
                 name_source = name.source.as_str(),
                 "new guest by the owner's invite: no toast in the CLI"
             ),
+            // The desktop app's toast «{user}: новое устройство»; the CLI has no toasts — the
+            // orchestrator's journal line has the device.
+            Ok(AgentEvent::NewTrustedDevice {
+                telegram_user_id,
+                device,
+                ..
+            }) => tracing::debug!(
+                telegram_user_id,
+                ground = %device.source,
+                "a person's new trusted device: no toast in the CLI"
+            ),
             Err(broadcast::error::RecvError::Lagged(missed)) => tracing::warn!(
                 missed,
                 "agent events missed by the stdout announcer: their BENCH lines are lost"
@@ -739,15 +772,13 @@ async fn auto_pairing(control: AgentControl, mut events: broadcast::Receiver<Age
                     "--auto-approve-pairing: approving the pairing request from {}",
                     p.display_name()
                 );
-                println!("  {} wants to pair: auto-approved", p.display_name());
-                // Nobody to ask «Кто это?»: a guest, as any approval that was not asked.
-                send_command(
-                    &control,
-                    afklink_core::AgentCommand::RespondToPair {
-                        request_id: p.request_id.clone(),
-                        accept: true,
-                        role: None,
-                    },
+                // Nobody to ask «Кто это?»: a guest, as any approval that was not asked. The
+                // line says what the core made of it.
+                let name = p.display_name();
+                let outcome = approve_and_wait(&control, p.request_id.clone(), None).await;
+                println!(
+                    "  {name} wants to pair: auto-approve — {}",
+                    approval_line(outcome, &name, false)
                 );
                 answered = Some(p.request_id);
             }
@@ -905,9 +936,252 @@ fn selftest(mut capturer: Box<dyn Capturer>) -> Result<()> {
     Ok(())
 }
 
+/// What the core made of a pairing approval typed here, as its state shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalOutcome {
+    /// Not decided yet (the orchestrator has not taken the command).
+    Pending,
+    /// The request is answered (the approval went to the server).
+    Approved,
+    /// The request is answered, via `pc_allow`: the owner is asked (a session of someone who is
+    /// not the owner is live); for a removed person the device is not added.
+    OwnerAsked,
+    /// A removed person, or an owner on this PC (spec §5): the core needs the window's second
+    /// step, which the terminal does not give — nothing was sent, the request still waits.
+    SecondStepRequired,
+    /// The role given is not the one this PC derives for the person (spec §5): nothing was sent,
+    /// the request still waits.
+    RoleRefused,
+    /// The request was not waiting (answered, cancelled, expired or forgotten at the bound):
+    /// the core sent nothing.
+    NotWaiting,
+    /// The answer went as a decline — a change of the person's role on this PC overtook the press.
+    Declined,
+    /// The request's link is down: nothing was sent, the request stays.
+    LinkDown,
+    /// The approval went, but its device key was not added to this PC's list (the key's
+    /// write was refused, or wrote another key). `why` names which.
+    ApprovedKeyNotWritten(afklink_core::agent::KeyNotWritten),
+}
+
+/// [`ApprovalOutcome`] of an approval of `request_id`: the outcome the core kept for
+/// that request id ([`afklink_core::AgentState::pair_answers`]) — never one guessed from the
+/// request leaving the state (it may have expired, been withdrawn or declined as overtaken).
+/// None kept yet, held for its key's write, or sent with that write not landed yet:
+/// [`ApprovalOutcome::Pending`].
+fn approval_outcome(state: &afklink_core::AgentState, request_id: &str) -> ApprovalOutcome {
+    use afklink_core::agent::PairAnswer;
+    match state.pair_answers.get(request_id) {
+        // Sent while its key's write had not landed — not «approved» until it does.
+        None | Some(PairAnswer::Held | PairAnswer::SentKeyPending) => ApprovalOutcome::Pending,
+        Some(PairAnswer::Sent {
+            accept: true,
+            via_pc_allow: false,
+        }) => ApprovalOutcome::Approved,
+        Some(PairAnswer::Sent {
+            accept: true,
+            via_pc_allow: true,
+        }) => ApprovalOutcome::OwnerAsked,
+        Some(PairAnswer::Sent { accept: false, .. }) => ApprovalOutcome::Declined,
+        Some(PairAnswer::SecondStepRequired) => ApprovalOutcome::SecondStepRequired,
+        Some(PairAnswer::RoleRefused) => ApprovalOutcome::RoleRefused,
+        Some(PairAnswer::NotWaiting) => ApprovalOutcome::NotWaiting,
+        Some(PairAnswer::LinkDown) => ApprovalOutcome::LinkDown,
+        Some(PairAnswer::SentKeyNotWritten { why }) => ApprovalOutcome::ApprovedKeyNotWritten(why),
+    }
+}
+
+/// How long the terminal waits for the core to take its approval before it says so.
+const APPROVAL_WAIT: Duration = Duration::from_secs(3);
+
+/// Send the approval of `request_id` (`role`), then wait (polling the state, at most
+/// [`APPROVAL_WAIT`]) for what the core made of it; logged at every outcome.
+async fn approve_and_wait(
+    control: &AgentControl,
+    request_id: String,
+    role: Option<afklink_core::BindingRole>,
+) -> ApprovalOutcome {
+    // An outcome kept from an earlier answer of this id is not this press's.
+    if afklink_core::lock(&control.state)
+        .pair_answers
+        .forget(&request_id)
+    {
+        tracing::debug!(
+            %request_id,
+            "terminal: an earlier answer's outcome under this id forgotten before the press"
+        );
+    }
+    send_command(
+        control,
+        afklink_core::AgentCommand::RespondToPair {
+            request_id: request_id.clone(),
+            accept: true,
+            role,
+            // The terminal gives no second step, so a press that would write a key for an owner on
+            // this PC is not approved from here (`SecondStepRequired`); without a key to write, an
+            // owner's approve goes through. Anyone else's approve is a pairing at the PC, as in
+            // the window — a person removed at this PC is let back by it too.
+            second_step: false,
+            shown: None,
+        },
+    );
+    let until = Instant::now() + APPROVAL_WAIT;
+    loop {
+        let outcome = approval_outcome(&afklink_core::lock(&control.state), &request_id);
+        if outcome != ApprovalOutcome::Pending || Instant::now() >= until {
+            tracing::debug!(
+                %request_id,
+                outcome = ?outcome,
+                "terminal: the pairing approval's outcome{}",
+                if outcome == ApprovalOutcome::Pending {
+                    " — none within the wait (the core has not taken it yet)"
+                } else {
+                    ""
+                }
+            );
+            return outcome;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The terminal's line for an approval's outcome (`as_owner`: «o»).
+fn approval_line(outcome: ApprovalOutcome, name: &str, as_owner: bool) -> String {
+    match outcome {
+        ApprovalOutcome::Approved if as_owner => "approved as the owner".to_string(),
+        ApprovalOutcome::Approved => "approved".to_string(),
+        ApprovalOutcome::OwnerAsked => {
+            "approved here; the owner is asked (a session of someone else is live)".to_string()
+        }
+        ApprovalOutcome::SecondStepRequired => format!(
+            "not approved: {name} needs a second step at the window (removed from this PC, or \
+             the owner's own device); the terminal gives none — answer from the window"
+        ),
+        ApprovalOutcome::RoleRefused => format!(
+            "not approved: this PC has an owner and gives {name} another role than the one sent; \
+             nothing was sent — answer from the window"
+        ),
+        // The terminal stops waiting here; the core may still settle it (a key's write).
+        ApprovalOutcome::Pending => format!(
+            "sent; no outcome from the agent within {} s — the terminal stops waiting, and the \
+             outcome may still change",
+            APPROVAL_WAIT.as_secs()
+        ),
+        ApprovalOutcome::NotWaiting => {
+            format!("not approved: {name}'s request no longer waits; nothing was sent")
+        }
+        ApprovalOutcome::Declined => format!(
+            "not approved: {name}'s role on this PC changed after the press; the request was \
+             declined"
+        ),
+        ApprovalOutcome::LinkDown => {
+            "not sent: no link to the server; the request stays — answer again once it is back"
+                .to_string()
+        }
+        // What became of the key, as the core says it.
+        ApprovalOutcome::ApprovedKeyNotWritten(afklink_core::agent::KeyNotWritten::Refused) => {
+            format!(
+                "approved, but {name}'s device key was not added to this PC's list (its write was \
+                 refused); the device is not trusted here"
+            )
+        }
+        ApprovalOutcome::ApprovedKeyNotWritten(afklink_core::agent::KeyNotWritten::AnotherKey) => {
+            format!(
+                "approved, but {name}'s device key was not added to this PC's list (another key \
+                 took this pairing's place); the device is not trusted here"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The terminal says the outcome the core kept for its own
+    /// request id — never «approved» because the request left the state (expired, withdrawn,
+    /// declined as overtaken by a role change), and not another request's outcome.
+    #[test]
+    fn the_terminal_reads_the_outcome_kept_for_its_request() {
+        use afklink_core::agent::PairAnswer;
+        let mut s = afklink_core::AgentState::default();
+        assert_eq!(
+            approval_outcome(&s, "r1"),
+            ApprovalOutcome::Pending,
+            "gone with no outcome: not taken yet, not «approved»"
+        );
+        for (answer, want) in [
+            (PairAnswer::Held, ApprovalOutcome::Pending),
+            // Sent, its key's write not landed: not «approved» yet.
+            (PairAnswer::SentKeyPending, ApprovalOutcome::Pending),
+            (
+                PairAnswer::Sent {
+                    accept: true,
+                    via_pc_allow: false,
+                },
+                ApprovalOutcome::Approved,
+            ),
+            (
+                PairAnswer::Sent {
+                    accept: true,
+                    via_pc_allow: true,
+                },
+                ApprovalOutcome::OwnerAsked,
+            ),
+            (
+                PairAnswer::Sent {
+                    accept: false,
+                    via_pc_allow: false,
+                },
+                ApprovalOutcome::Declined,
+            ),
+            (
+                PairAnswer::SecondStepRequired,
+                ApprovalOutcome::SecondStepRequired,
+            ),
+            (PairAnswer::RoleRefused, ApprovalOutcome::RoleRefused),
+            (PairAnswer::NotWaiting, ApprovalOutcome::NotWaiting),
+            (PairAnswer::LinkDown, ApprovalOutcome::LinkDown),
+            // The approval went, its key's write ended without the key: never «approved».
+            (
+                PairAnswer::SentKeyNotWritten {
+                    why: afklink_core::agent::KeyNotWritten::AnotherKey,
+                },
+                ApprovalOutcome::ApprovedKeyNotWritten(
+                    afklink_core::agent::KeyNotWritten::AnotherKey,
+                ),
+            ),
+        ] {
+            s.pair_answers.note("r1", answer);
+            assert_eq!(approval_outcome(&s, "r1"), want, "{answer:?}");
+        }
+        assert_eq!(
+            approval_outcome(&s, "r2"),
+            ApprovalOutcome::Pending,
+            "another request's outcome says nothing of this one"
+        );
+    }
+
+    /// The terminal's line says what became of
+    /// the device key — «refused» only for a refused write, not for another key written — and
+    /// that the terminal stops waiting after
+    /// [`APPROVAL_WAIT`] while the outcome may still change.
+    #[test]
+    fn the_terminals_line_says_why_the_key_was_not_added_and_when_it_stops_waiting() {
+        use afklink_core::agent::KeyNotWritten;
+        let line = |why| approval_line(ApprovalOutcome::ApprovedKeyNotWritten(why), "Vera", false);
+        let another = line(KeyNotWritten::AnotherKey);
+        assert!(!another.contains("refused"), "{another}");
+        assert!(another.contains("another"), "{another}");
+        let refused = line(KeyNotWritten::Refused);
+        assert!(refused.contains("refused"), "{refused}");
+        let pending = approval_line(ApprovalOutcome::Pending, "Vera", false);
+        assert!(
+            pending.contains(&format!("{} s", APPROVAL_WAIT.as_secs())),
+            "{pending}"
+        );
+        assert!(pending.contains("may still change"), "{pending}");
+    }
     use afklink_core::build_info::Channel;
     use afklink_core::logging::{LogLevel, RELEASE_PHASE};
 

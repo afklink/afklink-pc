@@ -27,6 +27,11 @@
 //! `session_end.detail`, the session summary and `agent_event` — is in [`metrics`], held to the
 //! contract by the golden fixtures and by `tests/metrics.rs`.
 //!
+//! Viewer device keys (milestone 1) — `session_nonces`, `nonce_pc`, the opaque `proof` and
+//! `viewer_key`, the DataChannel's `ks`, the summary's `key_*`, the vocabularies and the limits the
+//! agent holds the opaque values to — are in [`viewer_keys`] and the message types, held to the
+//! contract by the golden fixtures and by `tests/viewer_keys.rs`.
+//!
 //! The invite-only beta's part of `agent_hello` — the PC's hardware fingerprint — is in [`hw`], held
 //! to the contract by the golden fixture `agent_hello_hw.json` and by `tests/metrics.rs`.
 //!
@@ -54,6 +59,7 @@ pub mod invites;
 pub mod metrics;
 pub mod roles;
 pub mod start_failure;
+pub mod viewer_keys;
 
 pub use agent_ws::{
     agent_challenge_message, AgentSessionStats, AgentToServer, GoodbyeReason, ServerToAgent,
@@ -81,12 +87,15 @@ pub use input::{
 };
 pub use invites::{BindingVia, VIA_OTHER_MAX_CHARS};
 pub use metrics::{
-    AgentBuildInfo, AgentExitKind, AgentLastExit, PeerStage, SessionEndDetail,
-    SESSION_TOMBSTONE_MS, TELEMETRY_FIRST_REPORT_MS,
+    AgentBuildInfo, AgentExitKind, AgentLastExit, AgentSessionEndDetail, PeerStage,
+    SessionEndDetail, SESSION_TOMBSTONE_MS, TELEMETRY_FIRST_REPORT_MS,
 };
 pub use roles::{
     BindingRole, OwnerRequestKind, OwnerRequestReason, OwnerRequestState, OwnerStateKind,
     OWNER_REQUEST_TTL_MS,
+};
+pub use viewer_keys::{
+    KeyAdmit, KeyEndReason, KeyMode, KeyStatus, KsVerdict, WireLimit, KEY_VERDICT_UNSIGNED,
 };
 
 /// Protocol version this build speaks. Mirrors `PROTOCOL_VERSION` in the contract.

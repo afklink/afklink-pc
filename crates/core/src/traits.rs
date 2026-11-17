@@ -294,6 +294,9 @@ pub struct WindowOwner {
     /// on-screen keyboard is one, and what it types goes to the window that has the front. Read for
     /// [`WindowTarget::UnderPress`] only; false otherwise.
     pub no_activate: bool,
+    /// Its top-level window's handle (`HWND` as an integer; 0 when not read): which of AFKLink's
+    /// windows it is, for the trust windows' guard (`crate::own_windows::TrustWindows`).
+    pub hwnd: usize,
 }
 
 /// Which window an input event would reach ([`InputInjector::window_owner`]).
