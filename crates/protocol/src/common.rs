@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::invites::BindingVia;
 use crate::roles::BindingRole;
 
 /// Direction of an SDP blob. Narrowed to the two values the contract allows, so an
@@ -26,9 +27,41 @@ pub struct BindingInfo {
     /// reads as "this server has no roles" — not as "guest"; absent on the wire again when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<BindingRole>,
+    /// How the binding stands now: [`BindingVia::Party`] — it lives only through parties, with no
+    /// personal reason (the person is a guest only while one of `parties` holds this PC). Absent: a
+    /// personal binding, or a server older than the field. A word this build does not know is
+    /// [`BindingVia::Other`], read as no `via` at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<BindingVia>,
+    /// The parties through which this person is a guest of this PC now (`party_id`s), for the
+    /// window to say which. Empty (or absent on the wire): none, or a server older than the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parties: Vec<String>,
 }
 
 impl BindingInfo {
+    /// A binding with no `via` and no parties: the shape of a personal one.
+    pub fn personal(
+        telegram_user_id: i64,
+        username: Option<String>,
+        first_name: Option<String>,
+        role: Option<BindingRole>,
+    ) -> Self {
+        Self {
+            telegram_user_id,
+            username,
+            first_name,
+            role,
+            via: None,
+            parties: Vec::new(),
+        }
+    }
+
+    /// The binding lives only through parties (`via: party`).
+    pub fn party_only(&self) -> bool {
+        matches!(self.via, Some(BindingVia::Party))
+    }
+
     /// Best available human label for this user.
     pub fn display_name(&self) -> String {
         match (&self.username, &self.first_name) {
@@ -122,6 +155,8 @@ mod tests {
             username: Some("owner".into()),
             first_name: Some("Owner".into()),
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         assert_eq!(with_username.display_name(), "@owner");
 
@@ -130,6 +165,8 @@ mod tests {
             username: None,
             first_name: Some("Owner".into()),
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         assert_eq!(no_username.display_name(), "Owner");
 
@@ -138,6 +175,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         assert_eq!(nothing.display_name(), "id 3");
     }
@@ -149,6 +188,8 @@ mod tests {
             username: Some(String::new()),
             first_name: Some("Owner".into()),
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         assert_eq!(empty.display_name(), "Owner");
     }

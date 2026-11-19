@@ -4,7 +4,8 @@
 //!
 //! The owner, away from the PC, invites a friend from Telegram and allows him there; the server binds
 //! the friend as a guest and tells the PC `binding_added{role: guest, via: invite}`. Nobody at the PC
-//! was asked, so the PC tells the person at it at once.
+//! was asked, so the PC tells the person at it at once. A member of a party the PC is in is bound
+//! the same way, `binding_added{role: guest, via: party}` (`docs/design/party-protocol.md` §8.2).
 //!
 //! Unlike the roles' sets ([`crate::roles`]), this one is open on the way in, as the contract asks: a
 //! word this build does not know reads as no `via` at all — the binding counts whatever its origin,
@@ -22,6 +23,9 @@ pub enum BindingVia {
     /// `invite`: the owner allowed, in Telegram, a friend who accepted his invite; nobody at the PC
     /// was asked. Always with `role: guest`.
     Invite,
+    /// `party`: a member of a party this PC is in; nobody at the PC was asked. Always with
+    /// `role: guest`.
+    Party,
     /// A word this build does not know — a later server's — or a value that is not a word at all,
     /// kept as given (at most [`VIA_OTHER_MAX_CHARS`] characters) for the log. Means what an absent
     /// `via` means: nothing.
@@ -33,14 +37,16 @@ impl BindingVia {
     pub fn from_wire(word: &str) -> Self {
         match word {
             "invite" => Self::Invite,
+            "party" => Self::Party,
             other => Self::Other(other.chars().take(VIA_OTHER_MAX_CHARS).collect()),
         }
     }
 
-    /// The wire spelling, for log lines: `invite`, or the unknown word as it came.
+    /// The wire spelling, for log lines: `invite`, `party`, or the unknown word as it came.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Invite => "invite",
+            Self::Party => "party",
             Self::Other(word) => word,
         }
     }
@@ -83,17 +89,16 @@ mod tests {
     }
 
     #[test]
-    fn invite_is_read_and_written_as_the_contract_spells_it() {
-        assert_eq!(BindingVia::from_wire("invite"), BindingVia::Invite);
-        assert_eq!(BindingVia::Invite.as_str(), "invite");
-        assert_eq!(
-            serde_json::to_value(BindingVia::Invite).expect("serialises"),
-            serde_json::json!("invite")
-        );
-        assert_eq!(
-            via_of(&added(r#","via":"invite""#)),
-            Some(BindingVia::Invite)
-        );
+    fn the_known_words_are_read_and_written_as_the_contract_spells_them() {
+        for (via, word) in [(BindingVia::Invite, "invite"), (BindingVia::Party, "party")] {
+            assert_eq!(BindingVia::from_wire(word), via);
+            assert_eq!(via.as_str(), word);
+            assert_eq!(
+                serde_json::to_value(&via).expect("serialises"),
+                serde_json::json!(word)
+            );
+            assert_eq!(via_of(&added(&format!(r#","via":"{word}""#))), Some(via));
+        }
     }
 
     /// The contract: a value the agent does not know reads as no `via` at all, and never costs it the

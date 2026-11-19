@@ -11,10 +11,15 @@ use std::io::Write as _;
 
 use serde_json::{Map, Value};
 
+use afklink_protocol::party::{
+    check_party_statement_wire, is_party_name, PARTY_LEADER_NAME_MAX, PARTY_LEADER_USERNAME_MAX,
+};
+use afklink_protocol::viewer_keys::WireLimit;
+
 use super::wire::{
     b64url_array, b64url_exact, endorse_message, first_use_message, grant_message, invite_message,
-    key_reg_message, offer_message, GrantFields, GrantToken, FINGERPRINT_LEN, GROUND_ID_BYTES,
-    NONCE_PC_LEN,
+    key_reg_message, offer_message, party_grant_message, party_join_message, GrantFields,
+    GrantToken, PartyJoinFields, FINGERPRINT_LEN, GROUND_ID_BYTES, NONCE_PC_LEN,
 };
 use super::{
     ClientKind, GroundId, KeyId, Platform, ViewerKey, MAX_INIT_DATA_LEN, MAX_USER_ID,
@@ -51,9 +56,14 @@ pub struct OfferProof {
 #[derive(Debug, Clone)]
 pub enum AdmitEntry {
     Endorse(Value),
-    Grant { grant: Value, invite: Option<Value> },
+    Grant {
+        grant: Value,
+        invite: Option<Value>,
+    },
     Recover(Map<String, Value>),
     FirstUse(Map<String, Value>),
+    /// A party leader's grant (party spec §2.3): the item's `grant`.
+    Party(Value),
 }
 
 impl AdmitEntry {
@@ -63,6 +73,7 @@ impl AdmitEntry {
             Self::Grant { .. } => "grant",
             Self::Recover(_) => "recover",
             Self::FirstUse(_) => "first_use",
+            Self::Party(_) => "party",
         }
     }
 }
@@ -207,6 +218,9 @@ impl OfferProof {
                     admit.push(AdmitEntry::Recover(e.clone()));
                 }
                 "first_use" => admit.push(AdmitEntry::FirstUse(e.clone())),
+                "party" => admit.push(AdmitEntry::Party(
+                    e.get("grant").cloned().unwrap_or(Value::Null),
+                )),
                 other => tracing::debug!(
                     kind_len = other.len(),
                     "offer proof: a ground of an unknown kind skipped"
@@ -468,6 +482,177 @@ impl Grant {
             by: &self.by,
         });
         by.verify(&g, &self.sig).is_ok()
+    }
+}
+
+/// A party statement's limits first ([`check_party_statement_wire`]: an object, its depth, at
+/// most 2048 bytes as compact JSON), then its fields.
+fn party_statement(value: &Value) -> Result<&Map<String, Value>, Why> {
+    check_party_statement_wire(value).map_err(|e| match e {
+        WireLimit::TooLarge => "size",
+        WireLimit::TooDeep => "depth",
+        _ => "not_object",
+    })?;
+    match value {
+        Value::Object(m) if v1(m) => Ok(m),
+        Value::Object(_) => Err("v"),
+        _ => Err("not_object"),
+    }
+}
+
+/// [`nullable_str`] of at most `max` Unicode code points (party spec §2.1).
+fn bounded_name(m: &Map<String, Value>, name: &str, max: usize) -> Result<Option<String>, ()> {
+    nullable_str(m, name)?.map_or(Ok(None), |s| {
+        (s.chars().count() <= max).then_some(Some(s)).ok_or(())
+    })
+}
+
+/// A party leader's grant to a member (party spec §2.3), well formed (`grant_malformed`
+/// otherwise): the keys' `grant` V2 with `party_id` in the invitation's place and the leader's key
+/// as `by`. `role` is kept as sent and checked by the admission (`grant_role`).
+#[derive(Debug, Clone)]
+pub struct PartyGrant {
+    pub device_id: String,
+    pub key_id: KeyId,
+    pub telegram_user_id: i64,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub role: String,
+    pub party_id: [u8; GROUND_ID_BYTES],
+    pub grant_id: [u8; GROUND_ID_BYTES],
+    pub grant_token: GrantToken,
+    pub issued_at: u64,
+    pub by: KeyId,
+    pub sig: [u8; SIGNATURE_LEN],
+}
+
+impl PartyGrant {
+    /// `why` (grant.json): `size`, `depth`, `not_object`, `v`, then the field that failed.
+    pub fn parse(value: &Value) -> Result<Self, Why> {
+        let m = party_statement(value)?;
+        Ok(Self {
+            device_id: str_field(m, "device_id").ok_or("device_id")?.to_string(),
+            key_id: key_id_field(m, "key_id").ok_or("key_id")?,
+            telegram_user_id: user_id(m.get("telegram_user_id")).ok_or("telegram_user_id")?,
+            name: bounded_name(m, "name", PARTY_LEADER_NAME_MAX).map_err(|()| "name")?,
+            username: bounded_name(m, "username", PARTY_LEADER_USERNAME_MAX)
+                .map_err(|()| "username")?,
+            role: str_field(m, "role").ok_or("role")?.to_string(),
+            party_id: ground_field(m, "party_id").ok_or("party_id")?,
+            grant_id: ground_field(m, "grant_id").ok_or("grant_id")?,
+            grant_token: str_field(m, "grant_token")
+                .and_then(GrantToken::parse)
+                .ok_or("grant_token")?,
+            issued_at: millis(m.get("issued_at")).ok_or("issued_at")?,
+            by: key_id_field(m, "by").ok_or("by")?,
+            sig: sig_field(m, "sig").ok_or("sig")?,
+        })
+    }
+
+    /// The signature under the leader's key (the delegation's SPKI).
+    pub fn verify(&self, leader: &ViewerKey) -> bool {
+        leader.verify(&self.message(), &self.sig).is_ok()
+    }
+
+    /// `pg` as this PC rebuilds it from the grant.
+    pub fn message(&self) -> Vec<u8> {
+        party_grant_message(
+            &GrantFields {
+                device_id: &self.device_id,
+                key_id: &self.key_id,
+                telegram_user_id: self.telegram_user_id,
+                name: self.name.as_deref(),
+                username: self.username.as_deref(),
+                inv_id: None,
+                grant_id: &self.grant_id,
+                grant_token: &self.grant_token,
+                issued_at: self.issued_at,
+                by: &self.by,
+            },
+            &self.party_id,
+        )
+    }
+}
+
+/// The leader as «ПК в пати» names him (party spec §2.1): the SPKI checked canonical, its
+/// `key_id` derived here.
+#[derive(Debug, Clone)]
+pub struct PartyLeaderRef {
+    pub telegram_user_id: i64,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub key: ViewerKey,
+}
+
+/// «ПК в пати» (party spec §2.2), well formed (`party_ack` `malformed` otherwise).
+#[derive(Debug, Clone)]
+pub struct PartyJoin {
+    pub device_id: String,
+    pub party_id: [u8; GROUND_ID_BYTES],
+    pub party: String,
+    pub leader: PartyLeaderRef,
+    pub grant_token: GrantToken,
+    pub issued_at: u64,
+    pub by: KeyId,
+    pub sig: [u8; SIGNATURE_LEN],
+}
+
+impl PartyJoin {
+    /// `why` (join.json): `size`, `depth`, `not_object`, `v`, then the field that failed
+    /// (`leader_spki` for a SPKI that is not canonical).
+    pub fn parse(value: &Value) -> Result<Self, Why> {
+        let m = party_statement(value)?;
+        let device_id = str_field(m, "device_id").ok_or("device_id")?.to_string();
+        let party_id = ground_field(m, "party_id").ok_or("party_id")?;
+        let party = str_field(m, "party")
+            .filter(|p| is_party_name(p))
+            .ok_or("party")?
+            .to_string();
+        let l = m.get("leader").and_then(Value::as_object).ok_or("leader")?;
+        let leader = PartyLeaderRef {
+            telegram_user_id: user_id(l.get("telegram_user_id"))
+                .ok_or("leader.telegram_user_id")?,
+            name: bounded_name(l, "name", PARTY_LEADER_NAME_MAX).map_err(|()| "leader.name")?,
+            username: bounded_name(l, "username", PARTY_LEADER_USERNAME_MAX)
+                .map_err(|()| "leader.username")?,
+            key: str_field(l, "spki")
+                .and_then(|s| b64url_exact(s, SPKI_LEN))
+                .and_then(|b| ViewerKey::from_spki(&b).ok())
+                .ok_or("leader_spki")?,
+        };
+        Ok(Self {
+            device_id,
+            party_id,
+            party,
+            leader,
+            grant_token: str_field(m, "grant_token")
+                .and_then(GrantToken::parse)
+                .ok_or("grant_token")?,
+            issued_at: millis(m.get("issued_at")).ok_or("issued_at")?,
+            by: key_id_field(m, "by").ok_or("by")?,
+            sig: sig_field(m, "sig").ok_or("sig")?,
+        })
+    }
+
+    /// `j` as this PC rebuilds it from the statement.
+    pub fn message(&self) -> Vec<u8> {
+        party_join_message(&PartyJoinFields {
+            device_id: &self.device_id,
+            party_id: &self.party_id,
+            party: &self.party,
+            leader_telegram_user_id: self.leader.telegram_user_id,
+            leader_name: self.leader.name.as_deref(),
+            leader_username: self.leader.username.as_deref(),
+            leader_key_id: self.leader.key.key_id(),
+            grant_token: &self.grant_token,
+            issued_at: self.issued_at,
+            by: &self.by,
+        })
+    }
+
+    /// The signature under the owner's key `by`.
+    pub fn verify(&self, by: &ViewerKey) -> bool {
+        by.verify(&self.message(), &self.sig).is_ok()
     }
 }
 

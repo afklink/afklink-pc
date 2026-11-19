@@ -32,6 +32,16 @@
 //! agent holds the opaque values to — are in [`viewer_keys`] and the message types, held to the
 //! contract by the golden fixtures and by `tests/viewer_keys.rs`.
 //!
+//! Parties — `agent_ready.party`, `party_join`, `party_leave`, `party_ack`, `party_state`, the limits
+//! and closed lists the agent holds the opaque statements to — are in [`party`] and the message
+//! types; the admit's word is [`viewer_keys::KeyAdmit::Party`], the binding's [`BindingVia::Party`].
+//! Held to the contract by the golden fixtures and by `tests/viewer_keys.rs`.
+//!
+//! The PC's input on another Windows desktop (a UAC prompt, the lock screen) — the heartbeat's
+//! `secure_desktop`, `secure_desktop_ongoing`, `agent_ready.secure_desktop` and the `agent_event`
+//! `secure_desktop_ended` — is in [`secure_desktop`] and the message types, held to the contract by
+//! the golden fixtures and by `tests/secure_desktop.rs`.
+//!
 //! The invite-only beta's part of `agent_hello` — the PC's hardware fingerprint — is in [`hw`], held
 //! to the contract by the golden fixture `agent_hello_hw.json` and by `tests/metrics.rs`.
 //!
@@ -57,7 +67,9 @@ pub mod hw;
 pub mod input;
 pub mod invites;
 pub mod metrics;
+pub mod party;
 pub mod roles;
+pub mod secure_desktop;
 pub mod start_failure;
 pub mod viewer_keys;
 
@@ -90,9 +102,13 @@ pub use metrics::{
     AgentBuildInfo, AgentExitKind, AgentLastExit, AgentSessionEndDetail, PeerStage,
     SessionEndDetail, SESSION_TOMBSTONE_MS, TELEMETRY_FIRST_REPORT_MS,
 };
+pub use party::{PartyAckOp, PartyAckResult, PartyDelegation};
 pub use roles::{
     BindingRole, OwnerRequestKind, OwnerRequestReason, OwnerRequestState, OwnerStateKind,
     OWNER_REQUEST_TTL_MS,
+};
+pub use secure_desktop::{
+    SecureDesktopKind, SECURE_DESKTOP_DURATION_MAX_MS, SECURE_DESKTOP_ONGOING_AFTER_MS,
 };
 pub use viewer_keys::{
     KeyAdmit, KeyEndReason, KeyMode, KeyStatus, KsVerdict, WireLimit, KEY_VERDICT_UNSIGNED,

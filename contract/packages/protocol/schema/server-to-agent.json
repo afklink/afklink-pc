@@ -75,6 +75,21 @@
                   "owner",
                   "guest"
                 ]
+              },
+              "via": {
+                "type": "string",
+                "enum": [
+                  "invite",
+                  "party"
+                ]
+              },
+              "parties": {
+                "maxItems": 256,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+                }
               }
             },
             "required": [
@@ -89,6 +104,14 @@
           "const": true
         },
         "grant_token": {
+          "type": "boolean",
+          "const": true
+        },
+        "party": {
+          "type": "boolean",
+          "const": true
+        },
+        "secure_desktop": {
           "type": "boolean",
           "const": true
         }
@@ -265,8 +288,17 @@
         "via": {
           "type": "string",
           "enum": [
-            "invite"
+            "invite",
+            "party"
           ]
+        },
+        "parties": {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+          }
         }
       },
       "required": [
@@ -404,6 +436,49 @@
         "kind",
         "telegram_user_id",
         "state"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "party_join"
+        },
+        "join": {
+          "type": "object",
+          "properties": {
+            "party_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+            }
+          },
+          "required": [
+            "party_id"
+          ],
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "type",
+        "join"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "party_leave"
+        },
+        "party_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+        }
+      },
+      "required": [
+        "type",
+        "party_id"
       ]
     },
     {

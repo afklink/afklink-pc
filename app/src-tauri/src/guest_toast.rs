@@ -24,9 +24,19 @@
 //! (`notify.deviceUnknown.native`). A vouching device so named — or gone from the list — is
 //! «другого устройства» (`notify.deviceEndorsedUnknown.native`). The platform names are
 //! [`PLATFORMS`], the window's map exactly.
+//!
+//! And the PC's parties (party spec §5.4, §6; [`AgentEvent::Party`], after the change is in the
+//! list's file): added — `notify.partyAdded.native`, or `notify.partyAddedWaiting.native` while
+//! «Доверенные устройства» is on and the guests wait for the leader; another leader —
+//! `notify.partyLeader.native`; left — `notify.partyLeft.native`, except a press of
+//! «Убрать ПК из пати» at the PC (the PC's own removals have no toast; the journal has the entry); a member's
+//! first device — `notify.partyGuest.native`; a member's device the full list refused —
+//! `notify.partyDeviceLimit.native`. People named as the pairing window names a requester; the
+//! party's name as the join signed it, cleaned.
 
-use afklink_core::agent::NewDeviceHow;
+use afklink_core::agent::{NewDeviceHow, PartyEvent};
 use afklink_core::journal::TrustedDevice;
+use afklink_core::viewer_keys::PartyLeaveBy;
 use afklink_core::{AgentEvent, PersonName};
 use afklink_i18n::{Locale, NativeText, ToastLines};
 use tauri::AppHandle;
@@ -126,6 +136,59 @@ pub(crate) fn new_device_lines(
     }
 }
 
+/// The toast for a party's event, in `locale`; `None` for the PC's own press of
+/// «Убрать ПК из пати» (the PC's own removals have no toast).
+pub(crate) fn party_lines(locale: Locale, party: &str, event: &PartyEvent) -> Option<ToastLines> {
+    Some(match event {
+        PartyEvent::Added {
+            leader,
+            strict: false,
+        } => NativeText::NotifyPartyAdded.toast(
+            locale,
+            &[("party", party), ("leader", leader.text.as_str())],
+        ),
+        PartyEvent::Added {
+            leader,
+            strict: true,
+        } => NativeText::NotifyPartyAddedWaiting.toast(
+            locale,
+            &[("party", party), ("leader", leader.text.as_str())],
+        ),
+        PartyEvent::LeaderChanged { leader } => NativeText::NotifyPartyLeader
+            .toast(locale, &[("party", party), ("user", leader.text.as_str())]),
+        PartyEvent::Left {
+            by: Some(PartyLeaveBy::Pc),
+        } => return None,
+        PartyEvent::Left { .. } => NativeText::NotifyPartyLeft.toast(locale, &[("party", party)]),
+        PartyEvent::Guest { name, .. } => NativeText::NotifyPartyGuest
+            .toast(locale, &[("party", party), ("user", name.text.as_str())]),
+        PartyEvent::DeviceLimit { .. } => {
+            NativeText::NotifyPartyDeviceLimit.toast(locale, &[("party", party)])
+        }
+    })
+}
+
+/// What a party's event is, for the log (never a name).
+fn party_event_name(event: &PartyEvent) -> &'static str {
+    match event {
+        PartyEvent::Added { strict: false, .. } => "added",
+        PartyEvent::Added { strict: true, .. } => "added, waiting for the leader",
+        PartyEvent::LeaderChanged { .. } => "leader changed",
+        PartyEvent::Left {
+            by: Some(PartyLeaveBy::Pc),
+        } => "left at the PC",
+        PartyEvent::Left {
+            by: Some(PartyLeaveBy::Server),
+        } => "left by the server's word",
+        PartyEvent::Left {
+            by: Some(PartyLeaveBy::SignerRemoved),
+        } => "left: the signing owner key removed",
+        PartyEvent::Left { by: None } => "left (the list reset, restored or read again)",
+        PartyEvent::Guest { .. } => "a member's first device",
+        PartyEvent::DeviceLimit { .. } => "a member's device past the limit",
+    }
+}
+
 /// Show [`AgentEvent::GuestInvited`] as a toast, from `events` — subscribed before the agent runs,
 /// so a guest let in as it connects is not missed; started once the toasts' name is registered
 /// (`toast_identity`).
@@ -175,6 +238,25 @@ pub(crate) fn spawn(app: AppHandle, locale: Locale, mut events: broadcast::Recei
                             telegram_user_id,
                             "new-device toast not shown: {e}; the journal has the device"
                         ),
+                    }
+                }
+                Ok(AgentEvent::Party { party, event }) => {
+                    let what = party_event_name(&event);
+                    let Some(lines) = party_lines(locale, &party, &event) else {
+                        tracing::debug!(
+                            event = what,
+                            "party: no toast for the PC's own press; the journal has the event"
+                        );
+                        continue;
+                    };
+                    match crate::toast::show(&app, &lines) {
+                        Ok(()) => tracing::debug!(
+                            event = what,
+                            bold = lines.event_template,
+                            under = lines.detail_template.unwrap_or("-"),
+                            "party toast handed to Windows"
+                        ),
+                        Err(e) => tracing::warn!(event = what, "party toast not shown: {e}"),
                     }
                 }
                 Ok(_) => {}
@@ -426,5 +508,74 @@ mod tests {
                 "{detail}"
             );
         }
+    }
+
+    /// Each party event takes its own string: added — waiting for the leader only while the PC
+    /// is strict; the leader, the member and the party named; a name never moves the cut; a leave
+    /// pressed at the PC has none, a leave by anything else has one; the full list's refusal of a
+    /// member's device names the party.
+    #[test]
+    fn a_partys_toast_per_event() {
+        let added = |strict| PartyEvent::Added {
+            leader: named("Лёха"),
+            strict,
+        };
+        let open = party_lines(Locale::Ru, "Орлы", &added(false)).expect("a toast");
+        assert_eq!(open.event, "ПК добавлен в пати «Орлы»");
+        assert_eq!(open.detail.as_deref(), Some("Лидер: Лёха"));
+        let waiting = party_lines(Locale::Ru, "Орлы", &added(true)).expect("a toast");
+        assert_eq!(waiting.event, "ПК добавлен в пати «Орлы»");
+        assert_eq!(
+            waiting.detail.as_deref(),
+            Some("Гости пати смогут подключаться, когда Лёха откроет AFKLink")
+        );
+        let leader = party_lines(
+            Locale::Ru,
+            "Орлы",
+            &PartyEvent::LeaderChanged {
+                leader: named("Ира"),
+            },
+        )
+        .expect("a toast");
+        assert_eq!(leader.event, "Новый лидер пати «Орлы»: Ира");
+        assert_eq!(leader.detail, None);
+        let left = |by| party_lines(Locale::En, "Eagles", &PartyEvent::Left { by });
+        // The server's word, a signing key removed, a list read again: told.
+        for by in [
+            Some(PartyLeaveBy::Server),
+            Some(PartyLeaveBy::SignerRemoved),
+            None,
+        ] {
+            let l = left(by).expect("a toast");
+            assert_eq!(l.event, "PC removed from “Eagles”", "{by:?}");
+            assert_eq!(l.detail, None);
+        }
+        // «Убрать ПК из пати» pressed at the PC: no toast.
+        assert_eq!(left(Some(PartyLeaveBy::Pc)), None);
+        let full = party_lines(
+            Locale::Ru,
+            "Орлы",
+            &PartyEvent::DeviceLimit {
+                telegram_user_id: 9,
+            },
+        )
+        .expect("a toast");
+        assert_eq!(full.event, "Список устройств полон");
+        assert_eq!(
+            full.detail.as_deref(),
+            Some("Новый гость из пати «Орлы» не подключится")
+        );
+        let guest = party_lines(
+            Locale::Ru,
+            "Орлы",
+            &PartyEvent::Guest {
+                telegram_user_id: 9,
+                name: named("Коля\nК."),
+            },
+        )
+        .expect("a toast");
+        assert_eq!(guest.event, "Новый гость: Коля\nК.");
+        assert_eq!(guest.detail.as_deref(), Some("Из пати «Орлы»"));
+        assert_eq!(guest.event_template, "Новый гость: {user}");
     }
 }

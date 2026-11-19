@@ -748,6 +748,8 @@ mod tests {
             username: None,
             first_name: Some("x".into()),
             role,
+            via: None,
+            parties: Vec::new(),
         }
     }
 

@@ -272,6 +272,8 @@ mod tests {
             username: username.map(Into::into),
             first_name: first_name.map(Into::into),
             role: None,
+            via: None,
+            parties: Vec::new(),
         }
     }
 

@@ -47,11 +47,15 @@ pub trait Capturer: Send {
     /// The background hold (`crate::bg_hold`): stop capturing and delivering (`held`), or start
     /// again (`!held`), while staying alive for what only a running capturer can keep watching.
     ///
-    /// True when this capturer did: held, it captures and delivers nothing — no frame, no black
-    /// frame — and released, it delivers again at once (a fresh capture's first frame, or a black
-    /// one). False when it cannot (the default): the pipeline supervisor stops it for the hold and
-    /// starts a fresh one after. The game capturer can, and must — its thread watches the game's
-    /// window, which the heartbeat's `game` and the input's scope read all through a hold
+    /// True when this capturer did: held, it delivers nothing — no frame, no black frame — from
+    /// the moment the call returns, and released, it delivers again at once (its next frame, a
+    /// fresh capture's first frame, a frame it retained, or a black one). How it delivers nothing
+    /// is its own: the game capturer keeps a live window capture running and drops its frames
+    /// (the capture retaining the newest to resume a still window on), since stopping and
+    /// starting a game's window capture again is what once failed for good. False when it cannot
+    /// (the default): the pipeline supervisor stops it for the hold and starts a fresh one after.
+    /// The game capturer can, and must — its thread watches the game's window, which the
+    /// heartbeat's `game` and the input's scope read all through a hold
     /// (`crate::game::GameCapturer`). Never blocks.
     fn hold(&mut self, held: bool) -> bool {
         let _ = held;

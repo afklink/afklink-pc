@@ -37,7 +37,18 @@ aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-
 [target.'cfg(windows)'.dependencies]
 # `run_state`: when Windows booted (now minus `GetTickCount64`), to tell a previous process that
 # went down with the PC from one that died alone.
-windows = { workspace = true, features = ["Win32_System_SystemInformation"] }
+# `secure_desktop`: which desktop has the input (its name), our session's lock state and the
+# process list with sessions (`consent.exe`: NtQuerySystemInformation, no process opened). The
+# workspace already builds the ntdll features (capture, transport, game-helper).
+windows = { workspace = true, features = [
+    "Win32_System_SystemInformation",
+    "Win32_Foundation",
+    "Wdk_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # The reconnect test in `agent.rs` runs the real signaling client against a local WebSocket backend.

@@ -346,6 +346,18 @@ async fn run_agent(config: Config, opts: Options) -> Result<()> {
         Some(queue) => agent.with_event_queue(queue),
         None => agent,
     };
+    // Which Windows desktop has the PC's input (a UAC prompt, the lock screen), as the desktop app
+    // watches it (`afklink_core::secure_desktop`) — not on a bench run, whose viewer is a test page.
+    let agent = if opts.bench_mode() {
+        tracing::debug!("secure desktop watch off: a bench run");
+        agent
+    } else {
+        let secure_control = control.clone();
+        match afklink_core::secure_desktop::start(move || secure_control.game_only().0) {
+            Some(state) => agent.with_secure_desktop(state),
+            None => agent,
+        }
+    };
     let agent = agent.with_entry(entry);
     // `replaced` stops the CLI: another process with this identity holds the backend connection,
     // and the CLI has no Retry button to wait on. Its exit is the clear stop (see the end of this
@@ -690,6 +702,11 @@ async fn announce(mut events: broadcast::Receiver<AgentEvent>, device_id: String
                 ground = %device.source,
                 "a person's new trusted device: no toast in the CLI"
             ),
+            // The desktop app's party toasts; the CLI has none — the orchestrator's party lines
+            // say it.
+            Ok(AgentEvent::Party { .. }) => {
+                tracing::debug!("a party event: no toast in the CLI");
+            }
             Err(broadcast::error::RecvError::Lagged(missed)) => tracing::warn!(
                 missed,
                 "agent events missed by the stdout announcer: their BENCH lines are lost"

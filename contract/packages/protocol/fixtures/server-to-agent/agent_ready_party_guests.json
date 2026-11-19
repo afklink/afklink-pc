@@ -1,0 +1,36 @@
+{
+  "type": "agent_ready",
+  "protocol_version": 1,
+  "min_supported_protocol": 1,
+  "bindings": [
+    {
+      "telegram_user_id": 12345,
+      "username": "owner",
+      "first_name": "Owner",
+      "role": "owner"
+    },
+    {
+      "telegram_user_id": 67890,
+      "username": null,
+      "first_name": "Гость",
+      "role": "guest",
+      "via": "party",
+      "parties": [
+        "Rk9vZEJ1ZGR5UGFydHkxMg",
+        "U2Vjb25kUGFydHlJZDE2Qg"
+      ]
+    },
+    {
+      "telegram_user_id": 24680,
+      "username": "friend",
+      "first_name": "Друг",
+      "role": "guest",
+      "parties": [
+        "Rk9vZEJ1ZGR5UGFydHkxMg"
+      ]
+    }
+  ],
+  "nonce_pool": true,
+  "grant_token": true,
+  "party": true
+}

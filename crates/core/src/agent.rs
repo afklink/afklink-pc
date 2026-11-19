@@ -683,6 +683,58 @@ pub enum AgentEvent {
         device: crate::journal::TrustedDevice,
         how: NewDeviceHow,
     },
+    /// Something about the PC's parties the person at the PC is told of (party spec §5.4, §6),
+    /// after it is in the list's file; `party` the party's name as the join signed it. The
+    /// desktop app's toasts, from the contract's `notify.party*.native`.
+    Party { party: String, event: PartyEvent },
+}
+
+/// What [`AgentEvent::Party`] tells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartyEvent {
+    /// The PC was added to a party (`notify.partyAdded.native`; `strict`:
+    /// «Доверенные устройства» on, the PC waits for the leader's grants — `notify.partyAddedWaiting.native`).
+    /// `leader` as the pairing window names a requester.
+    Added {
+        leader: crate::PersonName,
+        strict: bool,
+    },
+    /// A party of the PC's has another leader (`notify.partyLeader.native`).
+    LeaderChanged { leader: crate::PersonName },
+    /// The PC is in the party no more (`notify.partyLeft.native`). `by`: who made it leave —
+    /// `None` when no leave was decided in this process (the list reset, restored or read
+    /// again). The desktop app shows no toast for the PC's own press ([`PartyLeaveBy::Pc`]):
+    /// the PC's own removals have none; the journal has the entry whoever made it.
+    Left {
+        by: Option<crate::viewer_keys::PartyLeaveBy>,
+    },
+    /// A member's first device joined by the leader's grant (`notify.partyGuest.native`), once
+    /// per person.
+    Guest {
+        telegram_user_id: i64,
+        name: crate::PersonName,
+    },
+    /// A member's device was refused: the list is full for it (process §7,
+    /// `notify.partyDeviceLimit.native`; at most once an hour per person).
+    DeviceLimit { telegram_user_id: i64 },
+}
+
+/// Which change of the parties [`Agent::tell_party`] tells.
+#[derive(Debug, Clone, Copy)]
+enum PartyEventKind {
+    Added {
+        strict: bool,
+    },
+    LeaderChanged,
+    Left {
+        by: Option<crate::viewer_keys::PartyLeaveBy>,
+    },
+}
+
+/// A party's name as the journal and the toasts show it: cleaned as a person's name is
+/// ([`crate::person_name::clean_name`]: no format, bidi or control characters) and trimmed.
+fn shown_party(name: &str) -> String {
+    crate::person_name::clean_name(name).trim().to_owned()
 }
 
 /// How a person's new device got in ([`AgentEvent::NewTrustedDevice`]).
@@ -2431,6 +2483,19 @@ pub struct Agent {
     grant_token_on: bool,
     /// The grant token last sent on this connection (spec §7 «Токен выдачи»; `None`: none yet).
     grant_token_sent: Option<crate::viewer_keys::GrantToken>,
+    /// This connection's `agent_ready.party`: `party_ack` and `party_state` go only on such a one.
+    party_on: bool,
+    /// The PC's secure-desktop watch (`crate::secure_desktop`), told the live sessions on every turn
+    /// of the loop; `None`: no watch in this process (tests, the bench), and nothing is sent.
+    secure_desktop: Option<Arc<crate::secure_desktop::SecureDesktop>>,
+    /// This connection's `agent_ready.secure_desktop`: `secure_desktop_ongoing` (and the event
+    /// queue's `secure_desktop_ended`) go only on such a one.
+    secure_desktop_on: bool,
+    /// The delegations last reported on this connection (`party_state`; `None`: none yet).
+    party_state_sent: Option<Vec<afklink_protocol::PartyDelegation>>,
+    /// The delegations as the file held them when the journal last looked (party spec §6): what
+    /// a landed write changed is journaled and told against them. `None` before a list reads.
+    party_seen: Option<Vec<crate::viewer_keys::Delegation>>,
     /// When the last nonce batch went out, and a refill put off to the end of its 2 s window.
     nonce_sent_at: Option<Instant>,
     nonce_deferred: Option<Instant>,
@@ -2509,6 +2574,8 @@ fn verdict_code(v: crate::admission::Verdict) -> &'static str {
 fn declined_reason(v: crate::admission::Verdict) -> Option<&'static str> {
     match (v.code, v.detail) {
         ("admit_refused", Some("grant_stale")) => Some("grant_stale"),
+        // Party spec §5.4: «Отклонено: ПК не в этой пати».
+        ("admit_refused", Some("party_leader")) => Some("party_leader"),
         ("key_unconfirmed", _) => Some("key_unconfirmed"),
         _ => None,
     }
@@ -2701,6 +2768,11 @@ impl Agent {
             key_mode_sent: None,
             grant_token_on: false,
             grant_token_sent: None,
+            party_on: false,
+            secure_desktop: None,
+            secure_desktop_on: false,
+            party_state_sent: None,
+            party_seen: None,
             nonce_sent_at: None,
             nonce_deferred: None,
             first_ready_seen: false,
@@ -2723,6 +2795,12 @@ impl Agent {
     #[must_use]
     pub fn with_trust_store(mut self, store: crate::viewer_keys::TrustStore) -> Self {
         self.trusted.attach(store);
+        // The parties as the file holds them: the journal tells what later writes change.
+        self.party_seen = self
+            .trusted
+            .store()
+            .and_then(crate::viewer_keys::TrustStore::saved_delegations)
+            .map(<[_]>::to_vec);
         // The mode the list starts in is not a switch (spec §10): seen here, so the first sweep
         // compares with it and ends nothing a strict PC's start already decided in strict mode
         // (a Pending request above all).
@@ -2871,6 +2949,199 @@ impl Agent {
         if sent {
             self.grant_token_sent = Some(saved);
         }
+    }
+
+    /// `party_state` (party spec §4.1): the file's delegations, the whole truth and empty too,
+    /// only on a connection whose `agent_ready` said `party` — after `grant_token` at the connect
+    /// and after every landed write that changed them (skipped when equal to the last sent here).
+    /// **Never while the list is damaged or absent**: the server reads a delegation that was
+    /// reported and then vanished as the PC leaving the party. After a landed write it goes after
+    /// that write's `party_ack` ([`Self::after_trusted_change`]). The delegations were checked when
+    /// a join was parsed and when the file was read. On the main loop: a channel send.
+    fn send_party_state(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>, why: &str) {
+        if !self.party_on {
+            return;
+        }
+        let Some(saved) = self
+            .trusted
+            .store()
+            .and_then(crate::viewer_keys::TrustStore::saved_delegations)
+        else {
+            tracing::debug!(
+                why,
+                "party: no party_state sent: no list here, or it is damaged (a delegation that \
+                 vanished would read as the PC leaving)"
+            );
+            return;
+        };
+        let parties: Vec<afklink_protocol::PartyDelegation> = saved
+            .iter()
+            .map(|d| afklink_protocol::PartyDelegation {
+                party_id: d.party_id.as_str().to_string(),
+                leader: d.leader_key.key_id().as_str().to_string(),
+            })
+            .collect();
+        if self.party_state_sent.as_ref() == Some(&parties) {
+            return;
+        }
+        let sent = send_to_backend(
+            outgoing,
+            AgentToServer::PartyState {
+                parties: parties.clone(),
+            },
+        );
+        tracing::info!(
+            why,
+            parties = parties.len(),
+            first = self.party_state_sent.is_none(),
+            sent,
+            "party: party_state sent (the file's delegations)"
+        );
+        if sent {
+            self.party_state_sent = Some(parties);
+        }
+    }
+
+    /// The party answers whose write landed ([`crate::trusted::Trusted::take_party_acks`]).
+    fn send_party_acks(&mut self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        for ack in self.trusted.take_party_acks() {
+            self.send_party_ack(ack, outgoing);
+        }
+    }
+
+    /// One `party_ack`, on a connection whose `agent_ready` said `party` (else logged: the
+    /// server repeats an unanswered statement after its next `agent_ready`).
+    fn send_party_ack(
+        &self,
+        ack: crate::trusted::PartyAck,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        let (op, result) = (ack.op.as_str(), ack.result.as_str());
+        if !self.party_on {
+            tracing::debug!(party = %ack.party_id, op, result, "party: answer not sent (this connection takes no party messages)");
+            return;
+        }
+        let sent = send_to_backend(
+            outgoing,
+            AgentToServer::PartyAck {
+                party_id: ack.party_id.clone(),
+                op: ack.op,
+                result: ack.result,
+            },
+        );
+        tracing::info!(party = %ack.party_id, op, result, sent, "party: party_ack sent");
+    }
+
+    /// A join or a leave decided ([`crate::admission::PartyAnswer`]): a refusal answered now; then
+    /// as after any change of the list — a write that found the file holding the decision
+    /// answers at once, and the keys a leave denied lose their sessions now (`key_revoked`).
+    fn party_answered(
+        &mut self,
+        answer: crate::admission::PartyAnswer,
+        outgoing: &mpsc::UnboundedSender<AgentToServer>,
+    ) {
+        if let crate::admission::PartyAnswer::Now(ack) = answer {
+            self.send_party_ack(ack, outgoing);
+        }
+        self.after_trusted_change(outgoing);
+    }
+
+    /// Party spec §6: what the landed writes changed in the file's delegations since the journal
+    /// last looked — a party added, its leader changed, a party left — into the journal and to
+    /// the desktop app ([`AgentEvent::Party`]). Nothing while the list is damaged; the first
+    /// healthy read is the base.
+    fn journal_party_changes(&mut self) {
+        let Some(now) = self
+            .trusted
+            .store()
+            .and_then(crate::viewer_keys::TrustStore::saved_delegations)
+            .map(<[_]>::to_vec)
+        else {
+            return;
+        };
+        let Some(before) = self.party_seen.replace(now.clone()) else {
+            tracing::debug!(
+                parties = now.len(),
+                "party: the delegations' base for the journal"
+            );
+            return;
+        };
+        if before == now {
+            return;
+        }
+        let strict = self.admission_strict();
+        for d in &now {
+            match before.iter().find(|b| b.party_id == d.party_id) {
+                None => self.tell_party(d, PartyEventKind::Added { strict }),
+                Some(b) if b.leader_key != d.leader_key => {
+                    self.tell_party(d, PartyEventKind::LeaderChanged);
+                }
+                Some(_) => {}
+            }
+        }
+        for b in before
+            .iter()
+            .filter(|b| !now.iter().any(|d| d.party_id == b.party_id))
+        {
+            let by = self.trusted.store().and_then(|s| s.left_by(&b.party_id));
+            self.tell_party(b, PartyEventKind::Left { by });
+        }
+    }
+
+    /// One party change into the journal and to the desktop app's toast.
+    fn tell_party(&self, d: &crate::viewer_keys::Delegation, kind: PartyEventKind) {
+        use crate::journal::Kind;
+        let l = &d.leader;
+        let leader = crate::person_name::requester_name(
+            l.telegram_user_id,
+            l.first_name.as_deref(),
+            l.username.as_deref(),
+        );
+        let (journal_kind, event) = match kind {
+            PartyEventKind::Added { strict } => {
+                (Kind::PartyAdded, PartyEvent::Added { leader, strict })
+            }
+            PartyEventKind::LeaderChanged => {
+                (Kind::PartyLeader, PartyEvent::LeaderChanged { leader })
+            }
+            PartyEventKind::Left { by } => (Kind::PartyLeft, PartyEvent::Left { by }),
+        };
+        let left_by = match &event {
+            PartyEvent::Left { by } => {
+                by.map_or("unknown", crate::viewer_keys::PartyLeaveBy::as_str)
+            }
+            _ => "-",
+        };
+        tracing::info!(
+            party = %d.party_id,
+            kind = journal_kind.as_str(),
+            left_by,
+            leader = %d.leader_key.key_id().short(),
+            "party: a change of the PC's parties, journaled and told"
+        );
+        if let Some(journal) = &self.journal {
+            let name = crate::person_name(
+                l.telegram_user_id,
+                l.first_name.as_deref(),
+                l.username.as_deref(),
+            );
+            let person = (journal_kind == Kind::PartyLeader).then_some(crate::journal::Person {
+                user: l.telegram_user_id,
+                name: &name.text,
+                username: l.username.as_deref(),
+            });
+            journal.party_event(
+                journal_kind,
+                &shown_party(&d.party),
+                person,
+                None,
+                crate::journal::now_ms(),
+            );
+        }
+        self.emit(AgentEvent::Party {
+            party: shown_party(&d.party),
+            event,
+        });
     }
 
     /// A nonce batch to the server (spec §2.2), on a connection with a nonce pool only.
@@ -3404,6 +3675,11 @@ impl Agent {
         // every installed change): their sessions and pending requests end.
         self.end_ruled(outgoing, "a trusted-list change");
         self.sweep_keys(outgoing);
+        // Party spec §4.3: after a landed write, its party answers, then `party_state`, then the
+        // grant token.
+        self.send_party_acks(outgoing);
+        self.journal_party_changes();
+        self.send_party_state(outgoing, "a trusted-list change");
         // §7: a write that replaced the grant token landed — the server hears the new one now.
         self.send_grant_token(outgoing, "a trusted-list change");
     }
@@ -3969,6 +4245,13 @@ impl Agent {
                 tracing::info!(event = %event.name(), "device keys: an event with no journal kind");
                 return;
             }
+            J::PartyDeviceLimit {
+                telegram_user_id,
+                party_id,
+            } => {
+                self.tell_party_limit(*telegram_user_id, party_id);
+                return;
+            }
         };
         let record = match self.trusted.store().map(|s| s.lookup(key_id)) {
             Some(crate::viewer_keys::Lookup::Active(r)) => r.clone(),
@@ -3998,6 +4281,12 @@ impl Agent {
             platform: record.platform.as_str().to_string(),
             source: ground.to_string(),
         };
+        if let crate::viewer_keys::KeySource::Party { party_id, .. } = &record.source {
+            if kind == crate::journal::Kind::DeviceAdded {
+                self.journal_party_key(&record, party_id, device, guest_new_device);
+                return;
+            }
+        }
         if kind == crate::journal::Kind::DeviceAdded {
             self.toast_new_device(
                 &record,
@@ -4036,6 +4325,109 @@ impl Agent {
         } else {
             journal.trusted_event(kind, Some(person), Some(device), now);
         }
+    }
+
+    /// A party member's device the full list refused (process §7): the toast
+    /// (`notify.partyDeviceLimit.native`) with the party's name from its delegation. The
+    /// contract has no journal words for it, so there is no journal entry.
+    fn tell_party_limit(&self, telegram_user_id: i64, party_id: &crate::viewer_keys::GroundId) {
+        let party = self
+            .trusted
+            .store()
+            .and_then(|s| s.delegations().ok())
+            .and_then(|ds| ds.iter().find(|d| d.party_id == *party_id))
+            .map(|d| shown_party(&d.party));
+        let Some(party) = party else {
+            tracing::warn!(
+                party = %party_id,
+                telegram_user_id,
+                "party: a member's device past the limit for a party the PC is in no more; not told"
+            );
+            return;
+        };
+        tracing::info!(
+            party = %party_id,
+            telegram_user_id,
+            "party: a member's device past the list's limit; told (no journal words for it)"
+        );
+        self.emit(AgentEvent::Party {
+            party,
+            event: PartyEvent::DeviceLimit { telegram_user_id },
+        });
+    }
+
+    /// A member's device that landed by the leader's grant (party spec §5.4): their first one —
+    /// «Новый гость» of the party in the journal (`app.journalPartyGuest`) and the toast
+    /// (`notify.partyGuest.native`, once per person); a known guest's new one —
+    /// «Новое устройство» with the party, no toast. The party's name from its delegation; one the PC
+    /// left meanwhile is named by nothing (`warn`, no entry).
+    fn journal_party_key(
+        &self,
+        record: &crate::viewer_keys::KeyRecord,
+        party_id: &crate::viewer_keys::GroundId,
+        device: crate::journal::TrustedDevice,
+        guest_new_device: bool,
+    ) {
+        let party = self
+            .trusted
+            .store()
+            .and_then(|s| s.delegations().ok())
+            .and_then(|ds| ds.iter().find(|d| d.party_id == *party_id))
+            .map(|d| shown_party(&d.party));
+        let Some(party) = party else {
+            tracing::warn!(
+                party = %party_id,
+                "party: a member's key landed for a party the PC is in no more; not journaled"
+            );
+            return;
+        };
+        let p = &record.person;
+        tracing::debug!(
+            party = %party_id,
+            telegram_user_id = p.telegram_user_id,
+            guest_new_device,
+            "party: a member's device landed; journaled{}",
+            if guest_new_device { "" } else { " and told" }
+        );
+        if !guest_new_device {
+            let name = crate::person_name::requester_name(
+                p.telegram_user_id,
+                p.first_name.as_deref(),
+                p.username.as_deref(),
+            );
+            self.emit(AgentEvent::Party {
+                party: party.clone(),
+                event: PartyEvent::Guest {
+                    telegram_user_id: p.telegram_user_id,
+                    name,
+                },
+            });
+        }
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let name = crate::person_name(
+            p.telegram_user_id,
+            p.first_name.as_deref(),
+            p.username.as_deref(),
+        );
+        let kind = if guest_new_device {
+            crate::journal::Kind::DeviceAdded
+        } else {
+            crate::journal::Kind::PartyGuest
+        };
+        let person = crate::journal::Person {
+            user: p.telegram_user_id,
+            name: &name.text,
+            username: p.username.as_deref(),
+        };
+        journal.party_event(
+            kind,
+            &party,
+            Some(person),
+            Some(device),
+            crate::journal::now_ms(),
+        );
     }
 
     /// The toast of a key that landed (spec §7, §3.4 step 9), after the write: a device vouched
@@ -4459,6 +4851,44 @@ impl Agent {
         self
     }
 
+    /// Watch the PC's input desktop through `state` (`crate::secure_desktop`): the live sessions are
+    /// told to it on every turn of the serving loop, and an episode's `secure_desktop_ongoing` goes on
+    /// a connection that takes it.
+    #[must_use]
+    pub fn with_secure_desktop(mut self, state: Arc<crate::secure_desktop::SecureDesktop>) -> Self {
+        tracing::debug!("secure desktop: the orchestrator tells the watch its live sessions");
+        self.secure_desktop = Some(state);
+        self
+    }
+
+    /// The secure-desktop watch's turn (`crate::secure_desktop`): the live sessions told, and the
+    /// episode's `secure_desktop_ongoing` sent on this connection if it is due and the connection
+    /// takes it. Takes the watch's leaf mutex for the step only.
+    fn sync_secure_desktop(&self, outgoing: &mpsc::UnboundedSender<AgentToServer>) {
+        let Some(state) = self.secure_desktop.as_ref() else {
+            return;
+        };
+        let live: Vec<&str> = self.sessions.map.keys().map(String::as_str).collect();
+        if let Some(cue) = state.sync_sessions(&live, Instant::now(), self.secure_desktop_on) {
+            let handed = send_to_backend(
+                outgoing,
+                AgentToServer::SecureDesktopOngoing {
+                    session_id: cue.session_id.clone(),
+                    desktop: cue.desktop,
+                    at: cue.at,
+                },
+            );
+            tracing::info!(
+                session = %cue.session_id,
+                kind = cue.desktop.as_str(),
+                lasted_ms = cue.age_ms,
+                handed,
+                "secure desktop: the episode has lasted past the owner's cue during this session; \
+                 secure_desktop_ongoing sent (the server tells the owner for a UAC prompt)"
+            );
+        }
+    }
+
     /// Send what the event queue has for connection `link` (`why`: what prompted it, for the log).
     /// Only ever called while that connection is served — after its `agent_ready`.
     fn send_agent_events(
@@ -4476,7 +4906,13 @@ impl Agent {
             transport::signaling::LEGACY_SILENCE_LIMIT,
             transport::LinkHealth::silence_limit,
         );
-        let due = queue.due(link, Instant::now(), crate::agent_events::now_ms(), limit);
+        let due = queue.due(
+            link,
+            Instant::now(),
+            crate::agent_events::now_ms(),
+            limit,
+            self.secure_desktop_on,
+        );
         if due.is_empty() {
             tracing::trace!(link, why, "agent events: nothing to send");
             return;
@@ -5269,6 +5705,12 @@ impl Agent {
             (s.refused.take(), first_list, changes)
         };
         log_roles(initial, "agent_ready");
+        tracing::debug!(
+            bindings = initial.len(),
+            party_only = initial.iter().filter(|b| b.party_only()).count(),
+            with_parties = initial.iter().filter(|b| !b.parties.is_empty()).count(),
+            "agent_ready: the bindings through parties (the window's party cards)"
+        );
         // §10 «Текущий список»: this connection's list begins with its `agent_ready` (the
         // binding messages after it follow it, `sync_game_roles`); the rule runs by it below.
         self.trusted.agent_ready(initial.iter().map(|b| {
@@ -6014,6 +6456,28 @@ impl Agent {
         self.nonce_pool = sig.nonce_pool;
         self.grant_token_on = sig.grant_token;
         self.grant_token_sent = None;
+        self.party_on = sig.party;
+        self.party_state_sent = None;
+        self.secure_desktop_on = sig.secure_desktop;
+        tracing::debug!(
+            secure_desktop = self.secure_desktop_on,
+            watching = self.secure_desktop.is_some(),
+            "secure desktop: this connection {} secure_desktop_ongoing and secure_desktop_ended",
+            if self.secure_desktop_on {
+                "takes"
+            } else {
+                "does not take"
+            }
+        );
+        tracing::debug!(
+            party = self.party_on,
+            "party: this connection {} the party messages",
+            if self.party_on {
+                "takes"
+            } else {
+                "does not take"
+            }
+        );
         let outbox = self.outbox.clone();
         let was_refused = self.take_agent_ready(&sig.initial_bindings, &outbox);
         if let Some(was) = was_refused.or_else(|| self.refusal_logged.clone()) {
@@ -6122,6 +6586,9 @@ impl Agent {
         self.key_mode_sent = None;
         self.grant_token_on = false;
         self.grant_token_sent = None;
+        self.party_on = false;
+        self.party_state_sent = None;
+        self.secure_desktop_on = false;
         self.nonce_deferred = None;
         // Nothing can say goodbye on this connection any more.
         self.goodbyes.retire(link_id);
@@ -6173,6 +6640,10 @@ impl Agent {
             }
             // The trusted devices' window: `clean` as the sessions stand after the last step.
             self.trusted.sync_live(self.trust_window_live());
+            // The secure-desktop watch: the sessions as they stand after the last step, and its cue.
+            // The pairing tick below turns this loop at least every half second, so the cue goes
+            // within that of falling due.
+            self.sync_secure_desktop(outbox);
             // Each branch's work is a step of the orchestrator's (`crate::step_watch`): a watcher
             // outside the runtime names one that does not end.
             tokio::select! {
@@ -6306,6 +6777,8 @@ impl Agent {
         // then the grant token (§7), on a server that takes it.
         self.send_key_mode(outgoing, true, "connected");
         self.send_grant_token(outgoing, "connected");
+        // Parties (party spec §4.1): the whole truth after the token, empty too.
+        self.send_party_state(outgoing, "connected");
         let live = self.sessions.len();
         for (id, sess) in self.sessions.iter() {
             let reported = sess.stats.report(outgoing, id, false);
@@ -6612,12 +7085,24 @@ impl Agent {
                 first_name,
                 role,
                 via,
+                parties,
             } => {
                 // `via: invite`: the owner let a guest in from Telegram by his invite, and nobody
                 // at the PC was asked. A word this build
                 // does not know reads as no `via` at all, as the contract says.
                 let invited = match &via {
                     Some(afklink_protocol::BindingVia::Invite) => true,
+                    // A party member's binding (party spec §8.2): «Доступ выдан» in the journal,
+                    // no new-guest toast here (the member's first device by the leader's grant is
+                    // journaled and told with the party's name, §5.4); no code made it.
+                    Some(afklink_protocol::BindingVia::Party) => {
+                        tracing::debug!(
+                            telegram_user_id,
+                            "binding_added: via party: «Доступ выдан» in the journal, no toast; \
+                             no code was spent"
+                        );
+                        false
+                    }
                     Some(afklink_protocol::BindingVia::Other(word)) => {
                         tracing::debug!(
                             telegram_user_id,
@@ -6672,6 +7157,9 @@ impl Agent {
                     first_name.as_deref(),
                     username.as_deref(),
                 );
+                // No code made a binding by invite or by a party: an open pairing panel is someone
+                // else's pairing.
+                let no_code = invited || matches!(via, Some(afklink_protocol::BindingVia::Party));
                 let (first_pairing, listed, toast_name) = {
                     let mut s = lock(&self.state);
                     // Nobody had access before this one: the first pairing, after which the window
@@ -6710,11 +7198,23 @@ impl Agent {
                             "roles: a re-pair changed the binding's role"
                         );
                     }
+                    // The window's people (party spec §6): a binding by a party lives only through
+                    // parties until the server's next list says otherwise; any other way it came
+                    // about is a personal one. The parties as sent.
+                    let party_only = matches!(via, Some(afklink_protocol::BindingVia::Party));
+                    tracing::debug!(
+                        telegram_user_id,
+                        party_only,
+                        parties = parties.len(),
+                        "binding added: through parties only: {party_only}"
+                    );
                     let binding = BindingInfo {
                         telegram_user_id,
                         username,
                         first_name,
                         role,
+                        via: party_only.then_some(afklink_protocol::BindingVia::Party),
+                        parties,
                     };
                     let name = binding.display_name();
                     // As the pairing window names a requester, «Имя (@username)»: the person at the
@@ -6742,14 +7242,16 @@ impl Agent {
                             "binding of a pairing held for the owner (pc_allow): the pairing panel \
                              and its code are left as they are (no code was spent now)"
                         );
-                    } else if invited {
-                        // No code made this binding: the owner allowed it in Telegram. The panel
-                        // and a code on it are someone else's pairing, left as they are.
+                    } else if no_code {
+                        // No code made this binding: the owner allowed it in Telegram, or a
+                        // party's leader took the member. The panel and a code on it are someone
+                        // else's pairing, left as they are.
                         tracing::debug!(
                             panel = s.pairing_panel.kind(),
                             had_code = s.pairing_code.is_some(),
-                            "binding by the owner's invite: the pairing panel and its code are left \
-                             as they are (no code was spent)"
+                            invited,
+                            "binding by the owner's invite or by a party: the pairing panel and its \
+                             code are left as they are (no code was spent)"
                         );
                     } else {
                         // The code that produced this binding is spent. The server deleted it the
@@ -7256,6 +7758,20 @@ impl Agent {
                 {
                     crate::pairing::code_refused(&mut lock(&self.state), crate::journal::now_ms());
                 }
+            }
+            // Party spec §4.2: the one function, outside a session; its answer goes once the write
+            // that holds the decision landed (a refusal at once).
+            ServerToAgent::PartyJoin { join } => {
+                let now = self.mono_ms();
+                let answer = self.admission.party_join(&mut self.trusted, &join, now);
+                self.party_answered(answer, outgoing);
+            }
+            ServerToAgent::PartyLeave { party_id } => {
+                let now = self.mono_ms();
+                let answer = self
+                    .admission
+                    .party_leave(&mut self.trusted, &party_id, now);
+                self.party_answered(answer, outgoing);
             }
             ServerToAgent::Challenge { .. } | ServerToAgent::AgentReady { .. } => {
                 // Handshake-only messages; ignore if they arrive mid-session.
@@ -9121,6 +9637,7 @@ impl Agent {
             self.sess_ev_tx.clone(),
             session_id.clone(),
             summary.clone(),
+            crate::secure_desktop::view(),
         ));
 
         // Cursor reports: where the PC's cursor is, for the viewer's trackpad marker, with the
@@ -10225,6 +10742,7 @@ async fn heartbeat_task(
     sess_ev_tx: mpsc::UnboundedSender<SessionSignal>,
     sid: String,
     summary: Arc<crate::summary::SessionSummary>,
+    mut secure: crate::secure_desktop::View,
 ) {
     use crate::pipeline::{cause_str, BusyVerdict};
     use afklink_protocol::{AgentDataMessage, GameHeartbeat, PipelineCause, PipelineState};
@@ -10243,6 +10761,7 @@ async fn heartbeat_task(
         Option<GameHeartbeat>,
         (bool, bool),
         bool,
+        Option<afklink_protocol::SecureDesktopKind>,
     );
     let mut last: Option<Summary> = None;
     let mut stuck = false;
@@ -10261,6 +10780,8 @@ async fn heartbeat_task(
             () = launch.changed().notified() => {}
             // And a background hold beginning or ending: the viewer reconciles on `bg_hold`.
             () = bg.changed().notified() => {}
+            // And the PC's input leaving the ordinary desktop or coming back (`crate::secure_desktop`).
+            () = secure.changed() => {}
         }
         if stop.load(Ordering::SeqCst) {
             tracing::debug!(sent = seq, "heartbeat stopped: the session is ending");
@@ -10290,6 +10811,10 @@ async fn heartbeat_task(
         let input = crate::input_session::blocking(|| reach.poll(&sid));
         hb.no_driver = input.driver == crate::traits::DriverPresence::Missing;
         hb.input_blocked = input.blocked;
+        // The PC's input on a secure desktop (a UAC prompt, the lock screen): why no frame comes.
+        // The pipeline's own fields stay as they are — `ok` and `still` — and the viewer shows its
+        // status over the frozen picture (`crate::secure_desktop`).
+        hb.secure_desktop = secure.take();
         // The same reading for the session's summary: the driver it had, the presses blocked.
         summary.note_reach(&input);
         seq += 1;
@@ -10361,6 +10886,7 @@ async fn heartbeat_task(
             hb.game,
             (hb.no_driver, hb.input_blocked),
             hb.bg_hold,
+            hb.secure_desktop,
         );
         let opt = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |v| v.to_string());
         if last != Some(summary) {
@@ -10387,6 +10913,9 @@ async fn heartbeat_task(
                 driver = input.driver.as_str(),
                 vis_ok = hb.vis_ok,
                 bg_hold = hb.bg_hold,
+                secure_desktop = hb
+                    .secure_desktop
+                    .map_or("-", afklink_protocol::SecureDesktopKind::as_str),
                 "heartbeat changed"
             );
         } else {
@@ -11317,6 +11846,8 @@ fn spawn_media_control(peer: MediaPeerGauges, args: MediaControl) -> tokio::task
     let mut log_plis = 0u64;
     let mut log_nacks = 0u64;
     let mut log_kf_suppressed = 0u64;
+    let mut log_game_held = (0u64, 0u64);
+    let mut log_game_retain = (0u64, 0u64);
     // The viewer's own report as of the last line: the `v_*` fields. See
     // `crate::viewer_report`.
     let mut log_viewer = crate::viewer_report::ViewerLineState::default();
@@ -12404,6 +12935,39 @@ fn spawn_media_control(peer: MediaPeerGauges, args: MediaControl) -> tokio::task
                         counters.keyframe_requests_suppressed.load(Ordering::Relaxed),
                         &mut log_kf_suppressed
                     ),
+                    // «Only the game window» through a background hold: the window's frames that
+                    // arrived since the last line (WGC activity), and of them those retained as the
+                    // capture's last frame — the picture a still window resumes on, a GPU copy
+                    // each (`crate::game::WindowCapture::retained`); fewer retained than arrived is
+                    // a copy failing. The window capture runs on through a hold, and this is its
+                    // cost. `-` outside the mode. Last, for the first-match reason above.
+                    game_hold_frames = %if game_status.is_active() {
+                        let (arrived, retained) = game_status.held_frames();
+                        format!(
+                            "{}/{}",
+                            d(arrived, &mut log_game_held.0),
+                            d(retained, &mut log_game_held.1)
+                        )
+                    } else {
+                        "-".to_string()
+                    },
+                    // «Only the game window»: the copies of the window's frames into the retained
+                    // texture submitted to the GPU since the last line — every frame that
+                    // arrived, held or not — and the MB they write (a sent frame's client area,
+                    // any other frame whole): the standing cost of keeping the last frame exact
+                    // (`afklink_capture`'s `retain`), counted as work queued on the GPU, not
+                    // measured as GPU time. `-` outside the mode. Last, for the first-match
+                    // reason above.
+                    game_retain = %if game_status.is_active() {
+                        let (copies, bytes) = game_status.retain_copies();
+                        format!(
+                            "{}/{:.1}MB",
+                            d(copies, &mut log_game_retain.0),
+                            d(bytes, &mut log_game_retain.1) as f64 / 1e6
+                        )
+                    } else {
+                        "-".to_string()
+                    },
                     "pipeline"
                 );
             }
@@ -14059,6 +14623,8 @@ mod tests {
             username: None,
             first_name: Some(format!("n{id}")),
             role,
+            via: None,
+            parties: Vec::new(),
         }
     }
 
@@ -14145,6 +14711,7 @@ mod tests {
             first_name: Some(format!("n{uid}")),
             role,
             via: None,
+            parties: Vec::new(),
         };
         agent
             .handle_server_msg(added(1, Some(BindingRole::Owner)), &tx)
@@ -14556,6 +15123,7 @@ mod tests {
             first_name: Some(first.to_string()),
             role: None,
             via: None,
+            parties: Vec::new(),
         };
 
         agent.handle_server_msg(added(7, "Вера"), &tx).await;
@@ -14609,7 +15177,8 @@ mod tests {
     /// journal in place of «Доступ выдан», and the new-guest toast's event, named as the pairing
     /// window names a requester — once: a repeat of someone already listed is journaled again, as a
     /// re-pair is, but is no new guest. Without `via`, or with a word this build does not know, all
-    /// is as before. No code made the binding, so an open pairing panel keeps its code.
+    /// is as before. No code made the binding, so an open pairing panel keeps its code; so with
+    /// `via: party`, journaled «Доступ выдан» with no toast.
     #[tokio::test]
     async fn a_guest_by_invite_is_journaled_and_announced_once() {
         use crate::journal::Kind;
@@ -14627,6 +15196,7 @@ mod tests {
                 first_name: Some("Друг".into()),
                 role,
                 via,
+                parties: Vec::new(),
             }
         };
         // Someone else's pairing is under way at the PC.
@@ -14681,6 +15251,29 @@ mod tests {
             )
             .await;
         assert!(events.try_recv().is_err(), "a repeat is no new guest");
+
+        // A party member's binding: «Доступ выдан», no toast here (the party's own comes with
+        // the member's first device), and no code was spent — the panel stays as it is.
+        agent
+            .handle_server_msg(
+                added(46, Some(BindingRole::Guest), Some(BindingVia::Party)),
+                &tx,
+            )
+            .await;
+        assert!(events.try_recv().is_err(), "no new-guest toast by a party");
+        {
+            let s = lock(&agent.state);
+            assert_eq!(
+                s.pairing_panel,
+                PairingPanel::Open,
+                "not this binding's panel"
+            );
+            assert_eq!(
+                s.pairing_code.as_deref(),
+                Some("123456"),
+                "no code was spent"
+            );
+        }
 
         // A word this build does not know reads as no via: «Доступ выдан», no toast — and the
         // panel's code is spent as for any pairing.
@@ -14749,7 +15342,12 @@ mod tests {
         assert_eq!(count(44, Kind::Granted), 1);
         assert_eq!(count(44, Kind::Invited), 0);
         assert_eq!(count(45, Kind::Invited), 1);
-        assert_eq!(entries.len(), 5);
+        assert_eq!(
+            count(46, Kind::Granted),
+            1,
+            "a party's binding: «Доступ выдан»"
+        );
+        assert_eq!(entries.len(), 6);
         let invited = entries
             .iter()
             .find(|v| v.entry.user == 42)
@@ -14772,6 +15370,7 @@ mod tests {
             first_name: Some(first.into()),
             role: Some(BindingRole::Guest),
             via: Some(BindingVia::Invite),
+            parties: Vec::new(),
         };
         let toast = |events: &mut broadcast::Receiver<AgentEvent>| match events.try_recv() {
             Ok(AgentEvent::GuestInvited { name, .. }) => name.text,
@@ -14923,6 +15522,8 @@ mod tests {
             username: None,
             first_name: Some(first.into()),
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         let before = [b(1, "a"), b(2, "b"), b(3, "c")];
         let after = [b(3, "c renamed"), b(1, "a"), b(4, "d"), b(5, "e")];
@@ -14944,6 +15545,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         // Before: 1..=200_000 (each twice); now: 100_001..=300_000 (each twice).
         let before: Vec<BindingInfo> = (1..=200_000).chain(1..=200_000).map(b).collect();
@@ -15017,6 +15620,7 @@ mod tests {
                     first_name: Some("Аня".into()),
                     role: Some(afklink_protocol::BindingRole::Guest),
                     via: None,
+                    parties: Vec::new(),
                 },
                 &tx,
             )
@@ -15103,6 +15707,7 @@ mod tests {
                     first_name: Some("Аня".into()),
                     role: Some(BindingRole::Guest),
                     via: None,
+                    parties: Vec::new(),
                 },
                 &tx,
             )
@@ -15158,6 +15763,7 @@ mod tests {
                     first_name: Some("Друг".into()),
                     role: Some(BindingRole::Guest),
                     via: Some(BindingVia::Invite),
+                    parties: Vec::new(),
                 },
                 &tx,
             )
@@ -15801,6 +16407,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
         let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
         assert!(first.vis_ok && !first.bg_hold, "{first:?}");
@@ -15822,6 +16429,59 @@ mod tests {
         bg.on_vis(false, Some("visibilitychange"), Instant::now());
         let back = next_heartbeat(&mut control, Duration::from_millis(300)).await;
         assert!(back.vis_ok && !back.bg_hold, "{back:?}");
+
+        stop.store(true, Ordering::SeqCst);
+        health.changed().notify_one();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task stops with the session")
+            .expect("and does not panic");
+    }
+
+    /// `secure_desktop` from the moment the input leaves the ordinary desktop — at once, not on the
+    /// next tick — with the pipeline `ok` and `still`, never `stalled`; absent again the moment it
+    /// is back.
+    #[tokio::test]
+    async fn the_heartbeat_says_the_secure_desktop_at_once_and_only_while_it_lasts() {
+        use afklink_protocol::{PipelineState, SecureDesktopKind};
+        let health = Arc::new(crate::pipeline::PipelineHealth::new(Instant::now()));
+        let target = Arc::new(crate::quality::QualityTarget::default());
+        let (control_tx, mut control) = mpsc::channel(16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sess_tx, _sess_rx) = mpsc::unbounded_channel();
+        let secure = crate::secure_desktop::SecureDesktop::new(|| false);
+        let task = tokio::spawn(heartbeat_task(
+            health.clone(),
+            target.clone(),
+            Arc::new(crate::game::GameStatus::new()),
+            Arc::new(crate::game::HelperLaunch::new()),
+            no_reach(),
+            no_hold(),
+            control_tx,
+            stop.clone(),
+            sess_tx,
+            "s1".into(),
+            test_summary(),
+            secure.view(),
+        ));
+        let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
+        assert_eq!(first.secure_desktop, None, "{first:?}");
+        let _ = next_heartbeat(&mut control, Duration::from_millis(1_500)).await;
+
+        secure.observe(Instant::now(), 1, Some(SecureDesktopKind::Uac));
+        let on = next_heartbeat(&mut control, Duration::from_millis(300)).await;
+        assert_eq!(on.secure_desktop, Some(SecureDesktopKind::Uac), "{on:?}");
+        assert_eq!(on.state, PipelineState::Ok);
+        let again = next_heartbeat(&mut control, Duration::from_millis(1_500)).await;
+        assert_eq!(
+            again.secure_desktop,
+            Some(SecureDesktopKind::Uac),
+            "every heartbeat"
+        );
+
+        secure.observe(Instant::now(), 2, None);
+        let back = next_heartbeat(&mut control, Duration::from_millis(300)).await;
+        assert_eq!(back.secure_desktop, None, "{back:?}");
 
         stop.store(true, Ordering::SeqCst);
         health.changed().notify_one();
@@ -15853,6 +16513,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
 
         let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
@@ -15911,6 +16572,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
 
         let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
@@ -15960,6 +16622,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
 
         let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
@@ -16027,6 +16690,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
 
         // Outside the game mode the launch says nothing: there is no `game` to carry it.
@@ -16105,6 +16769,7 @@ mod tests {
             sess_tx,
             "s1".into(),
             test_summary(),
+            crate::secure_desktop::View::detached(),
         ));
 
         let first = next_heartbeat(&mut control, Duration::from_millis(500)).await;
@@ -16498,6 +17163,7 @@ mod tests {
                     first_name: Some("n1".into()),
                     role: Some(BindingRole::Owner),
                     via: None,
+                    parties: Vec::new(),
                 },
                 &tx,
             )
@@ -16603,6 +17269,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         }];
         assert!(is_bound(&bindings, 42));
         assert!(!is_bound(&bindings, 43));
@@ -16624,6 +17292,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         let vector: serde_json::Value =
             serde_json::from_str(
@@ -16723,6 +17393,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         lock(&agent.state).paused = true;
         agent.handle_server_msg(with_profile("paused"), &tx).await;
@@ -16812,6 +17484,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         agent
             .handle_server_msg(session_request("s2", 42), &tx)
@@ -16847,6 +17521,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         let peer = live_session(&mut agent, "s1");
         agent
@@ -16934,6 +17610,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         };
         let (mut agent, control) = test_agent(None);
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -17919,6 +18597,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         agent
             .handle_server_msg(session_request("s0", 42), &tx)
@@ -17997,6 +18677,8 @@ mod tests {
                 username: None,
                 first_name: None,
                 role: None,
+                via: None,
+                parties: Vec::new(),
             });
         };
 
@@ -18266,6 +18948,8 @@ mod tests {
             username: None,
             first_name: Some(first.into()),
             role,
+            via: None,
+            parties: Vec::new(),
         };
         // The previous run's last list: the owner and 7, unbound since.
         let mut agent = agent.with_last_known_bindings(vec![
@@ -20300,6 +20984,7 @@ mod tests {
                     first_name: None,
                     role: None,
                     via: None,
+                    parties: Vec::new(),
                 },
                 &tx,
             )
@@ -20882,6 +21567,8 @@ mod tests {
             username: None,
             first_name: None,
             role: None,
+            via: None,
+            parties: Vec::new(),
         });
         (agent, control)
     }
@@ -25620,6 +26307,7 @@ mod tests {
                         first_name: Some("Vera".into()),
                         role: Some(afklink_protocol::BindingRole::Guest),
                         via: None,
+                        parties: Vec::new(),
                     },
                     &c.tx,
                 )
@@ -25768,6 +26456,7 @@ mod tests {
                         first_name: Some("Guest".into()),
                         role: Some(afklink_protocol::BindingRole::Guest),
                         via: None,
+                        parties: Vec::new(),
                     },
                     &c.tx,
                 )
@@ -25920,6 +26609,7 @@ mod tests {
                                 afklink_protocol::BindingRole::Guest
                             }),
                             via: None,
+                            parties: Vec::new(),
                         },
                         &c.tx,
                     )
@@ -26317,6 +27007,7 @@ mod tests {
                         first_name: Some("Vera".into()),
                         role: Some(afklink_protocol::BindingRole::Guest),
                         via: None,
+                        parties: Vec::new(),
                     },
                     &c.tx,
                 )
@@ -26779,6 +27470,1194 @@ mod tests {
                 c.agent.trusted.store().expect("store").lookup(&c.guest.1),
                 crate::viewer_keys::Lookup::Active(_)
             ));
+        }
+
+        /// «Пати» through the orchestrator (party spec §4–§6, the §12 scenarios): a join and a
+        /// leave from the server, a member's offers on the leader's grant, and what the server
+        /// hears — `party_ack`, then `party_state`, then `grant_token`.
+        mod party {
+            use super::*;
+            use crate::viewer_keys::{GrantToken, GroundId, Lookup};
+
+            const PARTY: [u8; 16] = [0x11; 16];
+            const MEMBER: i64 = 3;
+
+            /// A key pair, its id and SPKI, as a device of someone outside the list.
+            struct Dev {
+                key: (EcdsaKeyPair, KeyId),
+                spki: Vec<u8>,
+            }
+
+            fn dev() -> Dev {
+                let (pair, kid, spki) = new_key();
+                Dev {
+                    key: (pair, kid),
+                    spki,
+                }
+            }
+
+            fn sign(key: &(EcdsaKeyPair, KeyId), m: &[u8]) -> String {
+                b64(key
+                    .0
+                    .sign(&aws_lc_rs::rand::SystemRandom::new(), m)
+                    .expect("signed")
+                    .as_ref())
+            }
+
+            fn party_ctx(strict: bool) -> Ctx {
+                let mut c = ctx(strict);
+                c.agent.party_on = true;
+                c.agent.grant_token_on = true;
+                c
+            }
+
+            /// The connect's announcements, heard and set aside.
+            fn connected(c: &mut Ctx) -> Vec<String> {
+                c.agent.announce_after_connect(1, &c.tx);
+                heard(c)
+            }
+
+            fn token(c: &Ctx) -> GrantToken {
+                c.agent
+                    .trusted
+                    .store()
+                    .expect("store")
+                    .grant_token()
+                    .expect("token")
+            }
+
+            /// «ПК в пати» for this PC naming `leader`, over the PC's token, signed by `by`.
+            fn join(
+                c: &Ctx,
+                party: [u8; 16],
+                leader: &Dev,
+                by: &(EcdsaKeyPair, KeyId),
+            ) -> serde_json::Value {
+                join_named(c, party, "Орлы", leader, by)
+            }
+
+            /// [`join`] of a party named `name`.
+            fn join_named(
+                c: &Ctx,
+                party: [u8; 16],
+                name: &str,
+                leader: &Dev,
+                by: &(EcdsaKeyPair, KeyId),
+            ) -> serde_json::Value {
+                let mut j = serde_json::json!({
+                    "v": 1, "device_id": lock(&c.agent.config).device_id.clone(),
+                    "party_id": b64(&party), "party": name,
+                    "leader": {"telegram_user_id": 456, "name": "Петя", "username": null,
+                               "spki": b64(&leader.spki)},
+                    "grant_token": token(c).to_wire(), "issued_at": 1_789_600_000_000u64,
+                    "by": by.1.as_str(), "sig": b64(&[0; 64]),
+                });
+                let m = crate::viewer_keys::proof::PartyJoin::parse(&j)
+                    .expect("form")
+                    .message();
+                j["sig"] = sign(by, &m).into();
+                j
+            }
+
+            /// The leader's grant to `member` (user [`MEMBER`]) on this PC, over `token`.
+            fn grant(
+                c: &Ctx,
+                party: [u8; 16],
+                leader: &Dev,
+                member: &KeyId,
+                id: u8,
+                token: &GrantToken,
+            ) -> serde_json::Value {
+                let mut g = serde_json::json!({
+                    "v": 1, "device_id": lock(&c.agent.config).device_id.clone(),
+                    "key_id": member.as_str(), "telegram_user_id": MEMBER, "name": "Вера",
+                    "username": null, "role": "guest", "party_id": b64(&party),
+                    "grant_id": b64(&[id; 16]), "grant_token": token.to_wire(),
+                    "issued_at": 1_789_600_005_000u64, "by": leader.key.1.as_str(),
+                    "sig": b64(&[0; 64]),
+                });
+                let m = crate::viewer_keys::proof::PartyGrant::parse(&g)
+                    .expect("form")
+                    .message();
+                g["sig"] = sign(&leader.key, &m).into();
+                serde_json::json!({"kind": "party", "grant": g})
+            }
+
+            /// A member's first offer of `sid` with `admit`.
+            async fn member_offer(c: &mut Ctx, sid: &str, member: &Dev, admit: serde_json::Value) {
+                member_offer_all(c, sid, member, serde_json::json!([admit])).await;
+            }
+
+            /// [`member_offer`] with the whole admit list `admit`.
+            async fn member_offer_all(
+                c: &mut Ctx,
+                sid: &str,
+                member: &Dev,
+                admit: serde_json::Value,
+            ) {
+                offer_as(c, sid, MEMBER, member, admit).await;
+            }
+
+            /// A first offer of `sid` by user `uid` from device `member` with the admit list `admit`.
+            async fn offer_as(
+                c: &mut Ctx,
+                sid: &str,
+                uid: i64,
+                member: &Dev,
+                admit: serde_json::Value,
+            ) {
+                let nonce = request(c, sid, uid, true).await;
+                let mut p = proof(c, &member.key, sid, &nonce);
+                p["key_reg"] = key_card(&member.key.0, &member.key.1, &member.spki);
+                p["admit"] = admit;
+                offer_with(c, sid, &FP, Some(p)).await;
+            }
+
+            /// What the agent sent the server about parties and the token, in order (names).
+            fn heard(c: &mut Ctx) -> Vec<String> {
+                let mut out = Vec::new();
+                while let Ok(m) = c.rx.try_recv() {
+                    match m {
+                        AgentToServer::PartyAck { op, result, .. } => {
+                            out.push(format!("ack:{}:{}", op.as_str(), result.as_str()));
+                        }
+                        AgentToServer::PartyState { parties } => {
+                            out.push(format!("state:{}", parties.len()));
+                        }
+                        AgentToServer::GrantToken { .. } => out.push("token".into()),
+                        AgentToServer::SessionEnd {
+                            session_id,
+                            reason,
+                            detail,
+                        } => out.push(format!(
+                            "end:{session_id}:{}:{}",
+                            reason.unwrap_or_default(),
+                            detail.and_then(|d| d.base.ended_detail).unwrap_or_default()
+                        )),
+                        _ => {}
+                    }
+                }
+                out
+            }
+
+            async fn server(c: &mut Ctx, msg: ServerToAgent) {
+                c.agent.handle_server_msg(msg, &c.tx).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+            }
+
+            fn lookup_origin(c: &Ctx, kid: &KeyId) -> Option<String> {
+                match c.agent.trusted.store().expect("store").lookup(kid) {
+                    Lookup::Removed(t) => Some(t.origin.as_str().into()),
+                    Lookup::Active(_) => Some("active".into()),
+                    _ => None,
+                }
+            }
+
+            /// The main path, strict: the owner's join is answered `ok` once written, then the
+            /// whole state, then the token; a member gets in on the leader's grant (journal and
+            /// toast «Новый гость» of the party, `ks.admit` `party`); a second device of theirs is
+            /// a known guest's new device; the server's leave takes their keys `server`, ends the
+            /// live session `key_revoked`, replaces the token and reports no party.
+            #[tokio::test]
+            async fn join_member_and_leave() {
+                use crate::journal::Kind;
+                let mut c = party_ctx(true);
+                let journal = journal_of(&mut c);
+                let mut events = c.agent.events.subscribe();
+                assert_eq!(connected(&mut c), ["token", "state:0"]);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                assert_eq!(
+                    heard(&mut c),
+                    ["ack:join:ok", "state:1"],
+                    "the token unchanged"
+                );
+                assert_eq!(entries_of(&journal, Kind::PartyAdded).len(), 1);
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::Party {
+                        event: PartyEvent::Added { strict: true, .. },
+                        ..
+                    })
+                ));
+
+                let member = dev();
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &member.key.1, 1, &t);
+                member_offer(&mut c, "s-m", &member, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(c.agent.admitted_ready.contains(&"s-m".to_string()));
+                assert_eq!(c.agent.keyed["s-m"].summary.admit, Some("party"));
+                assert_eq!(lookup_origin(&c, &member.key.1).as_deref(), Some("active"));
+                let guests = entries_of(&journal, Kind::PartyGuest);
+                assert_eq!(guests.len(), 1);
+                assert_eq!(guests[0].party.as_deref(), Some("Орлы"));
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::Party {
+                        event: PartyEvent::Guest {
+                            telegram_user_id: MEMBER,
+                            ..
+                        },
+                        ..
+                    })
+                ));
+                heard(&mut c);
+
+                let second = dev();
+                let g = grant(&c, PARTY, &leader, &second.key.1, 2, &t);
+                member_offer(&mut c, "s-m2", &second, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(c.agent.admitted_ready.contains(&"s-m2".to_string()));
+                let added = entries_of(&journal, Kind::DeviceAdded);
+                assert!(added
+                    .iter()
+                    .any(|e| e.guest_new_device && e.party.as_deref() == Some("Орлы")));
+                assert_eq!(
+                    entries_of(&journal, Kind::PartyGuest).len(),
+                    1,
+                    "one per person"
+                );
+
+                c.agent.admitted_ready.clear();
+                c.agent.offers_waiting.remove("s-m");
+                let _live = make_live(&mut c, "s-m");
+                heard(&mut c);
+                let t0 = token(&c);
+                server(
+                    &mut c,
+                    ServerToAgent::PartyLeave {
+                        party_id: b64(&PARTY),
+                    },
+                )
+                .await;
+                let said = heard(&mut c);
+                assert!(
+                    said.contains(&"end:s-m:key_revoked:".to_string()),
+                    "{said:?}"
+                );
+                let tail: Vec<&String> = said.iter().filter(|s| !s.starts_with("end:")).collect();
+                assert_eq!(tail, ["ack:leave:ok", "state:0", "token"]);
+                assert_ne!(token(&c), t0);
+                assert_eq!(lookup_origin(&c, &member.key.1).as_deref(), Some("server"));
+                assert_eq!(lookup_origin(&c, &second.key.1).as_deref(), Some("server"));
+                assert_eq!(lookup_origin(&c, &c.guest.1).as_deref(), Some("active"));
+                assert_eq!(entries_of(&journal, Kind::PartyLeft).len(), 1);
+                // The server's word: the event says so (the desktop app shows its toast).
+                assert_eq!(
+                    left_by(&mut events),
+                    vec![Some(crate::viewer_keys::PartyLeaveBy::Server)]
+                );
+
+                // A leave again: nothing to leave, `ok`, nothing else changes or is sent.
+                server(
+                    &mut c,
+                    ServerToAgent::PartyLeave {
+                        party_id: b64(&PARTY),
+                    },
+                )
+                .await;
+                assert_eq!(heard(&mut c), ["ack:leave:ok"]);
+            }
+
+            /// §5.1 and §12, strict: no delegation, the leader of another party, a member who is
+            /// not the leader, an older token, a spent grant id — each its `ended_detail`; the
+            /// party's own refusal is journaled «ПК не в этой пати» (`party_leader`).
+            #[tokio::test]
+            async fn the_party_ground_refuses() {
+                use crate::journal::Kind;
+                let mut c = party_ctx(true);
+                let journal = journal_of(&mut c);
+                lock(&c.agent.state).bindings.push(role_binding(
+                    MEMBER,
+                    Some(afklink_protocol::BindingRole::Guest),
+                ));
+                let (leader, other_leader) = (dev(), dev());
+                let t = token(&c);
+                let m = dev();
+                let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                member_offer(&mut c, "s1", &m, g).await;
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let j = join(&c, [0x22; 16], &other_leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let detail = |said: Vec<String>, sid: &str| {
+                    said.into_iter()
+                        .find(|s| s.starts_with(&format!("end:{sid}:")))
+                        .unwrap_or_default()
+                };
+                assert_eq!(
+                    detail(heard(&mut c), "s1"),
+                    "end:s1:admit_refused:party_leader"
+                );
+                let declined = entries_of(&journal, Kind::DeclinedUnknown);
+                assert_eq!(declined[0].reason.as_deref(), Some("party_leader"));
+
+                // Signed by the leader of another party of this PC.
+                let m2 = dev();
+                let g = grant(&c, PARTY, &other_leader, &m2.key.1, 2, &t);
+                member_offer(&mut c, "s2", &m2, g).await;
+                assert_eq!(
+                    detail(heard(&mut c), "s2"),
+                    "end:s2:admit_refused:party_leader"
+                );
+                // Signed by a member (a device that is no leader).
+                let m3 = dev();
+                let g = grant(&c, PARTY, &m2, &m3.key.1, 3, &t);
+                member_offer(&mut c, "s3", &m3, g).await;
+                assert_eq!(
+                    detail(heard(&mut c), "s3"),
+                    "end:s3:admit_refused:party_leader"
+                );
+                // A grant id spent by the key let in with it.
+                let m4 = dev();
+                let g = grant(&c, PARTY, &leader, &m4.key.1, 4, &t);
+                member_offer(&mut c, "s4", &m4, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                heard(&mut c);
+                let m5 = dev();
+                let g = grant(&c, PARTY, &leader, &m5.key.1, 4, &t);
+                member_offer(&mut c, "s5", &m5, g).await;
+                assert_eq!(
+                    detail(heard(&mut c), "s5"),
+                    "end:s5:admit_refused:grant_spent"
+                );
+                // A removal at the PC replaced the token: an unpresented grant is stale.
+                let store = c.agent.trusted.store_for_notes().expect("store");
+                store.deny_tree_now(&c.guest.1, 0).expect("removed");
+                let m6 = dev();
+                let g = grant(&c, PARTY, &leader, &m6.key.1, 6, &t);
+                member_offer(&mut c, "s6", &m6, g).await;
+                assert_eq!(
+                    detail(heard(&mut c), "s6"),
+                    "end:s6:admit_refused:grant_stale"
+                );
+            }
+
+            /// §5.2: a party's grant lifts a removal on the server's word, never one at the PC nor
+            /// a replacement; a key removed at the PC comes back by an owner's grant beside it
+            /// (party spec §12).
+            #[tokio::test]
+            async fn a_party_grant_lifts_only_a_server_removal() {
+                let mut c = party_ctx(true);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let m = dev();
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                member_offer(&mut c, "s1", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                // The server takes the member's binding: their key `server`, the token replaced.
+                server(
+                    &mut c,
+                    ServerToAgent::BindingRemoved {
+                        telegram_user_id: MEMBER,
+                    },
+                )
+                .await;
+                assert_eq!(lookup_origin(&c, &m.key.1).as_deref(), Some("server"));
+                heard(&mut c);
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 2, &t);
+                member_offer(&mut c, "s2", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(
+                    c.agent.admitted_ready.contains(&"s2".to_string()),
+                    "{:?}",
+                    heard(&mut c)
+                );
+                assert_eq!(lookup_origin(&c, &m.key.1).as_deref(), Some("active"));
+
+                // «Удалить» at the PC: `pc`; a new party grant alone returns nothing.
+                let tree = c
+                    .agent
+                    .trusted
+                    .store_for_notes()
+                    .expect("store")
+                    .deny_tree_now(&m.key.1, 0);
+                assert!(tree.is_ok());
+                c.agent
+                    .trusted
+                    .store_for_notes()
+                    .expect("store")
+                    .flush()
+                    .expect("written");
+                assert_eq!(lookup_origin(&c, &m.key.1).as_deref(), Some("pc"));
+                heard(&mut c);
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 3, &t);
+                member_offer(&mut c, "s3", &m, g).await;
+                let said = heard(&mut c);
+                assert!(
+                    said.contains(&"end:s3:key_revoked:".to_string()),
+                    "{said:?}"
+                );
+
+                // A member's key replaced by a recovery (`replaced`): a party grant alone
+                // returns nothing either.
+                let (old, new) = (dev(), dev());
+                let party_src = serde_json::json!({"kind": "party", "party_id": b64(&PARTY),
+                    "by": leader.key.1.as_str(), "grant_id": b64(&[50; 16])});
+                let path = c.dir.join(crate::viewer_keys::FILE_NAME);
+                let mut f: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+                f["keys"]
+                    .as_array_mut()
+                    .expect("keys")
+                    .push(serde_json::json!({
+                        "key_id": new.key.1.as_str(), "spki": b64(&new.spki),
+                        "person": {"telegram_user_id": MEMBER}, "role": "guest",
+                        "kind": "telegram", "platform": "android", "unconfirmed": false,
+                        "added_at": 2, "source": {"kind": "recover",
+                            "replaced": [old.key.1.as_str()], "parents": []},
+                    }));
+                f["tombstones"]
+                    .as_array_mut()
+                    .expect("tombstones")
+                    .push(serde_json::json!({
+                        "key_id": old.key.1.as_str(), "spki": b64(&old.spki),
+                        "telegram_user_id": MEMBER, "at": 2, "source": party_src,
+                        "origin": {"kind": "replaced", "new_key_id": new.key.1.as_str()},
+                    }));
+                f["spent"]["grant_ids"]
+                    .as_array_mut()
+                    .expect("spent")
+                    .push(b64(&[50; 16]).into());
+                std::fs::write(&path, serde_json::to_vec_pretty(&f).expect("json")).expect("write");
+                let reloaded = c.agent.trusted.store_mut().expect("store").reopen();
+                assert!(!reloaded.damaged);
+                assert_eq!(lookup_origin(&c, &old.key.1).as_deref(), Some("replaced"));
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &old.key.1, 51, &t);
+                member_offer(&mut c, "s-replaced", &old, g).await;
+                let said = heard(&mut c);
+                assert!(
+                    said.contains(&"end:s-replaced:key_revoked:".to_string()),
+                    "{said:?}"
+                );
+                assert_eq!(lookup_origin(&c, &old.key.1).as_deref(), Some("replaced"));
+
+                // Removed at the PC, the admit list carrying a party grant and a fresh owner's
+                // grant: the party's is passed over, the owner's grant returns the key.
+                assert_eq!(lookup_origin(&c, &m.key.1).as_deref(), Some("pc"));
+                let t = token(&c);
+                let party = grant(&c, PARTY, &leader, &m.key.1, 4, &t);
+                let at = u64::try_from(crate::journal::now_ms()).expect("a time");
+                let owners = grant_entry_at(&c, &m.key.1, MEMBER, 41, at);
+                member_offer_all(&mut c, "s4", &m, serde_json::json!([party, owners])).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(
+                    c.agent.admitted_ready.contains(&"s4".to_string()),
+                    "{:?}",
+                    heard(&mut c)
+                );
+                assert_eq!(c.agent.keyed["s4"].summary.admit, Some("grant"));
+                assert_eq!(lookup_origin(&c, &m.key.1).as_deref(), Some("active"));
+            }
+
+            /// [`ctx_with`] with a second owner key of user 1, `x`, unconfirmed, and the member bound
+            /// by the party (party spec §8.2); the connection takes the party messages.
+            fn with_unconfirmed_owner(strict: bool) -> (Ctx, Dev) {
+                let x = dev();
+                let spki = x.spki.clone();
+                let mut c = ctx_with(strict, move |store| {
+                    store
+                        .add(
+                            NewKey {
+                                key: ViewerKey::from_spki(&spki).expect("spki"),
+                                rpk: None,
+                                kind: ClientKind::parse("telegram").expect("kind"),
+                                platform: Platform::parse("android").expect("platform"),
+                            },
+                            Ground::Pair {
+                                person: Person {
+                                    telegram_user_id: 1,
+                                    first_name: None,
+                                    username: None,
+                                },
+                                role: afklink_protocol::BindingRole::Owner,
+                                unconfirmed: true,
+                            },
+                            1,
+                        )
+                        .expect("added");
+                });
+                c.agent.party_on = true;
+                lock(&c.agent.state).bindings.push(role_binding(
+                    MEMBER,
+                    Some(afklink_protocol::BindingRole::Guest),
+                ));
+                (c, x)
+            }
+
+            /// Observe mode takes a join from an unconfirmed owner key, and the member's key
+            /// inherits the mark (§4.2, §5.3); strict mode answers that join `signer`.
+            #[tokio::test]
+            async fn an_unconfirmed_owner_key_in_observe_mode() {
+                for strict in [false, true] {
+                    let (mut c, x) = with_unconfirmed_owner(strict);
+                    let leader = dev();
+                    let j = join(&c, PARTY, &leader, &x.key);
+                    server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                    let said = heard(&mut c);
+                    if strict {
+                        // Refused, and the connection's first state (none sent on it yet).
+                        assert_eq!(said, ["ack:join:signer", "state:0"]);
+                        continue;
+                    }
+                    // The connection's first state is the file's before the write (none sent on
+                    // it yet); after the write, its answer, then the state that holds it.
+                    assert_eq!(said, ["state:0", "ack:join:ok", "state:1"]);
+                    let m = dev();
+                    let t = token(&c);
+                    let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                    member_offer(&mut c, "s1", &m, g).await;
+                    settle_trusted(&mut c.agent, &c.tx).await;
+                    match c.agent.trusted.store().expect("store").lookup(&m.key.1) {
+                        Lookup::Active(r) => assert!(r.unconfirmed, "inherited from the owner key"),
+                        other => panic!("{other:?}"),
+                    }
+                }
+            }
+
+            /// What the PC's list holds of `kid` and of the grant id `n`, in memory and in the file:
+            /// whether the key is unknown, and whether the grant id is spent.
+            fn written(c: &Ctx, kid: &KeyId, n: u8) -> [(bool, bool); 2] {
+                let gid = GroundId::parse(&b64(&[n; 16])).expect("id");
+                let on_disk = TrustStore::open_in(&c.dir);
+                let of = |s: &TrustStore| {
+                    (
+                        matches!(s.lookup(kid), Lookup::Unknown),
+                        s.spent().expect("healthy").1.contains(&gid),
+                    )
+                };
+                [of(c.agent.trusted.store().expect("store")), of(&on_disk)]
+            }
+
+            /// The acks among what the server heard.
+            fn acks(said: Vec<String>) -> Vec<String> {
+                said.into_iter().filter(|s| s.starts_with("ack:")).collect()
+            }
+
+            /// Party spec §5.1, every rule again at the write: the member's grant passes the
+            /// check; before its write lands (a write ahead held) the PC leaves the party, a join
+            /// names another leader, a removal at the PC replaces the token, another offer spends
+            /// the same grant id, or the bindings make the member an owner here — each is refused
+            /// at the write: nothing written, the grant id not spent by it, no session.
+            #[tokio::test]
+            async fn a_party_grant_is_decided_again_at_its_write() {
+                for (case, want) in [
+                    ("leave", "party_leader"),
+                    ("leader", "party_leader"),
+                    ("removal", "grant_stale"),
+                    ("spent", "grant_spent"),
+                    ("owner", "grant_role"),
+                ] {
+                    let mut c = party_ctx(true);
+                    let leader = dev();
+                    let j = join(&c, PARTY, &leader, &c.owner);
+                    server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                    heard(&mut c);
+                    let t = token(&c);
+                    // A write ahead, held: the member's key queues behind it.
+                    let (release, gate) = std::sync::mpsc::channel::<()>();
+                    c.agent.trusted.gate_jobs(gate);
+                    let ahead = join(&c, [0x33; 16], &dev(), &c.owner);
+                    c.agent
+                        .handle_server_msg(ServerToAgent::PartyJoin { join: ahead }, &c.tx)
+                        .await;
+                    let first = dev();
+                    if case == "spent" {
+                        let g = grant(&c, PARTY, &leader, &first.key.1, 1, &t);
+                        member_offer(&mut c, "s-first", &first, g).await;
+                        assert!(c.agent.offers_waiting.contains_key("s-first"));
+                    }
+                    let m = dev();
+                    let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                    member_offer(&mut c, "s1", &m, g).await;
+                    assert!(
+                        c.agent.offers_waiting.contains_key("s1"),
+                        "{case}: the check passes: {:?}",
+                        heard(&mut c)
+                    );
+                    match case {
+                        "leave" => {
+                            let leave = ServerToAgent::PartyLeave {
+                                party_id: b64(&PARTY),
+                            };
+                            c.agent.handle_server_msg(leave, &c.tx).await;
+                        }
+                        "leader" => {
+                            let j = join(&c, PARTY, &dev(), &c.owner);
+                            c.agent
+                                .handle_server_msg(ServerToAgent::PartyJoin { join: j }, &c.tx)
+                                .await;
+                        }
+                        "removal" => {
+                            let store = c.agent.trusted.store_for_notes().expect("store");
+                            store.deny_tree_now(&c.guest.1, 0).expect("removed");
+                        }
+                        "owner" => {
+                            lock(&c.agent.state).bindings.push(role_binding(
+                                MEMBER,
+                                Some(afklink_protocol::BindingRole::Owner),
+                            ));
+                            c.agent
+                                .sync_game_roles("test: the member an owner by the bindings");
+                            assert!(c.agent.trusted.owner_on_pc(MEMBER));
+                        }
+                        _ => {}
+                    }
+                    drop(release);
+                    settle_trusted(&mut c.agent, &c.tx).await;
+                    let said = heard(&mut c);
+                    assert!(
+                        said.contains(&format!("end:s1:admit_refused:{want}")),
+                        "{case}: {said:?}"
+                    );
+                    let spent = case == "spent";
+                    assert_eq!(
+                        written(&c, &m.key.1, 1),
+                        [(true, spent); 2],
+                        "{case}: nothing written; the id spent by the first offer only"
+                    );
+                    assert!(
+                        !c.agent.admitted_ready.contains(&"s1".to_string()),
+                        "{case}"
+                    );
+                    assert!(!c.agent.offers_waiting.contains_key("s1"), "{case}");
+                    assert!(!c.agent.sessions.map.contains_key("s1"), "{case}");
+                    if spent {
+                        assert!(c.agent.admitted_ready.contains(&"s-first".to_string()));
+                    }
+                }
+            }
+
+            /// Party spec §5.1 at the install: the member's key is already being written (its own
+            /// write held) when the server's leave of the party, or a join naming another leader,
+            /// replaces the token. The landed key is decided by the token again: the session is
+            /// refused `grant_stale`, it is neither ready nor live, and the key ends removed
+            /// `server`. The grant id went into the written snapshot with the key, so it stays
+            /// spent: the same grant cannot bring the key back.
+            #[tokio::test]
+            async fn a_party_grant_whose_write_runs_is_decided_again_when_it_lands() {
+                for case in ["leave", "leader"] {
+                    let mut c = party_ctx(true);
+                    let leader = dev();
+                    let j = join(&c, PARTY, &leader, &c.owner);
+                    server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                    heard(&mut c);
+                    let t = token(&c);
+                    // The member's own write, held.
+                    let (release, gate) = std::sync::mpsc::channel::<()>();
+                    c.agent.trusted.gate_jobs(gate);
+                    let m = dev();
+                    let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                    member_offer(&mut c, "s1", &m, g).await;
+                    assert!(
+                        c.agent.offers_waiting.contains_key("s1"),
+                        "{case}: the check passes: {:?}",
+                        heard(&mut c)
+                    );
+                    if case == "leave" {
+                        let leave = ServerToAgent::PartyLeave {
+                            party_id: b64(&PARTY),
+                        };
+                        c.agent.handle_server_msg(leave, &c.tx).await;
+                    } else {
+                        let j = join(&c, PARTY, &dev(), &c.owner);
+                        c.agent
+                            .handle_server_msg(ServerToAgent::PartyJoin { join: j }, &c.tx)
+                            .await;
+                    }
+                    assert_ne!(token(&c), t, "{case}: the token replaced");
+                    drop(release);
+                    settle_trusted(&mut c.agent, &c.tx).await;
+                    let said = heard(&mut c);
+                    assert!(
+                        said.contains(&"end:s1:admit_refused:grant_stale".to_string()),
+                        "{case}: {said:?}"
+                    );
+                    assert!(
+                        !c.agent.admitted_ready.contains(&"s1".to_string()),
+                        "{case}"
+                    );
+                    assert!(!c.agent.offers_waiting.contains_key("s1"), "{case}");
+                    assert!(!c.agent.sessions.map.contains_key("s1"), "{case}");
+                    assert_eq!(
+                        lookup_origin(&c, &m.key.1).as_deref(),
+                        Some("server"),
+                        "{case}"
+                    );
+                    let on_disk = TrustStore::open_in(&c.dir);
+                    match on_disk.lookup(&m.key.1) {
+                        Lookup::Removed(t) => assert_eq!(t.origin.as_str(), "server", "{case}"),
+                        other => panic!("{case}: {other:?}"),
+                    }
+                    let gid = GroundId::parse(&b64(&[1; 16])).expect("id");
+                    assert!(
+                        on_disk.spent().expect("healthy").1.contains(&gid),
+                        "{case}: the grant id was written with the key"
+                    );
+                }
+            }
+
+            /// §5.1 step 7 and keys §10.2: a person the PC knows as its owner by the bindings
+            /// alone gets no party grant (`grant_role`); nothing is written or spent.
+            #[tokio::test]
+            async fn an_owner_by_the_bindings_gets_no_party_grant() {
+                let mut c = party_ctx(true);
+                lock(&c.agent.state).bindings.push(role_binding(
+                    MEMBER,
+                    Some(afklink_protocol::BindingRole::Owner),
+                ));
+                c.agent
+                    .sync_game_roles("test: the member an owner by the bindings");
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                heard(&mut c);
+                let m = dev();
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                member_offer(&mut c, "s1", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let said = heard(&mut c);
+                assert!(
+                    said.contains(&"end:s1:admit_refused:grant_role".to_string()),
+                    "{said:?}"
+                );
+                assert_eq!(written(&c, &m.key.1, 1), [(true, false); 2]);
+            }
+
+            /// §5.3: a delegation taken in observe mode from an unconfirmed owner key, strict
+            /// mode switched on since: a member's party grant is `key_unconfirmed`; nothing is
+            /// written or spent.
+            #[tokio::test]
+            async fn strict_since_an_unconfirmed_signer_refuses_the_member() {
+                let (mut c, x) = with_unconfirmed_owner(false);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &x.key);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                assert_eq!(acks(heard(&mut c)), ["ack:join:ok"]);
+                c.agent
+                    .trusted
+                    .store_mut()
+                    .expect("store")
+                    .set_trusted_devices_mode(true)
+                    .expect("strict");
+                assert!(c.agent.admission_strict());
+                let m = dev();
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                member_offer(&mut c, "s1", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let said = heard(&mut c);
+                assert!(
+                    said.iter().any(|s| s.starts_with("end:s1:key_unconfirmed")),
+                    "{said:?}"
+                );
+                assert_eq!(written(&c, &m.key.1, 1), [(true, false); 2]);
+                assert!(!c.agent.admitted_ready.contains(&"s1".to_string()));
+            }
+
+            /// Party spec §12, a leader changed end to end: the previous leader's grant — over
+            /// the old token, or signed afresh over the new one — is `party_leader`; the new
+            /// leader's lets the member in; the old join replayed is `stale` and changes nothing;
+            /// the new join replayed after a leave is `stale` too.
+            #[tokio::test]
+            async fn a_leader_change_end_to_end() {
+                let mut c = party_ctx(true);
+                let (a, b) = (dev(), dev());
+                let ja = join(&c, PARTY, &a, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: ja.clone() }).await;
+                let t0 = token(&c);
+                let jb = join(&c, PARTY, &b, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: jb.clone() }).await;
+                assert_eq!(acks(heard(&mut c)), ["ack:join:ok", "ack:join:ok"]);
+                let t1 = token(&c);
+                assert_ne!(t1, t0, "another leader: the token replaced");
+                let m = dev();
+                let g = grant(&c, PARTY, &a, &m.key.1, 1, &t0);
+                member_offer(&mut c, "s-old", &m, g).await;
+                let g = grant(&c, PARTY, &a, &m.key.1, 2, &t1);
+                member_offer(&mut c, "s-fresh", &m, g).await;
+                let said = heard(&mut c);
+                for sid in ["s-old", "s-fresh"] {
+                    assert!(
+                        said.contains(&format!("end:{sid}:admit_refused:party_leader")),
+                        "{sid}: {said:?}"
+                    );
+                }
+                let g = grant(&c, PARTY, &b, &m.key.1, 3, &t1);
+                member_offer(&mut c, "s-new", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(c.agent.admitted_ready.contains(&"s-new".to_string()));
+                heard(&mut c);
+
+                let id = GroundId::parse(&b64(&PARTY)).expect("id");
+                let leader_now = |c: &Ctx| {
+                    c.agent
+                        .trusted
+                        .store()
+                        .expect("store")
+                        .delegation(&id)
+                        .map(|(d, _)| d.leader_key.key_id().clone())
+                };
+                server(&mut c, ServerToAgent::PartyJoin { join: ja }).await;
+                assert_eq!(acks(heard(&mut c)), ["ack:join:stale"]);
+                assert_eq!(leader_now(&c), Some(b.key.1.clone()), "the leader stays");
+                assert_eq!(token(&c), t1);
+                server(
+                    &mut c,
+                    ServerToAgent::PartyLeave {
+                        party_id: b64(&PARTY),
+                    },
+                )
+                .await;
+                assert_eq!(acks(heard(&mut c)), ["ack:leave:ok"]);
+                server(&mut c, ServerToAgent::PartyJoin { join: jb }).await;
+                assert_eq!(acks(heard(&mut c)), ["ack:join:stale"]);
+                assert_eq!(leader_now(&c), None, "the PC stays out");
+                let saved = c.agent.trusted.store().expect("store").saved_delegations();
+                assert_eq!(saved.map(<[_]>::len), Some(0));
+            }
+
+            /// «Убрать ПК из пати» (party spec §6) is an organ of trust: refused `session` while a
+            /// request is pending and while a session not signed by a confirmed owner key is live,
+            /// with nothing changed; `not_found` for a party the PC is not in; `damaged` on a
+            /// list that does not read. With none of these it leaves, answered once written.
+            #[tokio::test]
+            async fn the_leave_at_the_pc_is_an_organ_of_trust() {
+                use crate::trusted::{TrustedAsk, TrustedError};
+                let id = GroundId::parse(&b64(&PARTY)).expect("id");
+                let leave = || TrustedAsk::PartyLeave {
+                    party_id: id.clone(),
+                };
+                let mut c = party_ctx(true);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                // The guest's request, pending.
+                let nonce = request(&mut c, "s-g", 2, true).await;
+                c.agent.reconcile_admission();
+                assert_eq!(c.agent.trust_window_live(), 1);
+                assert_eq!(
+                    ask_now(&mut c, leave()).await.0,
+                    Some(Err(TrustedError::Session)),
+                    "pending"
+                );
+                // The guest's signed session, live.
+                let p = proof(&c, &c.guest, "s-g", &nonce);
+                offer_with(&mut c, "s-g", &FP, Some(p)).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let _live = make_live(&mut c, "s-g");
+                c.agent.reconcile_admission();
+                assert_eq!(c.agent.trust_window_live(), 1);
+                assert_eq!(
+                    ask_now(&mut c, leave()).await.0,
+                    Some(Err(TrustedError::Session)),
+                    "a guest's session live"
+                );
+                assert!(c
+                    .agent
+                    .trusted
+                    .store()
+                    .expect("store")
+                    .delegation(&id)
+                    .is_some());
+
+                // No session: a party the PC is not in, then this one.
+                let mut c = party_ctx(true);
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let other = TrustedAsk::PartyLeave {
+                    party_id: GroundId::parse(&b64(&[0x44; 16])).expect("id"),
+                };
+                assert_eq!(
+                    ask_now(&mut c, other).await.0,
+                    Some(Err(TrustedError::NotFound))
+                );
+                let (now, mut later) = ask_now(&mut c, leave()).await;
+                assert_eq!(now, None, "answered once written");
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert_eq!(later.try_recv().ok(), Some(Ok(0)), "no key of the party");
+                let saved = c.agent.trusted.store().expect("store").saved_delegations();
+                assert_eq!(saved.map(<[_]>::len), Some(0));
+
+                // A list that does not read.
+                std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage")
+                    .expect("damaged");
+                assert!(c.agent.trusted.store_mut().expect("store").reopen().damaged);
+                assert_eq!(
+                    ask_now(&mut c, leave()).await.0,
+                    Some(Err(TrustedError::Damaged))
+                );
+            }
+
+            /// The owner may press «Убрать ПК из пати» from his own session: a live session
+            /// signed by his confirmed key does not hold the window, and the leave goes through;
+            /// the view the window reads then has no party.
+            #[tokio::test]
+            async fn the_leave_at_the_pc_passes_in_a_confirmed_owners_session() {
+                use crate::trusted::TrustedAsk;
+                let id = GroundId::parse(&b64(&PARTY)).expect("id");
+                let mut c = party_ctx(true);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert_eq!(c.control.trusted_view().parties.len(), 1, "the card shows");
+                let nonce = request(&mut c, "s-owner", 1, true).await;
+                let p = proof(&c, &c.owner, "s-owner", &nonce);
+                offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+                let _owner = make_live(&mut c, "s-owner");
+                c.agent.reconcile_admission();
+                assert_eq!(c.agent.trust_window_live(), 0, "the owner's session");
+                let mut events = c.agent.events.subscribe();
+                let (now, mut later) = ask_now(
+                    &mut c,
+                    TrustedAsk::PartyLeave {
+                        party_id: id.clone(),
+                    },
+                )
+                .await;
+                assert_eq!(now, None, "answered once written");
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert_eq!(later.try_recv().ok(), Some(Ok(0)));
+                // The PC's own press: the event says so (the desktop app shows no toast for it).
+                assert_eq!(
+                    left_by(&mut events),
+                    vec![Some(crate::viewer_keys::PartyLeaveBy::Pc)]
+                );
+                assert!(c
+                    .agent
+                    .trusted
+                    .store()
+                    .expect("store")
+                    .delegation(&id)
+                    .is_none());
+                assert!(c.control.trusted_view().parties.is_empty(), "the card goes");
+            }
+
+            /// Every `Left` among the agent's events so far: who made the PC leave.
+            fn left_by(
+                events: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+            ) -> Vec<Option<crate::viewer_keys::PartyLeaveBy>> {
+                let mut out = Vec::new();
+                while let Ok(e) = events.try_recv() {
+                    if let AgentEvent::Party {
+                        event: PartyEvent::Left { by },
+                        ..
+                    } = e
+                    {
+                        out.push(by);
+                    }
+                }
+                out
+            }
+
+            /// Process §7: a member's device the full list refused is told with the party's name
+            /// (`notify.partyDeviceLimit.native`); for a party the PC is in no more, nothing.
+            #[tokio::test]
+            async fn a_members_device_past_the_limit_is_told_with_the_party() {
+                use crate::admission::JournalEvent;
+                let mut c = party_ctx(true);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let mut events = c.agent.events.subscribe();
+                c.agent.note_key_journal(&JournalEvent::PartyDeviceLimit {
+                    telegram_user_id: MEMBER,
+                    party_id: GroundId::parse(&b64(&PARTY)).expect("id"),
+                });
+                assert_eq!(
+                    events.try_recv().ok(),
+                    Some(AgentEvent::Party {
+                        party: "Орлы".into(),
+                        event: PartyEvent::DeviceLimit {
+                            telegram_user_id: MEMBER
+                        },
+                    })
+                );
+                c.agent.note_key_journal(&JournalEvent::PartyDeviceLimit {
+                    telegram_user_id: MEMBER,
+                    party_id: GroundId::parse(&b64(&[0x44; 16])).expect("id"),
+                });
+                assert!(events.try_recv().is_err(), "not in that party: not told");
+            }
+
+            /// The owner's own session signed by an UNCONFIRMED owner key holds the window: the
+            /// leave at the PC is refused `session` and the party stays.
+            #[tokio::test]
+            async fn the_leave_at_the_pc_is_refused_in_an_unconfirmed_owner_keys_session() {
+                use crate::trusted::{TrustedAsk, TrustedError};
+                let id = GroundId::parse(&b64(&PARTY)).expect("id");
+                let mut second = None;
+                let mut c = ctx_with(false, |store| {
+                    let (pair, kid, spki) = new_key();
+                    store
+                        .add(
+                            NewKey {
+                                key: ViewerKey::from_spki(&spki).expect("spki"),
+                                rpk: None,
+                                kind: ClientKind::parse("telegram").expect("kind"),
+                                platform: Platform::parse("iphone").expect("platform"),
+                            },
+                            Ground::Pair {
+                                person: Person {
+                                    telegram_user_id: 1,
+                                    first_name: Some("Owner".into()),
+                                    username: None,
+                                },
+                                role: afklink_protocol::BindingRole::Owner,
+                                unconfirmed: true,
+                            },
+                            1_731_400_000_001,
+                        )
+                        .expect("added");
+                    second = Some((pair, kid));
+                });
+                c.agent.party_on = true;
+                c.agent.grant_token_on = true;
+                let unconfirmed = second.expect("the second owner key");
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                assert_eq!(c.control.trusted_view().parties.len(), 1, "the card shows");
+                let nonce = request(&mut c, "s-owner", 1, true).await;
+                let p = proof(&c, &unconfirmed, "s-owner", &nonce);
+                offer_with(&mut c, "s-owner", &FP, Some(p)).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let _owner = make_live(&mut c, "s-owner");
+                c.agent.reconcile_admission();
+                assert_eq!(
+                    c.agent.trust_window_live(),
+                    1,
+                    "an unconfirmed key's session holds the window"
+                );
+                assert_eq!(
+                    ask_now(
+                        &mut c,
+                        TrustedAsk::PartyLeave {
+                            party_id: id.clone()
+                        }
+                    )
+                    .await
+                    .0,
+                    Some(Err(TrustedError::Session))
+                );
+                assert!(c
+                    .agent
+                    .trusted
+                    .store()
+                    .expect("store")
+                    .delegation(&id)
+                    .is_some());
+            }
+
+            /// A malformed party element after a released ground changes nothing of that
+            /// ground's verdict: a guest's new device is let in on the owner's grant, and a stale
+            /// owner's grant is `grant_stale` with the party element after it as without.
+            #[tokio::test]
+            async fn a_malformed_party_element_after_a_released_ground_changes_nothing() {
+                let mut c = party_ctx(true);
+                let bad = serde_json::json!({"kind": "party", "grant": {"v": 1}});
+                let at = u64::try_from(crate::journal::now_ms()).expect("a time");
+                let d = dev();
+                let owners = grant_entry_at(&c, &d.key.1, 2, 21, at);
+                offer_as(&mut c, "s-ok", 2, &d, serde_json::json!([owners, bad])).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                assert!(
+                    c.agent.admitted_ready.contains(&"s-ok".to_string()),
+                    "{:?}",
+                    heard(&mut c)
+                );
+                assert_eq!(c.agent.keyed["s-ok"].summary.admit, Some("grant"));
+
+                let (d1, d2) = (dev(), dev());
+                let stale1 = grant_entry_at(&c, &d1.key.1, 2, 22, at);
+                let stale2 = grant_entry_at(&c, &d2.key.1, 2, 23, at);
+                assert!(c
+                    .agent
+                    .trusted
+                    .store_mut()
+                    .expect("store")
+                    .person_removed(777, "test: another removal replaces the token"));
+                heard(&mut c);
+                offer_as(&mut c, "s-alone", 2, &d1, serde_json::json!([stale1])).await;
+                offer_as(&mut c, "s-with", 2, &d2, serde_json::json!([stale2, bad])).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let said = heard(&mut c);
+                for sid in ["s-alone", "s-with"] {
+                    assert!(
+                        said.contains(&format!("end:{sid}:admit_refused:grant_stale")),
+                        "{sid}: {said:?}"
+                    );
+                }
+            }
+
+            /// Party spec §5.4: a party's name reaches the journal and the toasts as a person's
+            /// name does — without bidi controls and invisible characters.
+            #[tokio::test]
+            async fn a_partys_name_is_shown_cleaned() {
+                use crate::journal::Kind;
+                let mut c = party_ctx(true);
+                let journal = journal_of(&mut c);
+                let mut events = c.agent.events.subscribe();
+                let leader = dev();
+                let j = join_named(&c, PARTY, "\u{202E}Орлы\u{200B}", &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                let added = entries_of(&journal, Kind::PartyAdded);
+                assert_eq!(added[0].party.as_deref(), Some("Орлы"));
+                let m = dev();
+                let t = token(&c);
+                let g = grant(&c, PARTY, &leader, &m.key.1, 1, &t);
+                member_offer(&mut c, "s1", &m, g).await;
+                settle_trusted(&mut c.agent, &c.tx).await;
+                let guests = entries_of(&journal, Kind::PartyGuest);
+                assert_eq!(guests[0].party.as_deref(), Some("Орлы"));
+                let mut told = Vec::new();
+                while let Ok(e) = events.try_recv() {
+                    if let AgentEvent::Party { party, .. } = e {
+                        told.push(party);
+                    }
+                }
+                assert_eq!(told, ["Орлы", "Орлы"], "added, then the member");
+            }
+
+            /// `party_state` goes empty from a healthy list at the connect, and never while the
+            /// list is damaged — at the connect or after a change.
+            #[tokio::test]
+            async fn party_state_never_from_a_damaged_list() {
+                let mut c = party_ctx(true);
+                assert_eq!(connected(&mut c), ["token", "state:0"]);
+                let leader = dev();
+                let j = join(&c, PARTY, &leader, &c.owner);
+                server(&mut c, ServerToAgent::PartyJoin { join: j }).await;
+                assert_eq!(heard(&mut c), ["ack:join:ok", "state:1"]);
+                std::fs::write(c.dir.join(crate::viewer_keys::FILE_NAME), b"garbage")
+                    .expect("damaged");
+                let reloaded = c.agent.trusted.store_mut().expect("store").reopen();
+                assert!(reloaded.damaged);
+                c.agent.party_state_sent = None;
+                c.agent.grant_token_sent = None;
+                c.agent.announce_after_connect(2, &c.tx);
+                c.agent.after_trusted_change(&c.tx);
+                let said = heard(&mut c);
+                assert!(said.iter().all(|s| !s.starts_with("state")), "{said:?}");
+                // A join on a damaged list: `damaged`, which the server repeats.
+                server(
+                    &mut c,
+                    ServerToAgent::PartyJoin {
+                        join: serde_json::json!({"party_id": b64(&PARTY)}),
+                    },
+                )
+                .await;
+                assert_eq!(heard(&mut c), ["ack:join:damaged"]);
+            }
         }
     }
 }

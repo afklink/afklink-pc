@@ -464,6 +464,21 @@ impl SendInputInjector {
         }
     }
 
+    /// An activation click of game-only mode (`game_guard::Activation`) by `SendInput`: the cursor
+    /// onto the pixel, the button down and up, in one call — nothing can come between them
+    /// ([`activation_sent`] for a call Windows took only part of). Not booked in the ledger.
+    #[cfg(windows)]
+    pub(crate) fn activation_click(
+        &self,
+        button: u8,
+        px: i32,
+        py: i32,
+        screen: (i32, i32),
+    ) -> Result<(), String> {
+        self.note_input(Instant::now());
+        imp::activation_click(button, px, py, screen)
+    }
+
     /// The foreground window's elevation, looked at afresh (`CursorSync::foreground_elevation`).
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn foreground_elevation(&self, now: Instant) -> Option<Elevation> {
@@ -827,6 +842,37 @@ fn button_name(b: u8) -> &'static str {
     }
 }
 
+/// What an activation click's one `SendInput` call of three — the move, the press, the release —
+/// came to (`sent`: how many Windows took). The move and the press only: the release once more
+/// (`up_again`), with a warning; if that does not go in either, the button stays down until the
+/// next release or `ra`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn activation_sent(sent: usize, up_again: impl FnOnce() -> bool) -> Result<(), String> {
+    match sent {
+        3 => Ok(()),
+        2 => {
+            let went_in = up_again();
+            tracing::warn!(
+                went_in,
+                "activation click: SendInput took the press and not its release; the release sent \
+                 once more"
+            );
+            if went_in {
+                Ok(())
+            } else {
+                Err(
+                    "SendInput took the press and not its release, twice: the button stays down \
+                     until the next release"
+                        .to_owned(),
+                )
+            }
+        }
+        n => Err(format!(
+            "SendInput took {n} of the move, the press and the release: no click"
+        )),
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use afklink_protocol::{InputMessage, WheelMode};
@@ -1159,6 +1205,62 @@ mod imp {
                 },
             },
         }
+    }
+
+    /// [`activation_inputs`], sent as one `SendInput` call; a call Windows took only part of as
+    /// [`super::activation_sent`] says.
+    pub(crate) fn activation_click(
+        b: u8,
+        px: i32,
+        py: i32,
+        (width, height): (i32, i32),
+    ) -> Result<(), String> {
+        let Some(inputs) = activation_inputs(b, px, py, width, height) else {
+            return Err(format!("button {b} has no SendInput flag"));
+        };
+        // SAFETY: three live, fully initialised INPUTs of the size given.
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent as usize != inputs.len() {
+            refused(sent, inputs.len(), &std::io::Error::last_os_error());
+        }
+        // SAFETY: one live, fully initialised INPUT; `send` passes its size.
+        super::activation_sent(sent as usize, || unsafe { send(&inputs[2..]) })
+    }
+
+    /// The three events of an activation click: the point move onto `px`, `py` of the
+    /// `width`×`height` primary monitor ([`absolute_pixel_input`]; the caller has checked the pixel
+    /// lies on it), button `b` down, and up. `None` for a button with no flag.
+    pub(crate) fn activation_inputs(
+        b: u8,
+        px: i32,
+        py: i32,
+        width: i32,
+        height: i32,
+    ) -> Option<[INPUT; 3]> {
+        let (down, up) = match b {
+            0 => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            1 => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+            2 => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            _ => return None,
+        };
+        let button = |flags: MOUSE_EVENT_FLAGS| INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        Some([
+            absolute_pixel_input(px, py, width, height),
+            button(down),
+            button(up),
+        ])
     }
 
     pub fn mouse_button(b: u8, down: bool) {
@@ -1503,6 +1605,61 @@ mod tests {
                 .dx
         };
         assert_eq!(i64::from(dx) * 3600 / 65536, 1506, "E1's 1505 is 1506 now");
+    }
+
+    /// An activation click is one array of three: the point move onto the checked pixel, the button
+    /// down, the button up. Builds the events only; nothing is sent.
+    #[cfg(windows)]
+    #[test]
+    fn an_activation_click_is_one_array_of_move_down_up() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        };
+        let [mv, down, up] = imp::activation_inputs(0, 1506, 700, 3600, 2400).unwrap();
+        let point = imp::absolute_pixel_input(1506, 700, 3600, 2400);
+        // SAFETY: all are mouse events; this reads their own fields.
+        let (mv, pm, down, up) = unsafe {
+            (
+                mv.Anonymous.mi,
+                point.Anonymous.mi,
+                down.Anonymous.mi,
+                up.Anonymous.mi,
+            )
+        };
+        assert_eq!(
+            (mv.dx, mv.dy, mv.dwFlags),
+            (pm.dx, pm.dy, pm.dwFlags),
+            "onto the pixel"
+        );
+        assert_eq!(down.dwFlags, MOUSEEVENTF_LEFTDOWN);
+        assert_eq!(up.dwFlags, MOUSEEVENTF_LEFTUP);
+        let [_, down, up] = imp::activation_inputs(2, 0, 0, 3600, 2400).unwrap();
+        // SAFETY: as above.
+        let (down, up) = unsafe { (down.Anonymous.mi, up.Anonymous.mi) };
+        assert_eq!(
+            (down.dwFlags, up.dwFlags),
+            (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
+        );
+        assert!(imp::activation_inputs(7, 0, 0, 3600, 2400).is_none());
+    }
+
+    /// An activation click's one `SendInput` call taken only in part: the move and the press — the
+    /// release once more (one extra up); less — no click, nothing sent again.
+    #[test]
+    fn a_partial_activation_click_sends_one_extra_release() {
+        let mut ups = 0;
+        assert_eq!(activation_sent(3, || unreachable!()), Ok(()));
+        assert_eq!(
+            activation_sent(2, || {
+                ups += 1;
+                true
+            }),
+            Ok(())
+        );
+        assert_eq!(ups, 1, "one extra up");
+        assert!(activation_sent(2, || false).is_err_and(|e| e.contains("stays down")));
+        assert!(activation_sent(1, || unreachable!()).is_err_and(|e| e.contains("no click")));
+        assert!(activation_sent(0, || unreachable!()).is_err());
     }
 
     /// The planner's exact move goes as its counts, a plain relative move.

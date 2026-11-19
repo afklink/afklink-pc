@@ -8,11 +8,13 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use windows::core::{BOOL, HSTRING, PWSTR};
+use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_ELEVATION_REQUIRED,
     ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0,
     WAIT_TIMEOUT, WPARAM,
 };
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, TokenElevation,
     TokenIntegrityLevel, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
@@ -32,7 +34,14 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     SYNCHRONIZATION_SYNCHRONIZE,
 };
+use windows::Win32::System::WindowsProgramming::{
+    SYSTEM_PROCESS_INFORMATION, SYSTEM_THREAD_INFORMATION,
+};
 use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation, IUIAutomation2};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    VIRTUAL_KEY,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
     GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
@@ -43,9 +52,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::log::{unix_ms, HelperLog, Level, Log};
 use crate::record::{file_name, same_path, Record, RunLevel};
 use crate::supervisor::{
-    slow_tick, CloseRequest, ClosedWindow, Desktop, FocusMethod, FocusOutcome, Foreground,
-    GameProcess, GameWindow, HelperState, LaunchError, Observation, Signal, StateFile, Supervisor,
-    TerminateOutcome, POLL, STATE_FORMAT, TERMINATE_EXIT_CODE,
+    all_suspended, focus_ladder, front_allows, slow_tick, Answer, CloseRequest, ClosedWindow,
+    Desktop, FocusOutcome, FocusSteps, Foreground, FrontProcess, GameProcess, GameWindow,
+    HelperState, LaunchError, Observation, ShownWindow, Signal, StateFile, Supervisor,
+    TerminateOutcome, POLL, STATE_FORMAT, TERMINATE_EXIT_CODE, UNASSIGNED_VK,
 };
 use crate::{RECORD_FILE, SIGNAL_NAME, STATE_FILE, STATE_REFRESH, USER_DIR};
 
@@ -376,6 +386,9 @@ struct Search<'a> {
     pids: &'a [u32],
     foreground: HWND,
     window: Option<HWND>,
+    /// Their visible windows of another class, with their pid and class: what the game shows when
+    /// its window is not up ([`Observation::shown`]).
+    others: Vec<(HWND, u32, String)>,
 }
 
 unsafe extern "system" fn find_window(hwnd: HWND, data: LPARAM) -> BOOL {
@@ -386,10 +399,11 @@ unsafe extern "system" fn find_window(hwnd: HWND, data: LPARAM) -> BOOL {
     if !search.pids.contains(&pid) || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return BOOL(1);
     }
-    if search.record.class_matches(&class_of(hwnd))
+    let class = class_of(hwnd);
+    if !search.record.class_matches(&class) {
+        search.others.push((hwnd, pid, class));
+    } else if search.window.is_none() || hwnd == search.foreground {
         // The one in front, if two match: no switching between two of the game's windows.
-        && (search.window.is_none() || hwnd == search.foreground)
-    {
         search.window = Some(hwnd);
     }
     BOOL(1)
@@ -652,6 +666,7 @@ impl Desktop for WindowsDesktop {
             pids: &game_pids,
             foreground: front,
             window: None,
+            others: Vec::new(),
         };
         // SAFETY: the callback reads windows and the live Search only.
         unsafe {
@@ -667,6 +682,22 @@ impl Desktop for WindowsDesktop {
             // SAFETY: a read-only query.
             minimized: unsafe { IsIconic(hwnd) }.as_bool(),
         });
+        // Titles only while the game's window is not up: then they are what the log says of it.
+        let mut shown: Vec<ShownWindow> = if window.is_none() {
+            search
+                .others
+                .into_iter()
+                .map(|(hwnd, pid, class)| ShownWindow {
+                    pid,
+                    window: hwnd.0 as usize,
+                    class,
+                    title: title_of(hwnd),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        shown.sort_by_key(|w| (w.pid, w.window));
         let foreground = self.foreground(&game_pids);
         Ok(Observation {
             game_pids,
@@ -675,6 +706,7 @@ impl Desktop for WindowsDesktop {
             window,
             foreground,
             launched_exit,
+            shown,
         })
     }
 
@@ -859,51 +891,322 @@ impl Desktop for WindowsDesktop {
             return refused("the game's window closed before the try".into());
         }
         let (pid, _) = pid_of(hwnd);
+        if pid != window.pid {
+            return refused(format!(
+                "the window is another process's now (pid {pid}, the game's {})",
+                window.pid
+            ));
+        }
         let still_game = session_of(pid).is_ok_and(|s| s == self.session)
             && process_path(pid).is_ok_and(|p| record.is_game_exe(&p))
             && record.class_matches(&class_of(hwnd));
         if !still_game {
             return refused("the window is not the game's any more".into());
         }
-        let mut steps = Vec::new();
-        if window.minimized {
-            // SAFETY: restore the game's own, just checked, window; no input is synthesized.
-            let was_visible = unsafe { ShowWindowAsync(hwnd, SW_RESTORE) }.as_bool();
-            steps.push(format!("restored (ShowWindowAsync={was_visible})"));
+        // The window in front is still one focus is asked from — the game's own process only to
+        // restore its minimized window.
+        if let Err(why) = front_allows(&self.foreground(&[pid]), window.minimized) {
+            return refused(format!("not tried: {why}"));
         }
-        // SAFETY: activate the game's window. No input is synthesized, no input queue attached, no
-        // foreground lock changed: Windows grants it or refuses (and flashes the taskbar button).
-        let granted = unsafe { SetForegroundWindow(hwnd) }.as_bool();
-        if Self::front_within(pid, Duration::from_millis(150)) {
-            steps.push(format!("SetForegroundWindow={granted}, in front"));
-            return FocusOutcome {
-                method: Some(FocusMethod::SetForeground),
-                detail: steps.join("; "),
-            };
+        // SAFETY: a read-only query.
+        let front = unsafe { GetForegroundWindow() };
+        let mut steps = Steps {
+            automation: self.automation.as_ref(),
+            hwnd,
+            pid,
+            minimized: window.minimized,
+            front,
+        };
+        focus_ladder(&mut steps, Vec::new())
+    }
+
+    fn describe_front(&mut self, window: usize) -> String {
+        describe_window(HWND(window as *mut _))
+    }
+}
+
+/// The focus ladder's steps on the game's window, checked by the caller right before
+/// ([`WindowsDesktop::focus`]). Each step is one call and a wait of at most 250 ms.
+struct Steps<'a> {
+    automation: Option<&'a IUIAutomation>,
+    hwnd: HWND,
+    pid: u32,
+    minimized: bool,
+    /// The window in front when the ladder began.
+    front: HWND,
+}
+
+impl FocusSteps for Steps<'_> {
+    fn still(&mut self) -> Result<(), String> {
+        let signal = read_signal();
+        if signal != Signal::Allowed {
+            return Err(format!("the app's signal went off: {}", signal.describe()));
         }
-        steps.push(format!("SetForegroundWindow={granted}, not in front"));
-        match &self.automation {
-            None => steps.push("UI Automation unavailable".into()),
-            Some(automation) => {
-                // SAFETY: UI Automation's own focus call on the checked window, with the
-                // client's bounded timeouts.
-                let set = unsafe { automation.ElementFromHandle(hwnd) }
-                    .and_then(|element| unsafe { element.SetFocus() });
-                match set {
-                    Ok(()) if Self::front_within(pid, Duration::from_millis(250)) => {
-                        steps.push("UI Automation SetFocus ok, in front".into());
-                        return FocusOutcome {
-                            method: Some(FocusMethod::Uia),
-                            detail: steps.join("; "),
-                        };
-                    }
-                    Ok(()) => steps.push("UI Automation SetFocus ok, not in front".into()),
-                    Err(e) => steps.push(format!("UI Automation SetFocus: {e}")),
+        // SAFETY: a read-only query.
+        let now = unsafe { GetForegroundWindow() };
+        if now != self.front {
+            return Err(format!(
+                "another window has the front now ({:#x}, was {:#x})",
+                now.0 as usize, self.front.0 as usize
+            ));
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Option<String> {
+        if !self.minimized {
+            return None;
+        }
+        // SAFETY: restore the game's own, just checked, window; no input is synthesized.
+        let was_visible = unsafe { ShowWindowAsync(self.hwnd, SW_RESTORE) }.as_bool();
+        Some(format!("restored (ShowWindowAsync={was_visible})"))
+    }
+
+    fn set_foreground(&mut self) -> Answer {
+        // SAFETY: activate the game's window. No input queue attached, no foreground lock changed:
+        // Windows grants it or refuses (and flashes the taskbar button).
+        let granted = unsafe { SetForegroundWindow(self.hwnd) }.as_bool();
+        Answer {
+            granted,
+            in_front: WindowsDesktop::front_within(self.pid, Duration::from_millis(150)),
+        }
+    }
+
+    fn unassigned_key(&mut self) -> Result<bool, String> {
+        unassigned_key()
+    }
+
+    fn front_process(&mut self) -> Result<Option<FrontProcess>, String> {
+        // SAFETY: a read-only query.
+        let front = unsafe { GetForegroundWindow() };
+        if front.is_invalid() {
+            return Ok(None);
+        }
+        let (pid, _) = pid_of(front);
+        if pid == 0 {
+            return Ok(None);
+        }
+        let (suspended_threads, threads) = thread_states(pid)?;
+        let exe = process_path(pid).map_or_else(
+            |e| format!("exe not read ({e})"),
+            |p| file_name(&p).to_string(),
+        );
+        Ok(Some(FrontProcess {
+            pid,
+            exe,
+            suspended_threads,
+            threads,
+        }))
+    }
+
+    fn uia_set_focus(&mut self) -> Option<Result<bool, String>> {
+        let automation = self.automation?;
+        // SAFETY: UI Automation's own focus call on the checked window, with the client's bounded
+        // timeouts.
+        let set = unsafe { automation.ElementFromHandle(self.hwnd) }
+            .and_then(|element| unsafe { element.SetFocus() });
+        Some(match set {
+            Ok(()) => Ok(WindowsDesktop::front_within(
+                self.pid,
+                Duration::from_millis(250),
+            )),
+            Err(e) => Err(e.to_string()),
+        })
+    }
+}
+
+/// `dwExtraInfo` of the helper's one key, so a hook reading it can tell it from the person's:
+/// «AFKH». Windows marks it injected (`LLKHF_INJECTED`) all the same.
+const HELPER_INPUT_TAG: usize = 0x4146_4B48;
+
+/// One keyboard input of [`UNASSIGNED_VK`]: by virtual key only — no scan code, so no physical
+/// key's code is sent — tagged [`HELPER_INPUT_TAG`].
+fn unassigned_input(flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(UNASSIGNED_VK),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: HELPER_INPUT_TAG,
+            },
+        },
+    }
+}
+
+/// [`UNASSIGNED_VK`] down and up in one SendInput. The helper's only input, ever: Windows hands
+/// the front over to the process that received the last input event, and this makes the helper
+/// that process. Only the press in: the release once more (`Ok(true)`); that not in either, the key
+/// stays down in Windows' key state until the next key-up (said in the `Err`).
+fn unassigned_key() -> Result<bool, String> {
+    let both = [
+        unassigned_input(KEYBD_EVENT_FLAGS(0)),
+        unassigned_input(KEYEVENTF_KEYUP),
+    ];
+    // SAFETY: two well-formed keyboard inputs of the size given.
+    let sent = unsafe { SendInput(&both, size_of::<INPUT>() as i32) };
+    if sent as usize == both.len() {
+        return Ok(false);
+    }
+    let error = windows::core::Error::from_thread();
+    if sent == 1 {
+        // SAFETY: one well-formed keyboard input of the size given.
+        let again = unsafe { SendInput(&both[1..], size_of::<INPUT>() as i32) };
+        if again == 1 {
+            return Ok(true);
+        }
+        return Err(format!(
+            "SendInput inserted 1 of 2 events ({error}), and the release once more did not go in \
+             ({}): the key stays down until the next key-up",
+            windows::core::Error::from_thread()
+        ));
+    }
+    Err(format!("SendInput inserted {sent} of 2 events ({error})"))
+}
+
+/// `NtQuerySystemInformation` answers this when the buffer is too small (the list grew).
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+/// `KTHREAD_STATE::Waiting`.
+const THREAD_WAITING: u32 = 5;
+/// `KWAIT_REASON::Suspended` and `WrSuspended` (the same wait, entered from user mode). .NET's
+/// `ProcessThread.WaitReason` reads both as `Suspended`
+/// (dotnet/runtime, `ProcessManager.Windows.cs`, `GetThreadWaitReason`: `case 5: case 12`).
+const WAIT_SUSPENDED: [u32; 2] = [5, 12];
+
+/// Whether one thread waits suspended.
+fn waits_suspended(thread: &SYSTEM_THREAD_INFORMATION) -> bool {
+    thread.ThreadState == THREAD_WAITING && WAIT_SUSPENDED.contains(&thread.WaitReason)
+}
+/// The process list is never read into more than this (a PC with thousands of threads needs a few
+/// megabytes).
+const PROCESS_LIST_MAX: usize = 64 << 20;
+
+/// How many of a process's threads wait suspended, and how many it has: suspended — frozen by
+/// Windows' process lifetime manager, as a Start or Search host in the background is — when all
+/// are. One `NtQuerySystemInformation(SystemProcessInformation)`: a copy of the process and thread
+/// list the kernel keeps (some hundred kilobytes, about a millisecond), nothing opened, no message
+/// to anyone, so a suspended or hung process cannot hold the caller.
+fn thread_states(pid: u32) -> Result<(u32, u32), String> {
+    let mut words = vec![0u64; 64 * 1024];
+    for _ in 0..4 {
+        let bytes = words.len() * 8;
+        let mut needed = 0u32;
+        // SAFETY: the buffer is writable for `bytes` and 8-byte aligned.
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SystemProcessInformation,
+                words.as_mut_ptr().cast(),
+                u32::try_from(bytes).unwrap_or(u32::MAX),
+                &mut needed,
+            )
+        };
+        if status.0 == STATUS_INFO_LENGTH_MISMATCH {
+            let want = (needed as usize).max(bytes * 2) + 64 * 1024;
+            if want > PROCESS_LIST_MAX {
+                return Err(format!("the process list needs {want} bytes"));
+            }
+            words = vec![0u64; want.div_ceil(8)];
+            continue;
+        }
+        if status.0 < 0 {
+            return Err(format!(
+                "NtQuerySystemInformation: {:#010x}",
+                status.0 as u32
+            ));
+        }
+        // SAFETY: the u64 buffer seen as the bytes the call wrote.
+        let list =
+            unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * 8) };
+        let filled = (needed as usize).min(list.len());
+        return threads_of(&list[..filled], pid);
+    }
+    Err("the process list kept growing".into())
+}
+
+/// One process's threads in a `SystemProcessInformation` list: (waiting suspended, all).
+fn threads_of(list: &[u8], pid: u32) -> Result<(u32, u32), String> {
+    let process_size = size_of::<SYSTEM_PROCESS_INFORMATION>();
+    let thread_size = size_of::<SYSTEM_THREAD_INFORMATION>();
+    let mut at = 0usize;
+    loop {
+        let Some(end) = at.checked_add(process_size).filter(|&e| e <= list.len()) else {
+            return Err("the process list ends inside an entry".into());
+        };
+        // SAFETY: `at..end` lies in the list (checked); read unaligned, a copy.
+        let process = unsafe {
+            list[at..end]
+                .as_ptr()
+                .cast::<SYSTEM_PROCESS_INFORMATION>()
+                .read_unaligned()
+        };
+        if process.UniqueProcessId.0 as usize == pid as usize {
+            let mut suspended = 0u32;
+            for i in 0..process.NumberOfThreads as usize {
+                let from = end + i * thread_size;
+                let Some(to) = from.checked_add(thread_size).filter(|&t| t <= list.len()) else {
+                    return Err("the thread list ends inside an entry".into());
+                };
+                // SAFETY: `from..to` lies in the list (checked); read unaligned, a copy.
+                let thread = unsafe {
+                    list[from..to]
+                        .as_ptr()
+                        .cast::<SYSTEM_THREAD_INFORMATION>()
+                        .read_unaligned()
+                };
+                if waits_suspended(&thread) {
+                    suspended += 1;
                 }
             }
+            return Ok((suspended, process.NumberOfThreads));
         }
-        refused(steps.join("; "))
+        if process.NextEntryOffset == 0 {
+            return Err(format!("pid {pid} is not in the process list (it ended)"));
+        }
+        at += process.NextEntryOffset as usize;
     }
+}
+
+/// `DWMWA_CLOAKED`: 0 shown; 1 cloaked by its app, 2 by the shell, 4 inherited from its owner.
+fn cloaked(hwnd: HWND) -> Result<u32, String> {
+    let mut value = 0u32;
+    // SAFETY: a u32 output of the size given; any window handle may be asked about.
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut value as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+    }
+    .map(|()| value)
+    .map_err(|e| e.to_string())
+}
+
+/// The window in front, for the log: what tells a cloaked Start or Search window of a suspended
+/// process (the field's stuck case) from an ordinary one. Reads only; nothing waits on the window.
+fn describe_window(hwnd: HWND) -> String {
+    let (pid, _) = pid_of(hwnd);
+    // SAFETY: a read-only query.
+    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    let cloak = cloaked(hwnd).map_or_else(|e| format!("not read ({e})"), |v| v.to_string());
+    let suspended = if pid == 0 {
+        "not read (the window is gone)".to_owned()
+    } else {
+        match thread_states(pid) {
+            Ok((s, n)) if all_suspended(s, n) => format!("yes ({s}/{n} threads)"),
+            Ok((s, n)) => format!("no ({s}/{n} threads)"),
+            Err(e) => format!("not read ({e})"),
+        }
+    };
+    format!(
+        "window {:#x} class {}, visible {}, DWMWA_CLOAKED {cloak}, process {pid} suspended \
+         {suspended}",
+        hwnd.0 as usize,
+        class_of(hwnd),
+        if visible { "yes" } else { "no" }
+    )
 }
 
 /// The directory the helper writes in: its install directory when it runs elevated (only
@@ -1346,5 +1649,51 @@ mod tests {
         ] {
             assert_eq!(integrity_name(rid), name);
         }
+    }
+
+    /// The thread states are read from the kernel's list: this test's own process runs (its
+    /// thread is not suspended), and a process that is not there is said so.
+    #[test]
+    fn a_running_process_is_not_suspended_and_a_gone_one_is_said() {
+        // SAFETY: this process's own id.
+        let own = unsafe { GetCurrentProcessId() };
+        let (suspended, threads) = thread_states(own).unwrap();
+        assert!(threads >= 1, "{threads} threads");
+        assert!(suspended < threads, "{suspended}/{threads} suspended");
+        assert!(thread_states(u32::MAX - 2).is_err_and(|e| e.contains("not in the process list")));
+        // A list cut short is an error, not a read past its end.
+        assert!(threads_of(&[0u8; 16], own).is_err());
+    }
+
+    /// The window line reads a window without failing on one that is gone.
+    #[test]
+    fn a_gone_window_is_described_without_failing() {
+        let line = describe_window(HWND(std::ptr::null_mut()));
+        assert!(line.starts_with("window 0x0 class "), "{line}");
+        assert!(line.contains("DWMWA_CLOAKED"), "{line}");
+        assert!(
+            line.ends_with("suspended not read (the window is gone)"),
+            "{line}"
+        );
+    }
+
+    /// A thread counts as suspended when it waits with reason `Suspended` (5) or `WrSuspended`
+    /// (12), as .NET's `ThreadWaitReason.Suspended` reads both; any other wait, or not waiting, does
+    /// not.
+    #[test]
+    fn suspended_waits_are_both_reasons() {
+        let thread = |state: u32, reason: u32| SYSTEM_THREAD_INFORMATION {
+            ThreadState: state,
+            WaitReason: reason,
+            ..Default::default()
+        };
+        assert!(waits_suspended(&thread(5, 5)));
+        assert!(waits_suspended(&thread(5, 12)));
+        assert!(!waits_suspended(&thread(5, 6)), "UserRequest");
+        assert!(!waits_suspended(&thread(5, 13)), "WrUserRequest");
+        assert!(!waits_suspended(&thread(2, 5)), "running");
+        assert!(all_suspended(3, 3));
+        assert!(!all_suspended(2, 3));
+        assert!(!all_suspended(0, 0), "no threads read");
     }
 }

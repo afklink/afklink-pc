@@ -1,12 +1,13 @@
 import type { Locale, TranslationKey, Translator } from "@afklink/i18n/pc";
-
 import type {
   ClientDevice,
   JournalEnding,
   JournalEntryDto,
   JournalKind,
+  PartyJournalKind,
   TrustedJournalKind,
 } from "../tauri";
+import { around } from "./party";
 
 /**
  * How the connection journal reads in the window: the device's name, the labels, the day headers and
@@ -62,6 +63,10 @@ const EVENTS: Record<Exclude<JournalKind, "session">, TranslationKey> = {
   trusted_off: "app.journalTrustedOff",
   device_untrusted: "app.journalUntrusted",
   other_device_attempt: "app.journalOtherDeviceAttempt",
+  party_added: "app.journalPartyAdded",
+  party_left: "app.journalPartyLeft",
+  party_leader: "app.journalPartyLeader",
+  party_guest: "app.journalPartyGuest",
 };
 
 const TRUSTED_KINDS: readonly TrustedJournalKind[] = [
@@ -74,16 +79,51 @@ const TRUSTED_KINDS: readonly TrustedJournalKind[] = [
   "trusted_off",
   "device_untrusted",
   "other_device_attempt",
+  "party_added",
+  "party_left",
+  "party_leader",
+  "party_guest",
 ];
+
+const PARTY_KINDS: readonly PartyJournalKind[] = [
+  "party_added",
+  "party_left",
+  "party_leader",
+  "party_guest",
+];
+
+/** A party's entry: its words name the party, and the person inside the sentence. */
+export function isPartyKind(kind: JournalKind): kind is PartyJournalKind {
+  return (PARTY_KINDS as readonly string[]).includes(kind);
+}
 
 /** A trusted devices' entry (device keys milestone 1): its own two-line row. */
 export function isTrustedKind(kind: JournalKind): kind is TrustedJournalKind {
   return (TRUSTED_KINDS as readonly string[]).includes(kind);
 }
 
-/** The mode switched on this PC: an entry about the PC, naming nobody. */
+/** The mode switched, the PC added to a party or out of one: an entry about the PC, naming nobody. */
 export function namesNobody(kind: JournalKind): boolean {
-  return kind === "trusted_on" || kind === "trusted_off";
+  return (
+    kind === "trusted_on" ||
+    kind === "trusted_off" ||
+    kind === "party_added" ||
+    kind === "party_left"
+  );
+}
+
+/**
+ * A party's words cut around the person (`around`), so the window can cut the name alone, as the
+ * «Журнал» line does: «Новый гость: » «Коля»; «Новый лидер пати "Орлы": » «Лёха»; the PC's own
+ * entries name nobody — the whole sentence before.
+ */
+export function partyParts(
+  t: Translator,
+  kind: PartyJournalKind,
+  party: string,
+  person: string,
+): JournalRowParts {
+  return around(t, EVENTS[kind], { party }, "person", person);
 }
 
 /**
@@ -93,6 +133,8 @@ export function namesNobody(kind: JournalKind): boolean {
 const DECLINED_REASONS: ReadonlyMap<string, TranslationKey> = new Map<string, TranslationKey>([
   ["grant_stale", "app.journalDeclinedGrantStale"],
   ["key_unconfirmed", "app.journalDeclinedUnconfirmed"],
+  // A party's grant from a leader this PC does not take (party spec §5.1).
+  ["party_leader", "app.journalDeclinedPartyLeader"],
 ]);
 
 /**
@@ -178,6 +220,7 @@ export function journalRowParts(
 ): JournalRowParts {
   if (last === null) return { before: t("app.journalRowEmpty"), name: null, after: "" };
   if (last.kind !== "session") {
+    if (isPartyKind(last.kind)) return partyParts(t, last.kind, last.party ?? "", last.name);
     if (namesNobody(last.kind)) return { before: eventLabel(t, last.kind), name: null, after: "" };
     return {
       before: "",

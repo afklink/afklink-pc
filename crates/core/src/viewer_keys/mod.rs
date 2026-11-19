@@ -65,15 +65,16 @@ pub use key::{
     KeyError, KeyId, SigError, ViewerKey, KEY_ID_LEN, KEY_ID_SHORT_LEN, SIGNATURE_LEN, SPKI_LEN,
 };
 pub use store::{
-    Abandon, AddOutcome, Attempt, AttemptNoted, ClientKind, Damage, DamageKind, FirstUseSnapshot,
-    Ground, GroundId, Invite, KeyRecord, KeySource, KeyState, KnownBinding, Limit, Listed, Lookup,
-    NewKey, NotInstalled, Notes, Origin, OwnerDevice, PendingKey, Person, PersonKeys, Platform,
-    RecoverOutcome, Recovery, Reloaded, Removal, ReopenLoad, RuleRun, SnapshotPerson, Staged,
-    StoreError, StorePaths, SwitchState, Tombstone, TreeRemoval, TrustStore, WriteFailed, Written,
-    ATTEMPTS_MAX, ATTEMPTS_PER_PERSON, ATTEMPT_KEEP_MS, BACKUP_FILE_NAME, DAMAGED_FILE_PREFIX,
-    FILE_NAME, FORMAT_VERSION, GROUND_ID_LEN, LAST_BINDINGS_MAX, LAST_USED_WRITE_AFTER_MS,
-    MAX_ACTIVE_KEYS, MAX_KEYS_PER_PERSON, MAX_SNAPSHOT_PEOPLE, MAX_SPENT, MAX_TOMBSTONES,
-    MAX_TOMBSTONES_AT_PC, MAX_USER_ID, MODE_FILE_NAME, NAME_MAX_CHARS, TAG_MAX_LEN,
+    Abandon, AddOutcome, Attempt, AttemptNoted, ClientKind, Damage, DamageKind, Delegation,
+    FirstUseSnapshot, Ground, GroundId, Invite, Joined, KeyRecord, KeySource, KeyState,
+    KnownBinding, Limit, Listed, Lookup, NewKey, NotInstalled, Notes, Origin, OwnerDevice,
+    PartyLeaveBy, PendingKey, Person, PersonKeys, Platform, RecoverOutcome, Recovery, Reloaded,
+    Removal, ReopenLoad, RuleRun, SnapshotPerson, Staged, StoreError, StorePaths, SwitchState,
+    Tombstone, TreeRemoval, TrustStore, WriteFailed, Written, ATTEMPTS_MAX, ATTEMPTS_PER_PERSON,
+    ATTEMPT_KEEP_MS, BACKUP_FILE_NAME, DAMAGED_FILE_PREFIX, FILE_NAME, FORMAT_VERSION,
+    GROUND_ID_LEN, LAST_BINDINGS_MAX, LAST_USED_WRITE_AFTER_MS, MAX_ACTIVE_KEYS, MAX_DELEGATIONS,
+    MAX_KEYS_PER_PERSON, MAX_SNAPSHOT_PEOPLE, MAX_SPENT, MAX_TOMBSTONES, MAX_TOMBSTONES_AT_PC,
+    MAX_USER_ID, MODE_FILE_NAME, NAME_MAX_CHARS, PARTY_FORMAT_VERSION, TAG_MAX_LEN,
     UNBOUND_KEY_GRACE_MS,
 };
 pub use telegram::{

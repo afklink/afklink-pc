@@ -34,3 +34,8 @@ paths = ['''(^|/)contract/packages/protocol/vectors/viewer-keys/grant\.json$''']
 description = "Viewer-key scenario vectors: the same seeded test tokens and key ids, not real secrets"
 targetRules = ["generic-api-key"]
 paths = ['''(^|/)contract/packages/protocol/vectors/viewer-keys/scenarios\.json$''']
+
+[[allowlists]]
+description = "Signed party test vectors: grant tokens, key ids and party ids come from fixed test seeds and are covered by the signatures, not real secrets"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)contract/packages/protocol/vectors/party/(join|grant)\.json$''']

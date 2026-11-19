@@ -63,6 +63,22 @@
           "variant": "grant_token"
         },
         {
+          "file": "agent-to-server/party_ack.json",
+          "variant": "party_ack"
+        },
+        {
+          "file": "agent-to-server/party_ack_leave.json",
+          "variant": "party_ack"
+        },
+        {
+          "file": "agent-to-server/party_state.json",
+          "variant": "party_state"
+        },
+        {
+          "file": "agent-to-server/party_state_empty.json",
+          "variant": "party_state"
+        },
+        {
           "file": "agent-to-server/unbind.json",
           "variant": "unbind"
         },
@@ -129,6 +145,14 @@
         {
           "file": "agent-to-server/agent_event_setting.json",
           "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/agent_event_secure_desktop.json",
+          "variant": "agent_event"
+        },
+        {
+          "file": "agent-to-server/secure_desktop_ongoing.json",
+          "variant": "secure_desktop_ongoing"
         }
       ]
     },
@@ -154,6 +178,26 @@
           "variant": "agent_ready"
         },
         {
+          "file": "server-to-agent/agent_ready_party.json",
+          "variant": "agent_ready"
+        },
+        {
+          "file": "server-to-agent/agent_ready_secure_desktop.json",
+          "variant": "agent_ready"
+        },
+        {
+          "file": "server-to-agent/agent_ready_party_guests.json",
+          "variant": "agent_ready"
+        },
+        {
+          "file": "server-to-agent/party_join.json",
+          "variant": "party_join"
+        },
+        {
+          "file": "server-to-agent/party_leave.json",
+          "variant": "party_leave"
+        },
+        {
           "file": "server-to-agent/pairing_code.json",
           "variant": "pairing_code"
         },
@@ -175,6 +219,10 @@
         },
         {
           "file": "server-to-agent/binding_added_invite.json",
+          "variant": "binding_added"
+        },
+        {
+          "file": "server-to-agent/binding_added_party.json",
           "variant": "binding_added"
         },
         {
@@ -273,11 +321,19 @@
           "variant": "connect"
         },
         {
+          "file": "viewer-to-server/connect_takeover.json",
+          "variant": "connect"
+        },
+        {
           "file": "viewer-to-server/sdp.json",
           "variant": "sdp"
         },
         {
           "file": "viewer-to-server/sdp_proof.json",
+          "variant": "sdp"
+        },
+        {
+          "file": "viewer-to-server/sdp_proof_party.json",
           "variant": "sdp"
         },
         {
@@ -446,6 +502,22 @@
         {
           "file": "server-to-viewer/owner_requests_changed.json",
           "variant": "owner_requests_changed"
+        },
+        {
+          "file": "server-to-viewer/connect_busy.json",
+          "variant": "connect_busy"
+        },
+        {
+          "file": "server-to-viewer/connect_busy_owner.json",
+          "variant": "connect_busy"
+        },
+        {
+          "file": "server-to-viewer/session_end_superseded.json",
+          "variant": "session_end"
+        },
+        {
+          "file": "server-to-viewer/party_changed.json",
+          "variant": "party_changed"
         },
         {
           "file": "server-to-viewer/device_add_opened.json",
@@ -642,6 +714,10 @@
           "variant": "hb"
         },
         {
+          "file": "agent-to-viewer/heartbeat_secure_desktop_uac.json",
+          "variant": "hb"
+        },
+        {
           "file": "agent-to-viewer/cursor.json",
           "variant": "cp"
         },
@@ -757,6 +833,10 @@
           "variant": "pc_setting_changed"
         },
         {
+          "file": "product-events/secure_desktop_ended.json",
+          "variant": "secure_desktop_ended"
+        },
+        {
           "file": "product-events/client_error.json",
           "variant": "client_error"
         },
@@ -865,6 +945,102 @@
         },
         {
           "file": "rest/device_keys_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/devices_response_party.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_create_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_peek_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_peek_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_peek_response_closed.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_enter_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_enter_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_enter_response_not_found.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_key_card_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_admission_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_admission_share_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_admission_share_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_request_answer.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_request_answer_decline.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_request_answer_response.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_request_answer_response_decline.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_grants_upload.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_pc_add_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_pc_join_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_leader_request.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_leader_request_withdraw.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_view.json",
+          "variant": null
+        },
+        {
+          "file": "rest/party_view_owner.json",
+          "variant": null
+        },
+        {
+          "file": "rest/parties_response.json",
           "variant": null
         },
         {

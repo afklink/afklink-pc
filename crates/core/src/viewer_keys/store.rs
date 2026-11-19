@@ -15,7 +15,11 @@
 //!   key is removed and after a reset at the PC, so a replayed `endorse`, `grant` or invitation is
 //!   useless;
 //! - the switch «Доверенные устройства» ([`SwitchState`]); same-device recovery has no switch;
-//! - the `first_use` snapshot (§9): people and roles, taken once.
+//! - the `first_use` snapshot (§9): people and roles, taken once;
+//! - the delegations (party spec §3.1, [`Delegation`]): the parties this PC is in, each with its
+//!   leader's key. Notes like the grant token: decided in memory at once, written by the next
+//!   write. A party's grant id is spent in the grants' set. The file is version 3 while the list
+//!   holds nothing of parties, version 4 otherwise ([`PARTY_FORMAT_VERSION`]).
 //!
 //! # Rules a change must pass (step 8 of §3.4 calls these, so none can be skipped)
 //!
@@ -28,6 +32,9 @@
 //!   grant's and `invite.by` is an active owner's key of the same person as `by`; without one,
 //!   only in observe mode and the key is unconfirmed. Every grant spends its `grant_id` **and** its
 //!   `inv_id`, with or without the invitation (so an old request cannot come back with one);
+//! - `party` (party spec §5): the delegation of its party names the grant's signer its leader
+//!   (the owner key that signed the delegation working, its mark inherited), the person is not
+//!   an owner here, the grant id unspent, the token current; it lifts only a `server` removal;
 //! - `first_use`: observe mode; the person in the snapshot, with no active and no removed key; the
 //!   person and role from the snapshot ([`StoreError::FirstUseAgain`] when the person already has a
 //!   `first_use` key — the admission journals that);
@@ -235,11 +242,15 @@ pub const MODE_FILE_NAME: &str = "viewer_keys.mode";
 const MODE_FORMAT_VERSION: u32 = 1;
 /// The largest mode file read (it holds a few dozen bytes).
 const MAX_MODE_BYTES: u64 = 4096;
-/// The one file format this build writes and reads: every field, the grant token among them, is
-/// always there. Any other version is damage — a newer one [`DamageKind::NewerVersion`] (deny,
-/// and no reset that would wipe what a newer build wrote), an older or unknown one
-/// [`DamageKind::BadVersion`].
+/// The file format of a list that holds nothing of parties: every field, the grant token among
+/// them, is always there. Written whenever the list has no delegation and no record, active or
+/// removed, with a party source (party spec §3.3), so a build without parties reads it.
 pub const FORMAT_VERSION: u32 = 3;
+/// The file format of a list with party content: version 3 with the delegations (`parties`) and
+/// the `party` key source. Read as written; version 3 reads as 4 without them. Any other version is
+/// damage — a newer one [`DamageKind::NewerVersion`] (deny, and no reset that would wipe what a
+/// newer build wrote), an older or unknown one [`DamageKind::BadVersion`].
+pub const PARTY_FORMAT_VERSION: u32 = 4;
 /// §10: the most bindings the last binding list the PC knew keeps
 /// ([`TrustStore::note_last_bindings`]); the parser refuses more.
 pub const LAST_BINDINGS_MAX: usize = 4096;
@@ -471,6 +482,13 @@ pub enum KeySource {
     },
     /// The person's first key on the server's word, from the snapshot (§9).
     FirstUse,
+    /// A party member let in by the leader's grant (party spec §3.2): `by` is the leader's key,
+    /// which is not in the list — no ancestry edge. `grant_id` is spent in the grants' set.
+    Party {
+        party_id: GroundId,
+        by: KeyId,
+        grant_id: GroundId,
+    },
 }
 
 impl KeySource {
@@ -481,6 +499,7 @@ impl KeySource {
             Self::Grant { .. } => "grant",
             Self::Recover { .. } => "recover",
             Self::FirstUse => "first_use",
+            Self::Party { .. } => "party",
         }
     }
 
@@ -490,7 +509,7 @@ impl KeySource {
     /// [`Self::replaced`].
     pub fn parents(&self) -> Vec<&KeyId> {
         let mut out: Vec<&KeyId> = match self {
-            Self::Pair | Self::FirstUse => Vec::new(),
+            Self::Pair | Self::FirstUse | Self::Party { .. } => Vec::new(),
             Self::Endorse { by, .. } => vec![by],
             Self::Grant { by, invite_by, .. } => {
                 let mut out = vec![by];
@@ -761,6 +780,18 @@ pub enum Ground {
     },
     /// The caller has checked the key's signature over `uid`.
     FirstUse { telegram_user_id: i64 },
+    /// A party leader's grant (party spec §5.1): the caller has checked its form, `device_id`,
+    /// `key_id`, `role == "guest"` and the signature under the delegation's leader key. Decided
+    /// again here: the delegation of `party_id` names `by` as its leader (`party_leader`), the
+    /// grant id is unspent, the person is no owner here, the token is the current one. The key
+    /// takes the `unconfirmed` mark of the owner's key that signed the delegation (§5.3).
+    Party {
+        party_id: GroundId,
+        by: KeyId,
+        grant_id: GroundId,
+        person: Person,
+        token: GrantToken,
+    },
 }
 
 impl Ground {
@@ -770,6 +801,50 @@ impl Ground {
             Self::Endorse { .. } => "endorse",
             Self::Grant { .. } => "grant",
             Self::FirstUse { .. } => "first_use",
+            Self::Party { .. } => "party",
+        }
+    }
+}
+
+/// The most delegations a PC keeps (party spec §3.1): past it a new party's join is `limit`.
+pub const MAX_DELEGATIONS: usize = afklink_protocol::party::PARTY_DELEGATIONS_MAX;
+
+/// A party this PC is in (party spec §3.1): its leader takes grants on the owner's behalf. One
+/// per `party_id`, in the list's notes: decided in memory at once, written by the next write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    pub party_id: GroundId,
+    /// The party's name as the join signed it (display only).
+    pub party: String,
+    /// The leader as the join named him (names cleaned, display only).
+    pub leader: Person,
+    /// The leader's key: a party grant is checked under it; its `key_id` is what `party_state`
+    /// reports.
+    pub leader_key: ViewerKey,
+    /// The owner's key that signed the last join taken. A recovery that replaced it is the signer
+    /// from then on ([`TrustStore::delegation`] follows the replacement).
+    pub by: KeyId,
+    /// The PC's clock when the join was taken (display only).
+    pub at: i64,
+}
+
+/// What a join did to the delegations ([`TrustStore::put_delegation`], party spec §4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Joined {
+    /// A party the PC was not in: the token stays.
+    New,
+    /// The same leader again (another owner key, or a repeat): `by` taken, the token stays.
+    Same,
+    /// Another leader for a party the PC is in: the leader taken, the token replaced.
+    LeaderChanged,
+}
+
+impl Joined {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Same => "same",
+            Self::LeaderChanged => "leader_changed",
         }
     }
 }
@@ -1038,6 +1113,13 @@ pub enum StoreError {
     BackupUnusable(String),
     #[error("not saved: {0}")]
     Write(String),
+    /// Party spec §5.1: the PC holds no delegation of the grant's party naming its signer as the
+    /// leader (`admit_refused:party_leader`).
+    #[error("no delegation of this party with this leader")]
+    PartyLeader,
+    /// Party spec §4.2 step 8: a new party past [`MAX_DELEGATIONS`] (`party_ack` `limit`).
+    #[error("the PC is in as many parties as it keeps")]
+    PartyLimit,
 }
 
 impl StoreError {
@@ -1081,6 +1163,8 @@ impl StoreError {
             Self::Invalid(_) => "invalid",
             Self::BackupUnusable(_) => "backup_unusable",
             Self::Write(_) => "write",
+            Self::PartyLeader => "party_leader",
+            Self::PartyLimit => "party_limit",
         }
     }
 }
@@ -1149,6 +1233,8 @@ pub struct Notes {
     /// The stored last binding list, by user id ([`KnownBinding`]); `None`: none stored (a first
     /// run, a file older than it, a reset) — the rule then knows people by their traces alone.
     last_bindings: Option<Vec<KnownBinding>>,
+    /// The parties this PC is in (party spec §3.1), in the order they were joined.
+    parties: Vec<Delegation>,
 }
 
 impl Notes {
@@ -1185,6 +1271,17 @@ impl Notes {
                 "viewer keys: the file's grant token taken (another writer replaced it; memory \
                  kept the one last written)"
             );
+        }
+        // The delegations as the grant token: memory's when memory changed them since `base`
+        // (a join or a leave decided, not yet written), else the file's.
+        if mine.parties != base.parties {
+            tracing::debug!(
+                file = self.parties.len(),
+                memory = mine.parties.len(),
+                "viewer keys: memory's delegations kept over the file's (changed in memory since \
+                 the last write)"
+            );
+            self.parties.clone_from(&mine.parties);
         }
         // Memory's binding list is the later one (the file only had what memory wrote).
         if mine.last_bindings.is_some() && mine.last_bindings != self.last_bindings {
@@ -1570,6 +1667,81 @@ impl TrustList {
             .cloned()
             .collect();
         (roots, walk, removed)
+    }
+
+    /// What a PC leaving a party takes (party spec §6): from every record, active or removed,
+    /// whose source is that party (`None`: any party), the §10.1 walk — descendants, a recovery's
+    /// replaced records — and also forward, from a key a recovery replaced to the record that
+    /// replaced it. Every key on it, active or removed, roots first.
+    fn party_walk(&self, party_id: Option<&GroundId>) -> Vec<KeyId> {
+        let of_party = |s: &KeySource| matches!(s, KeySource::Party { party_id: p, .. } if party_id.is_none_or(|id| id == p));
+        let index = self.walk_index();
+        let forward: HashMap<&KeyId, &KeyId> = self
+            .tombstones
+            .iter()
+            .filter_map(|t| match &t.origin {
+                Origin::Replaced { new_key_id } => Some((t.key_id(), new_key_id)),
+                _ => None,
+            })
+            .collect();
+        let mut seen: HashSet<&KeyId> = HashSet::new();
+        let mut queue: VecDeque<&KeyId> = self
+            .keys
+            .iter()
+            .map(|r| (r.key_id(), &r.source))
+            .chain(self.tombstones.iter().map(|t| (t.key_id(), &t.source)))
+            .filter(|(id, s)| of_party(s) && seen.insert(*id))
+            .map(|(id, _)| id)
+            .collect();
+        let mut out = Vec::new();
+        while let Some(id) = queue.pop_front() {
+            out.push(id.clone());
+            let children = index
+                .children
+                .get(id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let replaced = index.replaced.get(id).copied().unwrap_or_default();
+            for next in children
+                .iter()
+                .copied()
+                .chain(replaced)
+                .chain(forward.get(id).copied())
+            {
+                if seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the list holds anything of parties (party spec §3.3): a delegation, or a record,
+    /// active or removed, with a party source. Such a list is written as version 4.
+    fn has_party_content(&self) -> bool {
+        !self.notes.parties.is_empty()
+            || self
+                .keys
+                .iter()
+                .map(|r| &r.source)
+                .chain(self.tombstones.iter().map(|t| &t.source))
+                .any(|s| matches!(s, KeySource::Party { .. }))
+    }
+
+    /// The owner's record that signs a delegation now (party spec §3.1): `by`, or the record a
+    /// recovery replaced it with, followed to the end. `None` when that is no listed record.
+    fn delegation_signer(&self, by: &KeyId) -> Option<&KeyRecord> {
+        let mut id = by;
+        for _ in 0..=self.tombstones.len() {
+            if let Some(r) = self.active(id) {
+                return Some(r);
+            }
+            match self.tombstone(id).map(|t| &t.origin) {
+                Some(Origin::Replaced { new_key_id }) => id = new_key_id,
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// The active keys as (key_id → person, role, mark), for [`Reloaded`].
@@ -2406,10 +2578,19 @@ fn reset_damaged_files(
     let (next, from_backup) = match carried {
         Some(b) => {
             // The backup's active keys become tombstones `pc`: whoever had a key keeps first_use
-            // closed, and a key comes back by a pairing at the PC or a new invited grant.
+            // closed, and a key comes back by a pairing at the PC or a new invited grant. Keys
+            // that came through a party, with their walk, `server` (party spec §6), and the
+            // delegations go.
+            let party: HashSet<KeyId> = b.party_walk(None).into_iter().collect();
             let mut tombstones = b.tombstones;
-            tombstones.extend(b.keys.iter().map(|r| r.tombstone(Origin::Pc, now_ms)));
+            tombstones.extend(
+                b.keys
+                    .iter()
+                    .map(|r| r.tombstone(reset_origin(&party, r), now_ms)),
+            );
             let carried_keys = b.keys.len();
+            let mut notes = b.notes;
+            notes.parties.clear();
             (
                 TrustList {
                     switches,
@@ -2420,7 +2601,7 @@ fn reset_damaged_files(
                     spent_invite: b.spent_invite,
                     snapshot: b.snapshot,
                     // The removed people stay (§10); the backup's attempts too (pruned on read).
-                    notes: b.notes,
+                    notes,
                 },
                 Some(carried_keys),
             )
@@ -2621,9 +2802,33 @@ pub struct TrustStore {
     /// The notes as the primary holds them (loaded or last written): memory's differ until the
     /// next write ([`TrustStore::notes_unsaved`]).
     saved_notes: Notes,
+    /// Who made the PC leave each party it left since its last join ([`Self::leave_party_now`]),
+    /// for the journal and the toasts ([`Self::left_by`]). Memory only.
+    left_by: HashMap<GroundId, PartyLeaveBy>,
     /// A test's wall clock ([`Self::wall_now`]): the vectors' PC clock, not the machine's.
     #[cfg(test)]
     test_wall: Option<i64>,
+}
+
+/// Who made the PC leave a party ([`TrustStore::leave_party_now`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartyLeaveBy {
+    /// «Убрать ПК из пати» pressed at the PC.
+    Pc,
+    /// `party_leave` from the server.
+    Server,
+    /// The owner key that signed the party's delegation removed at the PC.
+    SignerRemoved,
+}
+
+impl PartyLeaveBy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pc => "pc",
+            Self::Server => "server",
+            Self::SignerRemoved => "signer_removed",
+        }
+    }
 }
 
 /// Where a store reads and writes ([`TrustStore::paths`]), for [`TrustStore::reopen_load`] on a
@@ -2716,6 +2921,7 @@ impl TrustStore {
                     damaged_mode: None,
                     damaged_raw: None,
                     saved_notes: Notes::default(),
+                    left_by: HashMap::new(),
                     #[cfg(test)]
                     test_wall: None,
                 }
@@ -2745,6 +2951,7 @@ impl TrustStore {
             damaged_mode: None,
             damaged_raw: None,
             saved_notes: Notes::default(),
+            left_by: HashMap::new(),
             #[cfg(test)]
             test_wall: None,
         };
@@ -2975,6 +3182,9 @@ impl TrustStore {
         self.deny_now(&removed);
         self.carry_removal(&removed, Removal::Pc, now_ms);
         self.rotate_grant_token("«Удалить» at the PC");
+        let mut removed = removed;
+        let party = self.leave_parties_signed_by(&removed, now_ms);
+        removed.extend(party);
         Ok(TreeRemoval { removed })
     }
 
@@ -3058,7 +3268,187 @@ impl TrustStore {
         self.deny_now(&ids);
         self.carry_removal(&ids, Removal::Pc, now_ms);
         self.person_removed(telegram_user_id, "a person removed at the PC");
+        let mut ids = ids;
+        let party = self.leave_parties_signed_by(&ids, now_ms);
+        ids.extend(party);
         TreeRemoval { removed: ids }
+    }
+
+    // --- Parties (party spec §3, §4, §6): the delegations are notes, decided in memory --------
+
+    /// The delegations as memory has them (the window's, the admission's), in join order.
+    pub fn delegations(&self) -> Result<&[Delegation], StoreError> {
+        Ok(&self.ready()?.notes.parties)
+    }
+
+    /// The delegations as the file holds them (written or read): the only ones `party_state` may
+    /// report (party spec §4.3). `None` while the list is damaged.
+    pub fn saved_delegations(&self) -> Option<&[Delegation]> {
+        self.notes().map(|_| &self.saved_notes.parties[..])
+    }
+
+    /// Who made the PC leave `party_id` last ([`Self::leave_party_now`]) since its last join;
+    /// `None` when no leave was decided in this process (a delegation gone with a reset, a
+    /// restore or a reopen that read another file).
+    pub fn left_by(&self, party_id: &GroundId) -> Option<PartyLeaveBy> {
+        self.left_by.get(party_id).copied()
+    }
+
+    /// The delegation of `party_id` with the owner's record that signs it now (a recovery's
+    /// replacement followed, §3.1), while that record works; `None` otherwise or while damaged.
+    pub fn delegation(&self, party_id: &GroundId) -> Option<(&Delegation, &KeyRecord)> {
+        let list = self.ready().ok()?;
+        let d = list
+            .notes
+            .parties
+            .iter()
+            .find(|d| d.party_id == *party_id)?;
+        let signer = list.delegation_signer(&d.by).filter(|r| self.works(r));
+        if signer.is_none() {
+            tracing::debug!(
+                party = %d.party_id,
+                by = %d.by.short(),
+                "viewer keys: the delegation's signing owner key does not work here; no delegation"
+            );
+        }
+        Some((d, signer?))
+    }
+
+    /// A join taken (party spec §4.2 step 9, §4.4), in memory at once — the next write takes it:
+    /// a new party is added (past [`MAX_DELEGATIONS`]: [`StoreError::PartyLimit`]), an existing
+    /// one replaced. Another leader replaces the grant token; the same leader and a new party do
+    /// not. Allowed while busy or needing a reopen; refused on a damaged list.
+    pub fn put_delegation(&mut self, mut d: Delegation) -> Result<Joined, StoreError> {
+        // The leader's names as a key record's: cleaned, the form the file takes.
+        d.leader = kept_person(d.leader)?;
+        let party_id = d.party_id.clone();
+        let leader = d.leader_key.key_id().short().to_string();
+        let parties = &mut self.notes_mut().ok_or(StoreError::Damaged)?.parties;
+        let count = parties.len();
+        let joined = match parties.iter_mut().find(|x| x.party_id == d.party_id) {
+            Some(x) => {
+                let changed = x.leader_key != d.leader_key;
+                *x = d;
+                if changed {
+                    Joined::LeaderChanged
+                } else {
+                    Joined::Same
+                }
+            }
+            None if count >= MAX_DELEGATIONS => {
+                tracing::debug!(
+                    party = %party_id,
+                    parties = count,
+                    max = MAX_DELEGATIONS,
+                    "viewer keys: a new party past the limit: limit"
+                );
+                return Err(StoreError::PartyLimit);
+            }
+            None => {
+                parties.push(d);
+                Joined::New
+            }
+        };
+        if joined == Joined::LeaderChanged {
+            self.rotate_grant_token("a party's leader changed");
+        }
+        // Joined again: a leave before this join says nothing about the next one.
+        self.left_by.remove(&party_id);
+        tracing::info!(
+            party = %party_id,
+            leader = %leader,
+            joined = joined.as_str(),
+            "viewer keys: a party's delegation taken in memory (written with the next write)"
+        );
+        Ok(joined)
+    }
+
+    /// The PC leaves `party_id` (party spec §6), in memory at once: the delegation goes; every
+    /// listed guest-role key of the party's walk ([`TrustList::party_walk`]) is denied and carried
+    /// as removed `server`, and the grant token is replaced. `by`: who made it leave, kept for
+    /// [`Self::left_by`]; a leave by the server's word ([`PartyLeaveBy::Server`]) does not touch a
+    /// person holding a working owner-role key here (keys §10), a leave at the PC or by the
+    /// removal of the owner key that signed the delegation takes their guest-role keys too.
+    /// Owner-role keys stay. The keys denied; `Ok(None)`: the PC is not in that party, nothing
+    /// changes. Allowed while busy or needing a reopen; refused on a damaged list.
+    pub fn leave_party_now(
+        &mut self,
+        party_id: &GroundId,
+        by: PartyLeaveBy,
+        why: &str,
+        now_ms: i64,
+    ) -> Result<Option<Vec<KeyId>>, StoreError> {
+        let server_word = by == PartyLeaveBy::Server;
+        let list = self.ready()?;
+        let Some(at) = list
+            .notes
+            .parties
+            .iter()
+            .position(|d| d.party_id == *party_id)
+        else {
+            tracing::debug!(party = %party_id, why, "viewer keys: leave: not in this party; nothing changes");
+            return Ok(None);
+        };
+        let walk = list.party_walk(Some(party_id));
+        let owner_here = |uid: i64| self.person_keys(uid).is_ok_and(|k| k.owner_by_keys());
+        let (kept, removed): (Vec<&KeyRecord>, Vec<&KeyRecord>) =
+            walk.iter().filter_map(|id| list.active(id)).partition(|r| {
+                r.role == BindingRole::Owner
+                    || (server_word && owner_here(r.person.telegram_user_id))
+            });
+        let removed: Vec<KeyId> = removed.iter().map(|r| r.key_id().clone()).collect();
+        let kept = kept.len();
+        let Some(notes) = self.notes_mut() else {
+            return Err(StoreError::Damaged);
+        };
+        notes.parties.remove(at);
+        self.left_by.insert(party_id.clone(), by);
+        self.deny_now(&removed);
+        self.carry_removal(&removed, Removal::Server, now_ms);
+        self.rotate_grant_token(why);
+        tracing::info!(
+            party = %party_id,
+            why,
+            by = by.as_str(),
+            walk = walk.len(),
+            kids = %short_list(&removed),
+            kept_of_owners = kept,
+            "viewer keys: the PC left a party: its delegation gone, its keys denied (server)"
+        );
+        Ok(Some(removed))
+    }
+
+    /// Party spec §6: owner keys removed at the PC (`removed`, decided now) take every delegation
+    /// one of them signs with them — each as the PC leaving that party, in the same change. The
+    /// keys those leaves denied.
+    fn leave_parties_signed_by(&mut self, removed: &[KeyId], now_ms: i64) -> Vec<KeyId> {
+        let Ok(list) = self.ready() else {
+            return Vec::new();
+        };
+        let gone: Vec<GroundId> = list
+            .notes
+            .parties
+            .iter()
+            .filter(|d| {
+                list.delegation_signer(&d.by)
+                    .is_some_and(|r| removed.contains(r.key_id()))
+            })
+            .map(|d| d.party_id.clone())
+            .collect();
+        let mut denied = Vec::new();
+        for id in gone {
+            let why = "the owner key that signed the party's delegation removed at the PC";
+            match self.leave_party_now(&id, PartyLeaveBy::SignerRemoved, why, now_ms) {
+                Ok(left) => denied.extend(left.unwrap_or_default()),
+                Err(e) => tracing::debug!(
+                    party = %id,
+                    reason = e.as_str(),
+                    "viewer keys: the leave of a party whose signing owner key was removed is \
+                     refused ({e}); its delegation stays"
+                ),
+            }
+        }
+        denied
     }
 
     /// A guest unbound (spec §10: on the server, `by` `server`; at the PC, `pc`), the keys' part:
@@ -4261,6 +4651,15 @@ impl TrustStore {
                 }),
                 Ground::Grant { .. } | Ground::Endorse { .. },
             ) => {}
+            // Party spec §5.2: a party's grant lifts only the server's removal, never one at the
+            // PC nor a replacement.
+            (
+                Some(Tombstone {
+                    origin: Origin::Server,
+                    ..
+                }),
+                Ground::Party { .. },
+            ) => {}
             // §10, §5: in strict mode a pairing that would be unconfirmed is not written at all —
             // `key_unconfirmed`, whatever its tombstone (which stays).
             (
@@ -4437,6 +4836,42 @@ impl TrustStore {
                 let entry = list.first_use_person(telegram_user_id)?;
                 (entry.person, entry.role, KeySource::FirstUse, true)
             }
+            Ground::Party {
+                party_id,
+                by,
+                grant_id,
+                person,
+                token,
+            } => {
+                let person = kept_person(person)?;
+                // §5.1 step 4, decided again: the delegation names this leader, and the owner key
+                // that signed it works; the key takes that key's mark (§5.3).
+                let signer = self
+                    .delegation(&party_id)
+                    .filter(|(d, _)| *d.leader_key.key_id() == by)
+                    .map(|(_, signer)| signer.unconfirmed)
+                    .ok_or(StoreError::PartyLeader)?;
+                if list.spent_grant.contains(&grant_id) {
+                    return Err(StoreError::Spent(grant_id));
+                }
+                if list
+                    .keys_of(person.telegram_user_id)
+                    .any(|r| r.role == BindingRole::Owner)
+                {
+                    return Err(StoreError::GrantRole);
+                }
+                self.grant_token_current(&token)?;
+                (
+                    person,
+                    BindingRole::Guest,
+                    KeySource::Party {
+                        party_id,
+                        by,
+                        grant_id,
+                    },
+                    signer,
+                )
+            }
         };
         let uid = person.telegram_user_id;
         if already {
@@ -4531,7 +4966,7 @@ impl TrustStore {
             );
         }
         let spends = match &source {
-            KeySource::Endorse { .. } => 1,
+            KeySource::Endorse { .. } | KeySource::Party { .. } => 1,
             KeySource::Grant { .. } => 2,
             _ => 0,
         };
@@ -4554,6 +4989,9 @@ impl TrustStore {
                 if let Some(inv_id) = inv_id {
                     next.spent_invite.insert(inv_id.clone());
                 }
+            }
+            KeySource::Party { grant_id, .. } => {
+                next.spent_grant.insert(grant_id.clone());
             }
             _ => {}
         }
@@ -5204,6 +5642,15 @@ impl TrustStore {
             // is staged: its keys are denied below, whatever its write does.
             if !self.is_damaged() {
                 self.rotate_grant_token("a reset at the PC");
+                // Party spec §6: no delegations after a reset (memory decides; the stage below
+                // writes memory's notes).
+                if let Some(n) = self.notes_mut().filter(|n| !n.parties.is_empty()) {
+                    tracing::info!(
+                        parties = n.parties.len(),
+                        "viewer keys: a reset at the PC: every delegation goes"
+                    );
+                    n.parties.clear();
+                }
             }
             self.try_stage_reset(now_ms)
         });
@@ -5224,10 +5671,11 @@ impl TrustStore {
             State::Ready(list) => {
                 let mut next = list.clone();
                 let removed: Vec<KeyId> = list.keys.iter().map(|r| r.key_id().clone()).collect();
+                let party: HashSet<KeyId> = list.party_walk(None).into_iter().collect();
                 next.tombstones.extend(
                     std::mem::take(&mut next.keys)
                         .iter()
-                        .map(|r| r.tombstone(Origin::Pc, now_ms)),
+                        .map(|r| r.tombstone(reset_origin(&party, r), now_ms)),
                 );
                 let what = format!(
                     "reset at the PC: {} active key(s) removed; tombstones, spent ids, snapshot \
@@ -5389,7 +5837,11 @@ impl TrustStore {
         };
         let by = match &record.source {
             KeySource::Endorse { by, .. } | KeySource::Grant { by, .. } => by,
-            KeySource::Pair | KeySource::Recover { .. } | KeySource::FirstUse => return Ok(None),
+            // A party key's signer is the leader's key, which is not in the list.
+            KeySource::Pair
+            | KeySource::Recover { .. }
+            | KeySource::FirstUse
+            | KeySource::Party { .. } => return Ok(None),
         };
         Ok(Some((by, self.listed(by))))
     }
@@ -6129,6 +6581,16 @@ fn removal_of(origin: &Origin) -> Removal {
     }
 }
 
+/// A reset's origin for an active key (party spec §6): `server` for one on a party's walk
+/// (`party`), `pc` for the rest.
+fn reset_origin(party: &HashSet<KeyId>, r: &KeyRecord) -> Origin {
+    if party.contains(r.key_id()) {
+        Origin::Server
+    } else {
+        Origin::Pc
+    }
+}
+
 /// The check of a new key's card that needs no list: `rpk` is not the key itself. (`kind` and
 /// `platform` are well-formed by their types.)
 fn check_new_key(key: &ViewerKey, rpk: Option<&ViewerKey>) -> Result<(), StoreError> {
@@ -6201,6 +6663,32 @@ struct FileV1 {
     /// The last binding list the PC knew (absent: none stored; `[]`: an empty list).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_bindings: Option<Vec<KnownBinding>>,
+    /// Version 4 only (party spec §3.1): the delegations; absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parties: Vec<FileDelegation>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileDelegation {
+    party_id: GroundId,
+    party: String,
+    leader: FileLeader,
+    by: KeyId,
+    at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileLeader {
+    telegram_user_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    /// Kept as a check, like a key's: recomputed from `spki` at load.
+    key_id: KeyId,
+    spki: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -6273,7 +6761,13 @@ struct VersionOnly {
 fn serialize(list: &TrustList) -> Result<Vec<u8>, StoreError> {
     let notes = &list.notes;
     let file = FileV1 {
-        version: FORMAT_VERSION,
+        // Party spec §3.3: version 4 only with party content, so a PC that never met a party
+        // keeps a file a build without parties reads.
+        version: if list.has_party_content() {
+            PARTY_FORMAT_VERSION
+        } else {
+            FORMAT_VERSION
+        },
         switches: list.switches,
         keys: list
             .keys
@@ -6328,6 +6822,23 @@ fn serialize(list: &TrustList) -> Result<Vec<u8>, StoreError> {
             })
             .collect(),
         last_bindings: notes.last_bindings.clone(),
+        parties: notes
+            .parties
+            .iter()
+            .map(|d| FileDelegation {
+                party_id: d.party_id.clone(),
+                party: d.party.clone(),
+                leader: FileLeader {
+                    telegram_user_id: d.leader.telegram_user_id,
+                    first_name: d.leader.first_name.clone(),
+                    username: d.leader.username.clone(),
+                    key_id: d.leader_key.key_id().clone(),
+                    spki: URL_SAFE_NO_PAD.encode(d.leader_key.spki()),
+                },
+                by: d.by.clone(),
+                at: d.at,
+            })
+            .collect(),
     };
     serde_json::to_vec_pretty(&file).map_err(|e| StoreError::Invalid(format!("serialize: {e}")))
 }
@@ -6477,7 +6988,9 @@ fn ground_spent(
         KeySource::Grant {
             grant_id, inv_id, ..
         } => grant.contains(grant_id) && inv_id.as_ref().is_none_or(|i| invite.contains(i)),
-        _ => true,
+        // Party spec §3.2: the same set as a grant's.
+        KeySource::Party { grant_id, .. } => grant.contains(grant_id),
+        KeySource::Pair | KeySource::Recover { .. } | KeySource::FirstUse => true,
     }
 }
 
@@ -6544,10 +7057,43 @@ fn parse_notes(file: &FileV1) -> Result<Notes, Damage> {
             count: a.count,
         });
     }
+    // The delegations (party spec §3.1): bounded, one per party, a party's name, the leader a
+    // person as kept and a key whose `key_id` is its SPKI's.
+    if file.parties.len() > MAX_DELEGATIONS {
+        return Err(broken(format!("{} delegations", file.parties.len())));
+    }
+    let mut parties = Vec::with_capacity(file.parties.len());
+    let mut ids = HashSet::new();
+    for (i, d) in file.parties.iter().enumerate() {
+        let leader_key = file_key(&d.leader.spki, &d.leader.key_id, &format!("delegation {i}"))?;
+        let leader = Person {
+            telegram_user_id: d.leader.telegram_user_id,
+            first_name: d.leader.first_name.clone(),
+            username: d.leader.username.clone(),
+        };
+        if !ids.insert(d.party_id.clone())
+            || !afklink_protocol::party::is_party_name(&d.party)
+            || !is_kept_person(&leader)
+            || d.at < 0
+        {
+            return Err(broken(format!(
+                "delegation {i}: repeated, or a name, leader or time out of form"
+            )));
+        }
+        parties.push(Delegation {
+            party_id: d.party_id.clone(),
+            party: d.party.clone(),
+            leader,
+            leader_key,
+            by: d.by.clone(),
+            at: d.at,
+        });
+    }
     Ok(Notes {
         grant_token,
         attempts,
         last_bindings: file.last_bindings.clone(),
+        parties,
     })
 }
 
@@ -6568,11 +7114,11 @@ fn parse_list(bytes: &[u8]) -> Result<TrustList, Damage> {
     let version: VersionOnly = serde_json::from_slice(bytes).map_err(shape)?;
     let version = version.version.as_ref().and_then(serde_json::Value::as_u64);
     match version {
-        Some(v) if v == u64::from(FORMAT_VERSION) => {}
-        Some(v) if v > u64::from(FORMAT_VERSION) => {
+        Some(v) if v == u64::from(FORMAT_VERSION) || v == u64::from(PARTY_FORMAT_VERSION) => {}
+        Some(v) if v > u64::from(PARTY_FORMAT_VERSION) => {
             return Err(Damage::new(
                 DamageKind::NewerVersion,
-                format!("version {v}, this build knows {FORMAT_VERSION}"),
+                format!("version {v}, this build knows {PARTY_FORMAT_VERSION}"),
             ));
         }
         _ => {
@@ -7689,7 +8235,7 @@ mod tests {
     #[test]
     fn versions_and_shapes_this_build_does_not_know_are_damage() {
         assert_eq!(
-            after(|v| v["version"] = (FORMAT_VERSION + 1).into()),
+            after(|v| v["version"] = (PARTY_FORMAT_VERSION + 1).into()),
             Some(DamageKind::NewerVersion)
         );
         for bad in [serde_json::json!(0), serde_json::json!("1")] {
@@ -8985,7 +9531,7 @@ mod tests {
         std::fs::write(dir.primary(), b"garbage").unwrap();
         let mut backup: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.backup()).unwrap()).unwrap();
-        backup["version"] = (FORMAT_VERSION + 1).into();
+        backup["version"] = (PARTY_FORMAT_VERSION + 1).into();
         std::fs::write(dir.backup(), serde_json::to_vec(&backup).unwrap()).unwrap();
         let newer_backup = std::fs::read(dir.backup()).unwrap();
         let mut store = dir.open();
@@ -9004,10 +9550,10 @@ mod tests {
         let dir = Scratch::new();
         let (_, owner) = store_with_owner(&dir);
         // A newer build wrote both files.
-        edit_primary(&dir, |v| v["version"] = (FORMAT_VERSION + 1).into());
+        edit_primary(&dir, |v| v["version"] = (PARTY_FORMAT_VERSION + 1).into());
         let mut backup: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.backup()).unwrap()).unwrap();
-        backup["version"] = (FORMAT_VERSION + 1).into();
+        backup["version"] = (PARTY_FORMAT_VERSION + 1).into();
         std::fs::write(dir.backup(), serde_json::to_vec(&backup).unwrap()).unwrap();
         let newer = std::fs::read(dir.primary()).unwrap();
         let newer_backup = std::fs::read(dir.backup()).unwrap();
@@ -9115,7 +9661,7 @@ mod tests {
 
             // A newer version meanwhile: never overwritten.
             let mut newer: serde_json::Value = serde_json::from_slice(&good).unwrap();
-            newer["version"] = (FORMAT_VERSION + 1).into();
+            newer["version"] = (PARTY_FORMAT_VERSION + 1).into();
             let newer = serde_json::to_vec(&newer).unwrap();
             std::fs::write(dir.primary(), &newer).unwrap();
             assert_eq!(
@@ -11323,6 +11869,7 @@ mod tests {
             notes: Box::new(Notes {
                 grant_token: GrantToken::fresh(GrantToken::default()),
                 attempts: Vec::new(),
+                parties: Vec::new(),
                 last_bindings: Some(
                     (0..LAST_BINDINGS_MAX as i64)
                         .map(|i| KnownBinding {

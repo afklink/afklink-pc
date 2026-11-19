@@ -287,6 +287,7 @@ function ScreenBody({
       return (
         <JournalScreen
           bindings={status.bindings}
+          parties={trusted?.parties ?? []}
           ownerRequestBusy={status.owner_request_busy}
           onChanged={onRefresh}
         />

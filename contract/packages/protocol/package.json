@@ -14,6 +14,7 @@
   "scripts": {
     "emit": "bun run scripts/emit.ts",
     "vectors:viewer-keys": "bun run scripts/viewer-keys-vectors.ts",
+    "vectors:party": "bun run scripts/party-vectors.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.dom.json",
     "test": "bun test"
   },

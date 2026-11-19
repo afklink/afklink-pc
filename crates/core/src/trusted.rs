@@ -91,9 +91,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::admission::{AdmitOp, Landed, LandedOutcome, StagedChange, StoreOp};
 use crate::journal::{Journal, Kind, TrustedDevice as JournalDevice};
 use crate::viewer_keys::{
-    AddOutcome, ClientKind, DamageKind, Ground, KeyId, KeyRecord, Lookup, NewKey, OwnerDevice,
-    Person, Platform, RecoverOutcome, Removal, ReopenLoad, Staged, StoreError, TreeRemoval,
-    TrustStore, WriteFailed, Written,
+    AddOutcome, ClientKind, DamageKind, Ground, GroundId, KeyId, KeyRecord, KeySource, Lookup,
+    NewKey, OwnerDevice, Person, Platform, RecoverOutcome, Removal, ReopenLoad, Staged, StoreError,
+    TreeRemoval, TrustStore, WriteFailed, Written,
 };
 
 /// How long a write (or a reopen's load) may take before its caller is answered `slow` (spec
@@ -159,6 +159,13 @@ pub enum TrustedAsk {
     },
     /// A repair at the PC (a restore needs a clean window and the token its dialog opened with).
     Repair(RepairAction),
+    /// «Убрать ПК из пати» (party spec §6): the PC leaves the party, decided at the press
+    /// ([`TrustStore::leave_party_now`]) — the delegation goes, the party's keys and their walk
+    /// leave `server`, the grant token is replaced; one write carries it. The server hears of it
+    /// by `party_state`. The answer is how many keys left; `not_found` when the PC is not in it.
+    PartyLeave {
+        party_id: crate::viewer_keys::GroundId,
+    },
 }
 
 impl TrustedAsk {
@@ -174,8 +181,18 @@ impl TrustedAsk {
             Self::Repair(RepairAction::Reopen) => "reopen",
             Self::Repair(RepairAction::Restore { .. }) => "restore",
             Self::Repair(RepairAction::Reset) => "reset",
+            Self::PartyLeave { .. } => "party_leave",
         }
     }
+}
+
+/// The PC's answer to a join or a leave (party spec §4.2), sent once the write that holds its
+/// decision landed ([`Trusted::take_party_acks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartyAck {
+    pub party_id: String,
+    pub op: afklink_protocol::PartyAckOp,
+    pub result: afklink_protocol::PartyAckResult,
 }
 
 /// What «Восстановить» / «Очистить список» / reading the file again do.
@@ -364,6 +381,18 @@ pub struct TrustedView {
     pub token: u64,
     /// A list-wide limit is reached: new keys are refused until some are removed.
     pub full: bool,
+    /// The parties the PC is in (party spec §3.1), in join order: the window's party cards.
+    pub parties: Vec<TrustedParty>,
+}
+
+/// A party the PC is in, as the window shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedParty {
+    pub party_id: GroundId,
+    /// The party's name as the join signed it, cleaned as a person's name is.
+    pub party: String,
+    /// The leader as the join named him (names cleaned).
+    pub leader: Person,
 }
 
 /// What is wrong with the list, and what the PC can do.
@@ -439,8 +468,11 @@ pub struct TrustedDeviceView {
     pub key_id: KeyId,
     pub device: DeviceRef,
     pub role: BindingRole,
-    /// How it got in, as the list names it (`pair`, `endorse`, `grant`, `recover`, `first_use`).
+    /// How it got in, as the list names it (`pair`, `endorse`, `grant`, `recover`, `first_use`,
+    /// `party`).
     pub source: &'static str,
+    /// `party`: the party whose leader's grant let it in.
+    pub party: Option<GroundId>,
     /// `endorse.by` / `grant.by` while that key is still active.
     pub by: Option<DeviceRef>,
     /// `endorse.by` / `grant.by`, whether or not it is still in the list.
@@ -580,6 +612,13 @@ enum OpKind {
     },
     Reset,
     Reopen,
+    /// A party's join or leave (party spec §4.3), decided in memory when it came: its stage is a
+    /// write of memory, a removal's class (queued first, parked when it cannot be saved). `ack`:
+    /// the server's answer, taken once it lands ([`Trusted::take_party_acks`]); `None` for a
+    /// leave at the PC.
+    Party {
+        ack: Option<PartyAck>,
+    },
     /// An admission's change (`crate::admission`): its payload waits in `Trusted::admit_ops`.
     /// Not a removal; never gated by the window rule (the admission decided it).
     Admit {
@@ -609,6 +648,8 @@ impl OpKind {
             Self::Restore { .. } => "restore",
             Self::Reset => "reset",
             Self::Reopen => "reopen",
+            Self::Party { ack: Some(a) } => a.op.as_str(),
+            Self::Party { ack: None } => "party_leave_at_pc",
             Self::Admit { what, .. } => what,
         }
     }
@@ -628,6 +669,7 @@ impl OpKind {
                 | Self::RemovePerson { .. }
                 | Self::RemoveKey { .. }
                 | Self::UntrustGuest { .. }
+                | Self::Party { .. }
         )
     }
 
@@ -670,9 +712,10 @@ impl Op {
     /// decision denied; else [`OpKind::unit_count`].
     fn count(&self) -> u32 {
         match self.kind {
-            OpKind::RemoveTree(_) | OpKind::RemovePerson { .. } | OpKind::UntrustGuest { .. } => {
-                u32::try_from(self.denied.len()).unwrap_or(u32::MAX)
-            }
+            OpKind::RemoveTree(_)
+            | OpKind::RemovePerson { .. }
+            | OpKind::UntrustGuest { .. }
+            | OpKind::Party { .. } => u32::try_from(self.denied.len()).unwrap_or(u32::MAX),
             _ => self.kind.unit_count(),
         }
     }
@@ -945,6 +988,8 @@ pub struct Trusted {
     admit_ops: HashMap<u64, StoreOp>,
     /// The admission's changes that ended, for [`Self::take_landed`].
     landed: Vec<Landed>,
+    /// The party answers whose write landed, for [`Self::take_party_acks`].
+    party_acks: Vec<PartyAck>,
     /// The people the server's bindings name the owner ([`Self::set_bound_owners`]): read only by
     /// «owner on this PC» ([`Self::owner_on_pc`]), «the PC has an owner» ([`Self::pair_role`])
     /// and the owner guard of «Удалить человека» ([`press_remove_person`]).
@@ -995,6 +1040,7 @@ impl Trusted {
             clean: true,
             token: FIRST_EPOCH,
             full: false,
+            parties: Vec::new(),
         }));
         (
             Self {
@@ -1015,6 +1061,7 @@ impl Trusted {
                 attempts_age_out_at: None,
                 admit_ops: HashMap::new(),
                 landed: Vec::new(),
+                party_acks: Vec::new(),
                 bound_owners: std::collections::BTreeSet::new(),
                 bound_people: None,
                 ruled: BTreeSet::new(),
@@ -1114,7 +1161,7 @@ impl Trusted {
                 return Err(StoreError::RoleChanged);
             }
         }
-        if let Ground::Grant { person, .. } = &a.ground {
+        if let Ground::Grant { person, .. } | Ground::Party { person, .. } = &a.ground {
             if self.owner_on_pc(person.telegram_user_id) {
                 tracing::debug!(
                     telegram_user_id = person.telegram_user_id,
@@ -1300,6 +1347,36 @@ impl Trusted {
             std::mem::take(&mut self.ruled).into_iter().collect(),
             std::mem::take(&mut self.ruled_keys),
         )
+    }
+
+    /// A party's join or leave decided in memory (party spec §4.3): one write of memory queued,
+    /// a removal's class; `denied` the keys a leave denied (the op covers them). `ack` goes to
+    /// [`Self::take_party_acks`] once a write that holds the decision landed — or at once when
+    /// the file holds it already.
+    pub fn party_write(&mut self, ack: Option<PartyAck>, denied: Vec<KeyId>) {
+        tracing::debug!(
+            ack = ?ack,
+            denied = %short_list(&denied),
+            "trusted devices: a party's decision; its write of memory queued"
+        );
+        self.enqueue(Op {
+            denied,
+            ..Op::new(OpKind::Party { ack }, None)
+        });
+        self.pump();
+    }
+
+    /// The party answers whose write landed since the last call, in order.
+    pub fn take_party_acks(&mut self) -> Vec<PartyAck> {
+        std::mem::take(&mut self.party_acks)
+    }
+
+    /// A party's write landed (or found the file holding it): its answer is due.
+    fn party_landed(&mut self, op: &Op) {
+        if let OpKind::Party { ack: Some(ack) } = &op.kind {
+            tracing::debug!(ack = ?ack, "trusted devices: a party's write landed; its answer is due");
+            self.party_acks.push(ack.clone());
+        }
     }
 
     /// Whether a store is attached.
@@ -1833,6 +1910,31 @@ impl Trusted {
                     }
                 }
             }
+            TrustedAsk::PartyLeave { party_id } => {
+                // Decided here, once (party spec §6): `damaged` on a list that cannot be read,
+                // `not_found` when the PC is not in that party, with nothing changed.
+                let why = "«Убрать ПК из пати» at the PC";
+                match store.leave_party_now(
+                    &party_id,
+                    crate::viewer_keys::PartyLeaveBy::Pc,
+                    why,
+                    crate::journal::now_ms(),
+                ) {
+                    Ok(Some(denied)) => Op {
+                        denied,
+                        ..Op::new(OpKind::Party { ack: None }, Some(reply))
+                    },
+                    Ok(None) => {
+                        refuse(reply, what, TrustedError::NotFound);
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::debug!(party = %party_id, "trusted devices: party leave refused ({e})");
+                        refuse(reply, what, TrustedError::of(&e));
+                        return;
+                    }
+                }
+            }
             TrustedAsk::Repair(RepairAction::Reopen) => Op::new(OpKind::Reopen, Some(reply)),
             TrustedAsk::Repair(RepairAction::Restore { token }) => {
                 if let Err(e) = self.window_open(Some(token), what) {
@@ -2021,7 +2123,9 @@ impl Trusted {
         // replaced it: stale.
         let stale_grant = match self.admit_ops.get(&ticket) {
             Some(StoreOp::Add(a)) => match &a.ground {
-                Ground::Grant { token, .. } => store.grant_token_current(token).is_err(),
+                Ground::Grant { token, .. } | Ground::Party { token, .. } => {
+                    store.grant_token_current(token).is_err()
+                }
                 _ => false,
             },
             _ => false,
@@ -2218,6 +2322,7 @@ impl Trusted {
             OpKind::RemoveTree(_)
             | OpKind::RemovePerson { .. }
             | OpKind::UntrustGuest { .. }
+            | OpKind::Party { .. }
             | OpKind::Notes { .. } => store.stage_flush().map(|s| s.map(Change::Unit)),
             // Its own stage (a `server` removal of an owner-role key is refused and withdrawn),
             // and only while memory still decides it: a removal that landed, or was withdrawn,
@@ -2258,6 +2363,7 @@ impl Trusted {
                     attempt = op.attempts + 1,
                     "trusted devices: nothing to write (so already)"
                 );
+                self.party_landed(&op);
                 let n = op.count();
                 op.answer(Ok(n));
                 Staging::Done
@@ -2694,6 +2800,7 @@ impl Trusted {
                     self.journal_allowed(key_id, o, journal);
                 }
                 self.journal_installed(&op.kind, untrusted, journal);
+                self.party_landed(&op);
                 op.answer(Ok(removed));
                 // The disk takes writes: what was parked tries again.
                 self.unpark();
@@ -3093,6 +3200,7 @@ impl Trusted {
             people = view.people.len(),
             keys = view.people.iter().map(|p| p.devices.len()).sum::<usize>(),
             waiting = view.waiting.len(),
+            parties = view.parties.len(),
             clean = view.clean,
             token = view.token,
             full = view.full,
@@ -3116,6 +3224,7 @@ impl Trusted {
             clean: self.live == 0,
             token: self.epoch,
             full: false,
+            parties: Vec::new(),
         };
         let Some(store) = &self.store else {
             view.damage = Some(TrustedDamage {
@@ -3181,6 +3290,10 @@ impl Trusted {
                         device: device_ref(r),
                         role: r.role,
                         source: r.source.as_str(),
+                        party: match &r.source {
+                            KeySource::Party { party_id, .. } => Some(party_id.clone()),
+                            _ => None,
+                        },
                         by: signer.and_then(|(_, l)| l).map(|l| device_ref(l.record)),
                         by_key_id: signer.map(|(by, _)| by.clone()),
                         unconfirmed: r.unconfirmed,
@@ -3236,6 +3349,21 @@ impl Trusted {
         view.waiting = store.snapshot_people_without_keys().unwrap_or_default();
         view.owner_device = store.owner_device();
         view.full = store.full().ok().flatten().is_some();
+        let delegations = store.delegations().unwrap_or_else(|e| {
+            tracing::debug!(
+                reason = e.as_str(),
+                "trusted devices: the parties do not read ({e}); the window shows none"
+            );
+            &[]
+        });
+        view.parties = delegations
+            .iter()
+            .map(|d| TrustedParty {
+                party_id: d.party_id.clone(),
+                party: crate::person_name::clean_name(&d.party).trim().to_owned(),
+                leader: d.leader.clone(),
+            })
+            .collect();
         view
     }
 }

@@ -54,6 +54,13 @@ export interface BindingDto {
   role?: BindingRole | null;
   /** The PC's request to the owner on this person's row, while in flight or just ended. */
   owner_request?: OwnerRequestDto | null;
+  /**
+   * `party`: the binding lives only through parties — the person stands under the party cards, with
+   * no binding buttons. Absent: a personal binding, or a server or an agent that does not say.
+   */
+  via?: "party" | null;
+  /** The parties (`TrustedPartyDto.party_id`) through which the person is a guest here. */
+  parties?: string[];
 }
 
 /**
@@ -410,7 +417,15 @@ export type TrustedJournalKind =
   | "trusted_on"
   | "trusted_off"
   | "device_untrusted"
-  | "other_device_attempt";
+  | "other_device_attempt"
+  | PartyJournalKind;
+
+/**
+ * A party's entries (party spec §5.4, §6): `party_added` / `party_left` — about the PC, naming
+ * nobody; `party_leader` — the party's new leader; `party_guest` — a member's first device here by
+ * the leader's grant. Each carries the party's name (`JournalEntryDto.party`).
+ */
+export type PartyJournalKind = "party_added" | "party_left" | "party_leader" | "party_guest";
 
 /** The viewer's device, by its Telegram platform (`afklink_core::journal::Device`). */
 export type ClientDevice = "iphone" | "android" | "mac" | "desktop" | "browser";
@@ -452,6 +467,11 @@ export interface JournalEntryDto {
    * the kind. Absent elsewhere and from an older agent.
    */
   declined_reason?: string | null;
+  /**
+   * A party's entries, and `device_added` of a member's new device through a party: the party's
+   * name. Absent elsewhere and from an older agent.
+   */
+  party?: string | null;
 }
 
 /**
@@ -644,9 +664,10 @@ export type TrustedKind = "telegram" | "telegram_desktop" | "browser";
  * How a key came into the list (§3.2, §18): `pairing` — «Разрешить» at this PC; `endorsed` — the
  * person's own trusted device confirmed it (`by`); `owner` — the owner's device signed a guest in;
  * `migrated` — the first key after the update, remembered; `restored` — the same device got a new
- * key after Telegram erased the old one (§9.1).
+ * key after Telegram erased the old one (§9.1); `party` — a party's leader let a member in (party spec
+ * §3.2), the party by `party_id`.
  */
-export type TrustedSource = "pairing" | "endorsed" | "owner" | "restored" | "migrated";
+export type TrustedSource = "pairing" | "endorsed" | "owner" | "restored" | "migrated" | "party";
 
 /** A device, as far as its name goes: what client, on what (iPhone, Mac, Windows, Android…). */
 export interface TrustedDeviceRefDto {
@@ -667,6 +688,8 @@ export interface TrustedDeviceDto extends TrustedDeviceRefDto {
   key_short: string;
   role: "owner" | "guest";
   source: TrustedSource;
+  /** `party`: the party whose leader let it in (`TrustedPartyDto.party_id`). Absent elsewhere. */
+  party_id?: string | null;
   /** `endorsed` / `owner`: the device that signed it in, while it is still in the list. */
   by: TrustedDeviceRefDto | null;
   by_key_id: string | null;
@@ -773,6 +796,16 @@ export interface TrustedDto {
   token: string;
   /** The limits are reached (§10): new keys are refused until some are removed here. */
   full: boolean;
+  /** The parties the PC is in, in join order: a card each. Absent from an older agent: none. */
+  parties?: TrustedPartyDto[];
+}
+
+/** A party the PC is in (party spec §3.1): its name and leader as its owner's join named them. */
+export interface TrustedPartyDto {
+  /** IPC only (`leaveParty`). */
+  party_id: string;
+  party: string;
+  leader: { telegram_user_id: number; first_name: string | null; username: string | null };
 }
 
 /** The journal's device on a trusted devices' entry: `{kind, platform, source}`. */
@@ -856,6 +889,13 @@ export const removeTrustedDevice = (keyId: string) =>
 /** Take every device of a person off the list. Resolves with the number of keys removed. */
 export const removePerson = (telegramUserId: number) =>
   invoke<number>("remove_person", { telegramUserId });
+
+/**
+ * «Убрать ПК из пати» (party spec §6): refused `session` while a session other than a confirmed
+ * owner's is on, `not_found` when the PC is not in it, `damaged` on a list that does not read.
+ * Resolves with the number of keys that left.
+ */
+export const leaveParty = (partyId: string) => invoke<number>("leave_party", { partyId });
 
 /** Confirm an unconfirmed device (§10.1), with the list's `token`: one press. */
 export const confirmTrustedDevice = (keyId: string, token: string) =>

@@ -132,15 +132,21 @@ at the picture (the desktop game mode without pointer capture), the pointer's po
 One planner per process (kept with the SendInput ledger and asked by both paths) decides every `r`
 from a fresh `GetCursorInfo` — microseconds, never the viewer's round-trip-late reports:
 
-- **camera** — the cursor is hidden (not `CURSOR_SHOWING`, a null shape, or `CURSOR_SUPPRESSED`),
-  off the captured screen, or unreadable: relative counts exactly as before the planner (fraction ×
-  physical screen, the path's own sub-pixel carry). Camera sensitivity is unchanged.
+- **camera** — the cursor is hidden (not `CURSOR_SHOWING`, a null shape, or `CURSOR_SUPPRESSED`)
+  or unreadable: relative counts exactly as before the planner (fraction × physical screen, the
+  path's own sub-pixel carry). Camera sensitivity is unchanged. A visible cursor off the captured
+  screen (another monitor) is the camera's too when the `r` has no target, or when the absolute
+  paths cannot reach where it belongs (it is over the game's window on another monitor, or the game
+  is wholly off the primary monitor); otherwise it is put onto the target (below).
 - **point** — a target, a visible cursor, and no mouse button held by what this agent injected: one
   absolute move onto the target's pixel — FakerInput report 4 (`{4, buttons 0, X, Y, wheel 0}`) on
   the HID path, `SendInput`'s absolute event otherwise. Windows maps report 4's `0..32767` as
   `floor(X · width / 32768)` (the probe's eight data points), so the wire aims at the pixel's centre,
   `round((px + 0.5) · 32768 / width)`, and lands on it (the old edge-aimed mapping landed one short:
-  2188 → 2187). `SendInput` gets the centre too (`floor(dx · width / 65536)`).
+  2188 → 2187). `SendInput` gets the centre too (`floor(dx · width / 65536)`). A visible cursor off
+  the captured screen with a target is put onto it the same way, a button held or not, so it comes
+  into the picture (in game-only mode, into the game's client area); the move after it, inside, is
+  decided afresh.
 - **exact** — any other visible cursor (a button held — a drag, the first milliseconds of a
   right-button camera turn — or no target, the phone's finger modes): relative counts that move it
   by exactly the intended physical pixels (to the target, or `dx·width`, `dy·height`). Windows moves

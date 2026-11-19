@@ -47,6 +47,18 @@ pub enum NativeText {
     NotifyPairRequestBody,
     /// «Запрос на доступ»
     NotifyPairRequestTitle,
+    /// «ПК добавлен в пати „{party}“\nЛидер: {leader}»
+    NotifyPartyAdded,
+    /// «ПК добавлен в пати „{party}“\nГости пати смогут подключаться, когда {leader} откроет AFKLink»
+    NotifyPartyAddedWaiting,
+    /// «Список устройств полон\nНовый гость из пати „{party}“ не подключится»
+    NotifyPartyDeviceLimit,
+    /// «Новый гость: {user}\nИз пати „{party}“»
+    NotifyPartyGuest,
+    /// «Новый лидер пати „{party}“: {user}»
+    NotifyPartyLeader,
+    /// «ПК убран из пати „{party}“»
+    NotifyPartyLeft,
     /// «{user} отключается»
     NotifySessionEnded,
     /// «{user} управляет ПК»
@@ -107,6 +119,12 @@ impl NativeText {
             Self::NotifyGuestInvited => "notify.guestInvited.native",
             Self::NotifyPairRequestBody => "notify.pairRequestBody.native",
             Self::NotifyPairRequestTitle => "notify.pairRequestTitle.native",
+            Self::NotifyPartyAdded => "notify.partyAdded.native",
+            Self::NotifyPartyAddedWaiting => "notify.partyAddedWaiting.native",
+            Self::NotifyPartyDeviceLimit => "notify.partyDeviceLimit.native",
+            Self::NotifyPartyGuest => "notify.partyGuest.native",
+            Self::NotifyPartyLeader => "notify.partyLeader.native",
+            Self::NotifyPartyLeft => "notify.partyLeft.native",
             Self::NotifySessionEnded => "notify.sessionEnded.native",
             Self::NotifySessionStarted => "notify.sessionStarted.native",
             Self::NotifyTitle => "notify.title.native",
@@ -165,6 +183,18 @@ impl NativeText {
             (Self::NotifyPairRequestBody, Locale::En) => "{user} is requesting access to the computer",
             (Self::NotifyPairRequestTitle, Locale::Ru) => "Запрос на доступ",
             (Self::NotifyPairRequestTitle, Locale::En) => "Access request",
+            (Self::NotifyPartyAdded, Locale::Ru) => "ПК добавлен в пати «{party}»\nЛидер: {leader}",
+            (Self::NotifyPartyAdded, Locale::En) => "PC added to “{party}”\nLeader: {leader}",
+            (Self::NotifyPartyAddedWaiting, Locale::Ru) => "ПК добавлен в пати «{party}»\nГости пати смогут подключаться, когда {leader} откроет AFKLink",
+            (Self::NotifyPartyAddedWaiting, Locale::En) => "PC added to “{party}”\nParty guests will be able to connect once {leader} opens AFKLink",
+            (Self::NotifyPartyDeviceLimit, Locale::Ru) => "Список устройств полон\nНовый гость из пати «{party}» не подключится",
+            (Self::NotifyPartyDeviceLimit, Locale::En) => "Device list is full\nA new guest from “{party}” can't connect",
+            (Self::NotifyPartyGuest, Locale::Ru) => "Новый гость: {user}\nИз пати «{party}»",
+            (Self::NotifyPartyGuest, Locale::En) => "New guest: {user}\nFrom “{party}”",
+            (Self::NotifyPartyLeader, Locale::Ru) => "Новый лидер пати «{party}»: {user}",
+            (Self::NotifyPartyLeader, Locale::En) => "New leader of “{party}”: {user}",
+            (Self::NotifyPartyLeft, Locale::Ru) => "ПК убран из пати «{party}»",
+            (Self::NotifyPartyLeft, Locale::En) => "PC removed from “{party}”",
             (Self::NotifySessionEnded, Locale::Ru) => "{user} отключается",
             (Self::NotifySessionEnded, Locale::En) => "{user} disconnected",
             (Self::NotifySessionStarted, Locale::Ru) => "{user} управляет ПК",
@@ -207,7 +237,7 @@ impl NativeText {
 
 /// Every native string, for tests that walk the set.
 #[rustfmt::skip]
-pub const ALL_NATIVE_TEXT: [NativeText; 35] = [
+pub const ALL_NATIVE_TEXT: [NativeText; 41] = [
     NativeText::DialogGameLaunchFilter,
     NativeText::DialogGameLaunchTitle,
     NativeText::DurationHours,
@@ -225,6 +255,12 @@ pub const ALL_NATIVE_TEXT: [NativeText; 35] = [
     NativeText::NotifyGuestInvited,
     NativeText::NotifyPairRequestBody,
     NativeText::NotifyPairRequestTitle,
+    NativeText::NotifyPartyAdded,
+    NativeText::NotifyPartyAddedWaiting,
+    NativeText::NotifyPartyDeviceLimit,
+    NativeText::NotifyPartyGuest,
+    NativeText::NotifyPartyLeader,
+    NativeText::NotifyPartyLeft,
     NativeText::NotifySessionEnded,
     NativeText::NotifySessionStarted,
     NativeText::NotifyTitle,
@@ -264,6 +300,12 @@ pub const KEY_NOTIFY_DRIVER_NEEDED: &str = "notify.driverNeeded.native";
 pub const KEY_NOTIFY_GUEST_INVITED: &str = "notify.guestInvited.native";
 pub const KEY_NOTIFY_PAIR_REQUEST_BODY: &str = "notify.pairRequestBody.native";
 pub const KEY_NOTIFY_PAIR_REQUEST_TITLE: &str = "notify.pairRequestTitle.native";
+pub const KEY_NOTIFY_PARTY_ADDED: &str = "notify.partyAdded.native";
+pub const KEY_NOTIFY_PARTY_ADDED_WAITING: &str = "notify.partyAddedWaiting.native";
+pub const KEY_NOTIFY_PARTY_DEVICE_LIMIT: &str = "notify.partyDeviceLimit.native";
+pub const KEY_NOTIFY_PARTY_GUEST: &str = "notify.partyGuest.native";
+pub const KEY_NOTIFY_PARTY_LEADER: &str = "notify.partyLeader.native";
+pub const KEY_NOTIFY_PARTY_LEFT: &str = "notify.partyLeft.native";
 pub const KEY_NOTIFY_SESSION_ENDED: &str = "notify.sessionEnded.native";
 pub const KEY_NOTIFY_SESSION_STARTED: &str = "notify.sessionStarted.native";
 pub const KEY_NOTIFY_TITLE: &str = "notify.title.native";

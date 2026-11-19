@@ -70,8 +70,11 @@ use crate::viewer_keys::{
     SnapshotPerson, Staged, StoreError, TelegramIdentity, TelegramVerifier, TrustStore, ViewerKey,
 };
 
+mod party;
 #[cfg(test)]
 mod tests;
+
+pub use party::PartyAnswer;
 
 /// Offers with a proof checked per second, and the bucket's depth (spec §3.4).
 pub const VERIFY_RATE_PER_S: u32 = 20;
@@ -86,6 +89,8 @@ const PROBE_PER_DAY: usize = 3;
 const DAY_MS: u64 = 24 * 3_600_000;
 /// `recover_attempt` at most once an hour per person (spec §8.4).
 const RECOVER_ATTEMPT_MS: u64 = 3_600_000;
+/// `party_device_limit` at most once an hour per person (process §7).
+const PARTY_LIMIT_MS: u64 = 3_600_000;
 /// A full bucket's `warn` at most once a minute.
 const BUSY_WARN_MS: u64 = 60_000;
 /// Another device's new attempt (§10.2) journaled at most three times a day per person (spec §9's
@@ -185,7 +190,7 @@ impl Mode {
 pub struct Ks {
     pub kid: KeyId,
     pub verdict: Verdict,
-    /// The ground that added the key now (`endorse`, `grant`, `recover`, `first_use`).
+    /// The ground that added the key now (`endorse`, `grant`, `recover`, `first_use`, `party`).
     pub admit: Option<&'static str>,
     pub mode: Mode,
 }
@@ -223,7 +228,8 @@ pub struct SessionIdentity {
 /// A journal event of an admission (the orchestrator writes it with the names it has).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalEvent {
-    /// A key was added (after the write): its ground (`pair`, `endorse`, `grant`, `first_use`).
+    /// A key was added (after the write): its ground (`pair`, `endorse`, `grant`, `first_use`,
+    /// `party`).
     KeyAdded {
         ground: &'static str,
         key_id: KeyId,
@@ -232,7 +238,7 @@ pub enum JournalEvent {
         unconfirmed: bool,
         /// `endorse.by` / `grant.by`: the device that vouched.
         by: Option<KeyId>,
-        /// A `grant` for a guest this PC has already (spec §7
+        /// A `grant` or a party's grant for a guest this PC has already (spec §7
         /// «Новое устройство уже привязанного гостя»): the key joined that guest, no new person —
         /// the orchestrator words it «Новое устройство гостя <имя>», not «Новый гость».
         guest_new_device: bool,
@@ -253,6 +259,12 @@ pub enum JournalEvent {
         kind: Option<String>,
         platform: Option<String>,
     },
+    /// A party member's device was refused `limit`: the list is full for it (process §7; at most
+    /// once an hour per person). The person at the PC is told which party's guest it was.
+    PartyDeviceLimit {
+        telegram_user_id: i64,
+        party_id: crate::viewer_keys::GroundId,
+    },
 }
 
 impl JournalEvent {
@@ -263,6 +275,7 @@ impl JournalEvent {
             Self::KeyReplaced { .. } => "key_replaced".into(),
             Self::RecoverAttempt { .. } => "recover_attempt".into(),
             Self::FirstUseProbe { .. } => "first_use_probe".into(),
+            Self::PartyDeviceLimit { .. } => "party_device_limit".into(),
         }
     }
 }
@@ -1095,6 +1108,8 @@ pub struct Admission {
     probes_key: HashMap<(i64, KeyId), u64>,
     probes_day: HashMap<i64, VecDeque<u64>>,
     recover_journal: HashMap<i64, u64>,
+    /// When a party member's device past the list's limit was last told, per person.
+    party_limit_told: HashMap<i64, u64>,
     /// Other devices' attempts journaled per person in the last day.
     attempts_day: HashMap<i64, VecDeque<u64>>,
     next_ticket: u64,
@@ -1184,6 +1199,7 @@ impl Admission {
             probes_key: HashMap::new(),
             probes_day: HashMap::new(),
             recover_journal: HashMap::new(),
+            party_limit_told: HashMap::new(),
             attempts_day: HashMap::new(),
             next_ticket: 1,
             awaiting: HashMap::new(),
@@ -1926,7 +1942,8 @@ fn store_fail(e: &StoreError, ground: &'static str) -> Fail {
         StoreError::Removed { .. } => Fail::Stop(Verdict::KEY_REVOKED),
         StoreError::Full(_) => refused("limit"),
         StoreError::RpkConflict => refused("rpk_conflict"),
-        StoreError::Spent(_) if ground == "grant" => refused("grant_spent"),
+        StoreError::Spent(_) if ground == "grant" || ground == "party" => refused("grant_spent"),
+        StoreError::PartyLeader => refused("party_leader"),
         StoreError::Spent(_) => refused("endorse_spent"),
         StoreError::InviteSpent(_) => refused("invite_spent"),
         StoreError::InviteIdMismatch => Fail::Why(Verdict::admit_refused("invite_bad"), "binding"),
@@ -1944,7 +1961,9 @@ fn store_fail(e: &StoreError, ground: &'static str) -> Fail {
         StoreError::RecoverNoRecord => refused("recover_no_record"),
         StoreError::RecoverBadSig => refused("recover_bad_sig"),
         StoreError::RecoverAttestation => refused("attest_bad"),
-        StoreError::Invalid(_) if ground == "grant" => refused("grant_malformed"),
+        StoreError::Invalid(_) if ground == "grant" || ground == "party" => {
+            refused("grant_malformed")
+        }
         StoreError::Invalid(_) | StoreError::AlreadyActive(_) => refused("key_reg_bad"),
         _ => Fail::Stop(Verdict::key_list_damaged("read_failed")),
     }
@@ -1972,7 +1991,12 @@ fn no_ground_on_removed(ground: &str, fail: &Fail) -> bool {
                     Some("grant_spent" | "invite_spent" | "grant_not_owner")
                 )
         }
-        ("grant", Fail::Why(v, why)) => {
+        // Party spec §5.2: of a party's grant, the paper used already, a signer the PC does not
+        // take as the party's leader, and `grant_role` for «owner on this PC».
+        ("party", Fail::Verdict(v)) => {
+            v.code == "admit_refused" && matches!(v.detail, Some("grant_spent" | "party_leader"))
+        }
+        ("grant" | "party", Fail::Why(v, why)) => {
             v.code == "admit_refused" && v.detail == Some("grant_role") && *why == OWNER_ON_PC
         }
         _ => false,
@@ -2010,8 +2034,17 @@ fn write_refusal(
 /// §10 «Одно правило возврата»: the grounds that may lift a `pc` or `server` removal — a grant
 /// (with a new invitation) and an endorse (of the same person's trusted device), tried in the
 /// order of `admit`; `recover` and `first_use` never lift one.
-fn lifts_a_removal(entry: &AdmitEntry) -> bool {
-    matches!(entry, AdmitEntry::Grant { .. } | AdmitEntry::Endorse(_))
+/// Party spec §5.2: a party's grant lifts only the server's removal, never one at the PC nor a
+/// replacement (the leader's app would issue it back by itself).
+fn lifts_a_removal(entry: &AdmitEntry, origin: &crate::viewer_keys::Origin) -> bool {
+    use crate::viewer_keys::Origin;
+    match entry {
+        AdmitEntry::Grant { .. } | AdmitEntry::Endorse(_) => {
+            matches!(origin, Origin::Pc | Origin::Server)
+        }
+        AdmitEntry::Party(_) => matches!(origin, Origin::Server),
+        AdmitEntry::Recover(_) | AdmitEntry::FirstUse(_) => false,
+    }
 }
 
 /// What the grounds of one offer share.
@@ -2231,8 +2264,11 @@ impl Admission {
                 // One return rule (§10): `pc` and `server` — a grant or an endorse may lift it
                 // (decided with the ground: its own checks, then the person); `replaced` — only
                 // a pairing at the PC. `recover` and `first_use` lift nothing.
-                let lifters = proof.admit.iter().filter(|e| lifts_a_removal(e)).count();
-                let replaced = matches!(t.origin, crate::viewer_keys::Origin::Replaced { .. });
+                let lifters = proof
+                    .admit
+                    .iter()
+                    .filter(|e| lifts_a_removal(e, &t.origin))
+                    .count();
                 tracing::debug!(
                     session = sid,
                     kid = %kid.short(),
@@ -2241,7 +2277,7 @@ impl Admission {
                     lifters,
                     "admission: step 8: a removed key"
                 );
-                if replaced || lifters == 0 {
+                if lifters == 0 {
                     return plain(Verdict::KEY_REVOKED, Some(&kid));
                 }
                 // §10: the card must describe this same key (the SPKI stays the record's).
@@ -2282,7 +2318,11 @@ impl Admission {
             mode,
             now_ms,
         };
-        let removed = matches!(store.lookup(&kid), Lookup::Removed(_));
+        let removed_origin = match store.lookup(&kid) {
+            Lookup::Removed(t) => Some(t.origin.clone()),
+            _ => None,
+        };
+        let removed = removed_origin.is_some();
         let mut first_fail: Option<(Verdict, Option<&'static str>)> = None;
         // §3.4 step 8, §10 «Повтор основания для удалённого ключа»: on a removed key a refusal
         // from the «no ground» list ([`no_ground_on_removed`]: any endorse's; a spent or orphaned
@@ -2290,7 +2330,10 @@ impl Admission {
         let mut no_grounds = 0usize;
         let mut candidate = None;
         for entry in &proof.admit {
-            if removed && !lifts_a_removal(entry) {
+            if removed_origin
+                .as_ref()
+                .is_some_and(|o| !lifts_a_removal(entry, o))
+            {
                 tracing::debug!(
                     session = sid,
                     kid = %kid.short(),
@@ -2543,6 +2586,7 @@ impl Admission {
                 })
             }
             AdmitEntry::Grant { grant, invite } => self.grant(ctx, &new, grant, invite.as_ref()),
+            AdmitEntry::Party(grant) => self.party(ctx, &new, grant, journal),
             AdmitEntry::Recover(m) => {
                 let Some(rpk) = reg.rpk.clone() else {
                     return Err(refused("recover_malformed"));
@@ -2935,7 +2979,8 @@ impl Admission {
                 };
                 match outcome {
                     LandedOutcome::Added(a) => {
-                        let guest_new_device = ground == "grant" && a.known_person;
+                        let guest_new_device =
+                            (ground == "grant" || ground == "party") && a.known_person;
                         tracing::debug!(
                             ticket,
                             kid = %a.key_id.short(),

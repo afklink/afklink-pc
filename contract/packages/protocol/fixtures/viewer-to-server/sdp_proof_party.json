@@ -1,0 +1,38 @@
+{
+  "type": "sdp",
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "sdp_type": "offer",
+  "sdp": "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\n",
+  "proof": {
+    "v": 1,
+    "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+    "nonce_pc": "bbnh3oYjcCDYQbDNQTk0Rw",
+    "sig": "XnT7JOapScGCAddTFV7ApQRB5yHfojn8y3oBM6ci3dvRnjekyZkca88H1WkZS5AtQddm8z-Ss6JU7DDsdOY-Fw",
+    "key_reg": {
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1xmNR1jsCX-czTRFTljF2p_65_0Y26AdGSrCjERAEueOI-pKw2J0QuZ8FOu5aaHE47fYQedqbrJ93ygybCuaVg",
+      "kind": "browser",
+      "platform": "mac",
+      "sig": "XnT7JOapScGCAddTFV7ApQRB5yHfojn8y3oBM6ci3dvRnjekyZkca88H1WkZS5AtQddm8z-Ss6JU7DDsdOY-Fw"
+    },
+    "admit": [
+      {
+        "kind": "party",
+        "grant": {
+          "v": 1,
+          "device_id": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+          "key_id": "xv1LLFMXsnHJBfPauS-3_i4H3u1HUxe7Uo7ybLFvEi8",
+          "telegram_user_id": 67890,
+          "name": "Гость",
+          "username": null,
+          "role": "guest",
+          "party_id": "Rk9vZEJ1ZGR5UGFydHkxMg",
+          "grant_id": "4uMhDelF585RzLESeS6xXg",
+          "grant_token": "AQEBAQEBAQEBAQEBAQEBAQ",
+          "issued_at": 1789600005000,
+          "by": "_w5-l8TmVUMzpALq6Y78jIWOvDaXdhE4IjPJU3Tk3RI",
+          "sig": "XnT7JOapScGCAddTFV7ApQRB5yHfojn8y3oBM6ci3dvRnjekyZkca88H1WkZS5AtQddm8z-Ss6JU7DDsdOY-Fw"
+        }
+      }
+    ]
+  }
+}

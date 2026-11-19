@@ -12,7 +12,10 @@ use afklink_core::game::ScreenRect;
 use afklink_core::traits::{GameFocus, GameInputWindow, GameScope, InputScope};
 use afklink_protocol::{GameWindowState, InputMessage, KeySource, Mods};
 
-use super::{Admission, GameGuard, GuardHost, Reach, WindowAt, FOCUS_ATTEMPT_EVERY};
+use super::{
+    activation_pixel, sendinput_reaches, Activation, Admission, GameGuard, GuardHost, Reach,
+    WindowAt, ACTIVATION_EVERY, FOCUS_ATTEMPT_EVERY,
+};
 use crate::cursor_sync::{Elevation, ForegroundInfo};
 
 const GAME: usize = 0x40666;
@@ -63,6 +66,8 @@ struct FakePc {
     overlay: Option<(i32, i32, i32, i32)>,
     /// A child window of another process inside the game's window, over this rectangle.
     embedded: Option<(i32, i32, i32, i32)>,
+    /// The primary monitor.
+    screen: (i32, i32),
     window_error: bool,
     elevation: Option<Elevation>,
     driver_open: bool,
@@ -79,6 +84,7 @@ impl FakePc {
             target: Some((1000, 1000)),
             overlay: None,
             embedded: None,
+            screen: (3600, 2400),
             window_error: false,
             elevation: Some(Elevation {
                 foreground: false,
@@ -125,6 +131,10 @@ impl GuardHost for FakePc {
             elevated: Ok(false),
             agent_elevated: Ok(false),
         }
+    }
+
+    fn screen(&mut self) -> (i32, i32) {
+        self.screen
     }
 
     fn set_foreground(&mut self, window: usize) -> Result<bool, String> {
@@ -282,7 +292,8 @@ fn wheel() -> InputMessage {
 
 /// The game has the front: everything goes. Another window takes it: moves, presses, key-downs,
 /// the wheel, text and combos are dropped, everything held is released once, and releases always
-/// pass; the game is asked back at most every two seconds, on the viewer's input only.
+/// pass; the game is asked back at most every two seconds, on the viewer's input only. Once Windows
+/// has refused (armed), nothing passes either; a press asks for an activation click.
 #[test]
 fn input_goes_only_while_the_game_has_the_front_and_releases_always_pass() {
     let mut r = Rig::new();
@@ -312,7 +323,10 @@ fn input_goes_only_while_the_game_has_the_front_and_releases_always_pass() {
         },
     ] {
         let a = r.admit(event.clone(), &game());
-        assert_eq!(a.event, None, "{event:?} goes nowhere while unfocused");
+        assert_eq!(
+            a.event, None,
+            "{event:?} goes nowhere until the game has the front"
+        );
         assert!(!a.release, "released once, not per event");
     }
     // Releases pass: a button, the key held before, everything.
@@ -893,7 +907,8 @@ fn every_decision_is_said_once_and_the_drops_are_aggregated() {
         r.admit(m(0.5, 0.5), &game());
     });
     let lines = log.lines().count();
-    assert!(lines <= 16, "{lines} debug lines:\n{log}");
+    // Notepad's refusal arms the guard: the arming, its look and the game's return are a line each.
+    assert!(lines <= 18, "{lines} debug lines:\n{log}");
     // The key log's line for the second of keys: the viewer's keyboard's only counted.
     assert!(log.contains("keys: presses"), "{log}");
     assert!(log.contains("other=1 dropped=2"), "{log}");
@@ -1204,4 +1219,301 @@ fn a_flood_of_distinct_keys_keeps_the_books_and_the_lines_bounded() {
         lines <= 40,
         "{lines} debug lines for 20 000 key messages:\n{log}"
     );
+}
+
+/* ── The activation click: the viewer's click asks for the game ── */
+
+fn down(b: u8) -> InputMessage {
+    InputMessage::Down { b }
+}
+
+/// Armed by a refused attempt: nothing of the viewer's passes but releases; a press asks for one
+/// activation click at the viewer's last target (its pixel in the game's client area) and goes
+/// nowhere itself — at most one a second. The viewer is told `unfocused` all along.
+#[test]
+fn armed_nothing_passes_and_a_press_asks_for_one_activation_click() {
+    let mut r = Rig::new();
+    assert!(r.passes(m(0.5, 0.5)));
+    r.pc.foreground = NOTEPAD;
+    assert!(!r.passes(m(0.5, 0.5)), "the move that asks the game back");
+    assert_eq!(r.pc.attempts, vec![GAME]);
+    for event in [
+        m(0.5, 0.5),
+        rel(),
+        key("KeyW", true),
+        wheel(),
+        text("hi"),
+        InputMessage::Combo {
+            name: "ctrl_alt_del".into(),
+        },
+    ] {
+        let a = r.admit(event.clone(), &game());
+        assert_eq!((a.event, a.activate), (None, None), "{event:?}");
+    }
+    let a = r.admit(down(0), &game());
+    assert_eq!(a.event, None, "the press itself goes nowhere");
+    assert_eq!(
+        a.activate,
+        Some(Activation {
+            button: 0,
+            px: 12 + 1788,
+            py: 47 + 1134,
+            screen: (3600, 2400),
+            game: GAME,
+        }),
+        "one click at the viewer's target"
+    );
+    assert!(
+        r.passes(InputMessage::Up { b: 0 }),
+        "its release passes, as every release"
+    );
+    r.at(500);
+    let again = r.admit(down(2), &game());
+    assert_eq!(
+        (again.event, again.activate),
+        (None, None),
+        "not within a second"
+    );
+    r.at(1_000 + u64::try_from(ACTIVATION_EVERY.as_millis()).unwrap());
+    assert!(
+        r.admit(down(2), &game()).activate.is_some(),
+        "a second later"
+    );
+    assert_eq!(r.watch(&game()).0, GameFocus::Unfocused);
+    // The click brought the game: input goes as usual.
+    r.pc.foreground = GAME;
+    assert!(r.passes(key("KeyW", true)));
+    assert!(r.passes(down(0)));
+}
+
+/// No click — the press goes nowhere all the same, the reason said — with no target yet, a target
+/// off the primary monitor or outside the picture, another program's window over the pixel, or the
+/// window there unreadable. A child window of another process inside the game's passes the press
+/// rule, as a press would.
+#[test]
+fn no_activation_click_off_the_monitor_off_the_game_or_without_a_target() {
+    let log = logged(tracing::Level::DEBUG, || {
+        let arm = |r: &mut Rig| {
+            r.pc.foreground = NOTEPAD;
+            r.admit(text("x"), &game());
+        };
+        let mut r = Rig::new();
+        arm(&mut r);
+        assert_eq!(r.admit(down(0), &game()).activate, None, "no target");
+
+        // The game's window across the monitor's right edge: 0.9 of it lies off the monitor.
+        let mut r = Rig::new();
+        arm(&mut r);
+        let wide = InputScope::Game(GameScope {
+            state: GameWindowState::Shown,
+            window: Some(GameInputWindow {
+                hwnd: GAME,
+                pid: GAME_PID,
+                client: ScreenRect {
+                    left: 3000,
+                    top: 0,
+                    right: 4000,
+                    bottom: 1000,
+                },
+            }),
+        });
+        r.admit(m(0.9, 0.5), &wide);
+        assert_eq!(r.admit(down(0), &wide).activate, None, "off the monitor");
+
+        for (overlay, error) in [(Some((1700, 1100, 1900, 1300)), false), (None, true)] {
+            let mut r = Rig::new();
+            arm(&mut r);
+            r.admit(m(0.5, 0.5), &game());
+            r.pc.overlay = overlay;
+            r.pc.window_error = error;
+            assert_eq!(r.admit(down(0), &game()).activate, None);
+        }
+        let mut r = Rig::new();
+        arm(&mut r);
+        r.admit(m(0.5, 0.5), &game());
+        r.pc.embedded = Some((1700, 1100, 1900, 1300));
+        assert!(
+            r.admit(down(0), &game()).activate.is_some(),
+            "embedded child"
+        );
+    });
+    for why in [
+        "no target of the viewer's pointer yet",
+        "the pixel is off the primary monitor",
+        "not the game's (pid 6888)",
+        "cannot be read",
+    ] {
+        assert!(log.contains(why), "{why:?} missing:\n{log}");
+    }
+    assert_eq!(
+        log.matches("no activation click for the viewer's press")
+            .count(),
+        4,
+        "{log}"
+    );
+}
+
+/// The pixel: the target in the game's client area, never past its edges; nothing off the primary
+/// monitor, outside the picture or not a number.
+#[test]
+fn the_activation_pixel_is_in_the_game_and_on_the_monitor() {
+    let area = client();
+    let screen = (3600, 2400);
+    assert_eq!(activation_pixel((0.0, 0.0), area, screen), Ok((12, 47)));
+    assert_eq!(activation_pixel((1.0, 1.0), area, screen), Ok((3587, 2314)));
+    assert_eq!(activation_pixel((0.5, 0.5), area, screen), Ok((1800, 1181)));
+    assert!(activation_pixel((1.2, 0.5), area, screen).is_err());
+    assert!(activation_pixel((f64::NAN, 0.5), area, screen).is_err());
+    let off = ScreenRect {
+        left: -800,
+        top: 0,
+        right: 800,
+        bottom: 600,
+    };
+    assert!(
+        activation_pixel((0.1, 0.5), off, screen).is_err(),
+        "left of the monitor"
+    );
+    assert_eq!(activation_pixel((0.75, 0.5), off, screen), Ok((400, 300)));
+    let empty = ScreenRect {
+        left: 5,
+        top: 5,
+        right: 5,
+        bottom: 9,
+    };
+    assert!(activation_pixel((0.5, 0.5), empty, screen).is_err());
+}
+
+/// `SendInput` does not click a game that runs elevated while the agent does not (UIPI); otherwise,
+/// or not known, it does.
+#[test]
+fn sendinput_does_not_click_an_elevated_game_from_an_ordinary_agent() {
+    let info = |elevated: Result<bool, String>, agent: Result<bool, String>| ForegroundInfo {
+        pid: GAME_PID,
+        exe: Ok("game.exe".into()),
+        elevated,
+        agent_elevated: agent,
+    };
+    assert!(sendinput_reaches(&info(Ok(true), Ok(false))).is_err());
+    assert!(sendinput_reaches(&info(Ok(true), Ok(true))).is_ok());
+    assert!(sendinput_reaches(&info(Ok(false), Ok(false))).is_ok());
+    assert!(sendinput_reaches(&info(Err("denied".into()), Ok(false))).is_ok());
+}
+
+/// No exe is looked at for the arming: any other program's window that keeps the front after a
+/// refused attempt — Notepad, a window whose process cannot be read — arms it alike. No window in
+/// front (the secure desktop, the lock screen, a switch) and a dialog of the game's own never do;
+/// an attempt Windows grants arms nothing.
+#[test]
+fn any_other_programs_window_arms_the_guard_alike() {
+    for front in [NOTEPAD, 0x99] {
+        let mut r = Rig::new();
+        r.admit(m(0.5, 0.5), &game());
+        r.pc.foreground = front;
+        assert!(
+            r.admit(down(0), &game()).activate.is_none(),
+            "{front:#x}: before"
+        );
+        assert!(
+            r.admit(down(0), &game()).activate.is_some(),
+            "{front:#x}: armed"
+        );
+    }
+    for front in [GAME_DIALOG, 0] {
+        let mut r = Rig::new();
+        r.admit(m(0.5, 0.5), &game());
+        r.pc.foreground = front;
+        for ms in [0, 2_100, 4_200] {
+            r.at(ms);
+            assert!(
+                r.admit(down(0), &game()).activate.is_none(),
+                "{front:#x}: never"
+            );
+        }
+        assert_eq!(
+            r.pc.attempts.len(),
+            3,
+            "{front:#x}: still asked for, as before"
+        );
+    }
+    let mut r = Rig::new();
+    r.admit(m(0.5, 0.5), &game());
+    r.pc.foreground = NOTEPAD;
+    r.pc.grants = true;
+    assert!(r.admit(down(0), &game()).activate.is_none());
+    assert!(
+        r.passes(key("KeyW", true)),
+        "the game has the front: no spell"
+    );
+}
+
+/// The spell is one window's: another window taking the front starts a new one, asked for first
+/// (at most every two seconds, as before); the game coming back ends it.
+#[test]
+fn the_spell_ends_when_another_window_or_the_game_takes_the_front() {
+    let mut r = Rig::new();
+    r.admit(m(0.5, 0.5), &game());
+    r.pc.foreground = NOTEPAD;
+    r.admit(text("x"), &game());
+    r.at(500);
+    r.pc.foreground = OVERLAY;
+    assert!(
+        r.admit(down(0), &game()).activate.is_none(),
+        "not armed on the overlay"
+    );
+    r.at(2_100);
+    r.admit(text("x"), &game());
+    assert_eq!(r.pc.attempts.len(), 2);
+    assert!(
+        r.admit(down(0), &game()).activate.is_some(),
+        "armed on the overlay"
+    );
+    r.pc.foreground = GAME;
+    assert!(r.passes(key("KeyW", true)));
+    r.pc.foreground = OVERLAY;
+    r.at(5_000);
+    assert!(
+        r.admit(down(0), &game()).activate.is_none(),
+        "asked for again first"
+    );
+}
+
+/// The arming says the refused attempt, the line of the window in front `armed`; the activation
+/// click its pixel and the window under it; the game's return whether one came first.
+#[test]
+fn the_activation_click_is_said_with_what_brought_the_game_back() {
+    let log = logged(tracing::Level::DEBUG, || {
+        let mut r = Rig::new();
+        r.admit(m(0.5, 0.5), &game());
+        r.pc.foreground = NOTEPAD;
+        r.at(100);
+        r.admit(rel(), &game());
+        r.at(150);
+        r.admit(rel(), &game());
+        r.at(400);
+        assert!(r.admit(down(0), &game()).activate.is_some());
+        r.pc.foreground = GAME;
+        r.at(450);
+        assert_eq!(r.watch(&game()).0, GameFocus::Focused);
+        // Again, and this time the game comes back with no click of ours.
+        r.pc.foreground = NOTEPAD;
+        r.at(3_000);
+        r.admit(rel(), &game());
+        r.admit(rel(), &game());
+        r.pc.foreground = GAME;
+        r.watch(&game());
+    });
+    for said in [
+        "game input: armed for an activation click: the game was not brought back",
+        "refused=Ok(false)",
+        "exe=notepad.exe elevated=false armed=true",
+        "game input: activation click: the viewer's press asks for the game",
+        "px=1800 py=1181 window=0x40666 top_level=0x40666",
+        "after_activation=true click_ms_before=50",
+        "after_activation=false",
+        "from=\"armed\"",
+        "activations=1",
+    ] {
+        assert!(log.contains(said), "{said:?} missing:\n{log}");
+    }
 }

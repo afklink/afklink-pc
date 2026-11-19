@@ -282,7 +282,7 @@ describe("restore and reset go only through their question", () => {
         what: `remove_trusted_device #5 key ${d.key_short}`,
       });
       const p = commandFor(
-        { kind: "person", userId: 7001, user: "Вера", count: 2 },
+        { kind: "person", userId: 7001, user: "Вера", count: 2, party: null },
         list(mode, []),
       );
       expect(p).toEqual({

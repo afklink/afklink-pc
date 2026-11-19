@@ -176,6 +176,20 @@ pub enum Kind {
     /// person and no device. A build older than this kind drops the line when it reads the file,
     /// and only that line.
     OtherDeviceAttempt,
+    /// The PC was added to a party (party spec §6: its owner's «ПК в пати» taken, written): about
+    /// the PC, naming nobody, the party in [`Entry::party`]. Written once the delegation is in the
+    /// list's file. A build older than these four kinds drops the line when it reads the file,
+    /// and only that line.
+    PartyAdded,
+    /// The PC is in a party no more (it left, by the server's word or at the PC; the owner key
+    /// that signed it went; a reset): as [`Kind::PartyAdded`].
+    PartyLeft,
+    /// A party of the PC's has another leader now: the leader is the person, the party in
+    /// [`Entry::party`].
+    PartyLeader,
+    /// A party member's first device joined the PC's trusted devices by the leader's grant
+    /// (party spec §5.4): the person, the device, the party.
+    PartyGuest,
 }
 
 impl Kind {
@@ -195,6 +209,10 @@ impl Kind {
             Self::DeclinedUntrusted => "declined_untrusted",
             Self::DeclinedUnknown => "declined_unknown",
             Self::OtherDeviceAttempt => "other_device_attempt",
+            Self::PartyAdded => "party_added",
+            Self::PartyLeft => "party_left",
+            Self::PartyLeader => "party_leader",
+            Self::PartyGuest => "party_guest",
         }
     }
 }
@@ -255,6 +273,10 @@ pub struct Entry {
     // not-a-key-name: a viewer device key's id (a public key's hash), never a keyboard key
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_key: Option<String>,
+    /// The `Party*` kinds, and [`Kind::DeviceAdded`] of a member's new device through a party: the
+    /// party's name as its join signed it. Absent from every other entry and from older lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party: Option<String>,
 }
 
 /// A trusted device as a journal entry names it: what client, on what, and how it had come into
@@ -676,6 +698,7 @@ impl Journal {
             guest_new_device: false,
             by_device: None,
             attempt_key: None,
+            party: None,
         };
         tracing::debug!(
             session = start.session_id,
@@ -1030,6 +1053,36 @@ impl Journal {
         self.write_built(entry, now_ms);
     }
 
+    /// A party's event (party spec §5.4, §6), after the change is in the list's file:
+    /// [`Kind::PartyAdded`] and [`Kind::PartyLeft`] with no person (`user` 0) and no device,
+    /// [`Kind::PartyLeader`] with the new leader, [`Kind::PartyGuest`] with the member and the
+    /// device, and [`Kind::DeviceAdded`] with a member and the device as a known guest's new one;
+    /// `party` the party's name as shown ([`crate::person_name::clean_name`] by the caller).
+    pub fn party_event(
+        &self,
+        kind: Kind,
+        party: &str,
+        person: Option<Person<'_>>,
+        device: Option<TrustedDevice>,
+        now_ms: i64,
+    ) {
+        let person = person.unwrap_or(Person {
+            user: 0,
+            name: "",
+            username: None,
+        });
+        let mut entry = event_entry(
+            kind,
+            person,
+            device,
+            kind == Kind::DeviceAdded,
+            None,
+            now_ms,
+        );
+        entry.party = Some(bounded(party, NAME_MAX));
+        self.write_built(entry, now_ms);
+    }
+
     fn write_entry(
         &self,
         kind: Kind,
@@ -1100,6 +1153,7 @@ fn event_entry(
         guest_new_device,
         by_device: by_device.map(bound_device),
         attempt_key: None,
+        party: None,
     }
 }
 

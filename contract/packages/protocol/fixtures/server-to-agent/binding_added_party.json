@@ -1,0 +1,11 @@
+{
+  "type": "binding_added",
+  "telegram_user_id": 67890,
+  "username": null,
+  "first_name": "Гость",
+  "role": "guest",
+  "via": "party",
+  "parties": [
+    "Rk9vZEJ1ZGR5UGFydHkxMg"
+  ]
+}

@@ -144,10 +144,22 @@ pub(crate) fn class(msg: &AgentToServer) -> Class {
         // The grant token (spec §7 «Токен выдачи») is sent after each connection's `key_mode`: the
         // current one, read from the file then. Held, an older token would reach the new socket
         // after that fresh one and the owner would sign grants the PC refuses `grant_stale`.
+        //
+        // A party answer and the party state (party spec §4.1) belong to their connection too: the
+        // server repeats an unanswered statement after the next `agent_ready`, and the state is sent
+        // again on each connection that takes it.
+        //
+        // The secure-desktop cue (`crate::secure_desktop`) is never held: it is counted sent only
+        // when the orchestrator hands it to a connection that takes it, and one that was due while
+        // offline goes from there on the next connection if its episode still runs. Held here, it
+        // could reach a newer connection whose server does not take it.
         AgentToServer::AgentEvent(_)
+        | AgentToServer::SecureDesktopOngoing { .. }
         | AgentToServer::SessionNonces { .. }
         | AgentToServer::KeyMode { .. }
         | AgentToServer::GrantToken { .. }
+        | AgentToServer::PartyAck { .. }
+        | AgentToServer::PartyState { .. }
         | AgentToServer::SessionStats { .. }
         | AgentToServer::Pong
         | AgentToServer::RequestPairing
@@ -1084,6 +1096,15 @@ mod tests {
             )),
             Class::Drop,
             "an event is carried by the agent's queue on disk, not held here (it would go twice)"
+        );
+        assert_eq!(
+            class(&AgentToServer::SecureDesktopOngoing {
+                session_id: "s".into(),
+                desktop: afklink_protocol::SecureDesktopKind::Uac,
+                at: 1,
+            }),
+            Class::Drop,
+            "the cue belongs to the connection it is handed to"
         );
         assert_eq!(class(&AgentToServer::Pong), Class::Drop);
         assert_eq!(class(&AgentToServer::RequestPairing), Class::Drop);

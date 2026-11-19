@@ -6,13 +6,16 @@ import {
   byDay,
   dayTitle,
   eventLabel,
+  isPartyKind,
   isTrustedKind,
   namesNobody,
+  partyParts,
   sessionMeta,
   timeText,
 } from "../lib/journal";
+import { revokeStaysLine } from "../lib/party";
 import { cn } from "../lib/utils";
-import { type BindingDto, getJournal, type JournalEntryDto } from "../tauri";
+import { type BindingDto, getJournal, type JournalEntryDto, type TrustedPartyDto } from "../tauri";
 import { RevokeConfirm } from "./AccessScreen";
 import { SendLogsDialog, useSendLogs } from "./SendLogs";
 import { deviceName, sourceText } from "./TrustedDevices";
@@ -44,10 +47,16 @@ const POLL_MS = 2000;
  */
 export function JournalScreen({
   bindings,
+  parties = [],
   ownerRequestBusy,
   onChanged,
 }: {
   bindings: BindingDto[];
+  /**
+   * The parties the PC is in (`TrustedDto.parties`): «Отвязать?» of someone a party also holds here
+   * says they stay a guest through it, as in «Доступ» (`revokeStaysLine`).
+   */
+  parties?: readonly TrustedPartyDto[];
   /** A request to the owner is in flight on this PC (`StatusDto.owner_request_busy`). */
   ownerRequestBusy: boolean;
   /** Re-read the status now, after a revoke. */
@@ -137,6 +146,12 @@ export function JournalScreen({
                     time={timeText(locale, e.at_ms)}
                     bound={bound.has(e.telegram_user_id)}
                     owner={owner === e.telegram_user_id}
+                    stays={revokeStaysLine(
+                      t,
+                      parties,
+                      bindings.find((b) => b.telegram_user_id === e.telegram_user_id)?.parties,
+                      e.name,
+                    )}
                     ownerRequestBusy={ownerRequestBusy}
                     open={open === e.id}
                     confirming={confirming === e.id}
@@ -247,6 +262,7 @@ function SessionItem({
   time,
   bound,
   owner,
+  stays,
   ownerRequestBusy,
   open,
   confirming,
@@ -263,6 +279,8 @@ function SessionItem({
   bound: boolean;
   /** The person is the PC's owner, so «Отвязать» waits for the owner's confirmation. */
   owner: boolean;
+  /** A party of this PC also holds the person here: «Отвязать?»'s line (`revokeStaysLine`). */
+  stays: string | null;
   /** A request to the owner is in flight: the owner's «Отвязать» is held, in place. */
   ownerRequestBusy: boolean;
   open: boolean;
@@ -331,6 +349,7 @@ function SessionItem({
               telegramUserId={entry.telegram_user_id}
               owner={owner}
               held={owner && ownerRequestBusy}
+              stays={stays}
               onCancel={onCancelRevoke}
               onRevoked={onRevoked}
             />
@@ -364,28 +383,45 @@ function SessionItem({
  * time, and under them, small, the device and how it came into the list — «Telegram на iPhone ·
  * Разрешено на ПК». The name gives way first (cut, whole in its tooltip); the event is never cut —
  * where it does not fit beside the name it goes on to the next line. The mode switched names nobody:
- * the event alone.
+ * the event alone. A party's entry is one sentence with the party and the person in it — «Новый
+ * гость: Коля» over «Telegram на iPhone · Принято в пати "Орлы"», «ПК добавлен в пати "Орлы"» —
+ * the person's name cut as everywhere.
  */
 function TrustedItem({ entry: e, time }: { entry: JournalEntryDto; time: string }) {
   const t = useT();
   if (e.kind === "session") return null;
   const d = e.trusted_device ?? null;
   // The journal names no confirming device: an endorsed one goes without its source.
-  const source = d ? sourceText(t, d.source) : null;
+  const source = d ? sourceText(t, d.source, undefined, e.party) : null;
   const meta = d ? [deviceName(t, d), source].filter((p) => p !== null).join(" · ") : null;
+  const party = isPartyKind(e.kind) ? partyParts(t, e.kind, e.party ?? "", e.name) : null;
   return (
     <li className="border-t border-line px-4 py-2 text-muted first:border-t-0">
       <span className="flex items-start gap-2.5">
         <span className="min-w-0 flex-1 text-body">
-          {namesNobody(e.kind) ? null : (
+          {party !== null ? (
             <>
-              <span className="inline-block max-w-[55%] truncate align-top" title={e.name}>
-                {e.name}
-              </span>
-              {" · "}
+              {party.before}
+              {party.name !== null ? (
+                <span className="inline-block max-w-[55%] truncate align-top" title={party.name}>
+                  {party.name}
+                </span>
+              ) : null}
+              {party.after}
+            </>
+          ) : (
+            <>
+              {namesNobody(e.kind) ? null : (
+                <>
+                  <span className="inline-block max-w-[55%] truncate align-top" title={e.name}>
+                    {e.name}
+                  </span>
+                  {" · "}
+                </>
+              )}
+              {eventLabel(t, e.kind, e.declined_reason)}
             </>
           )}
-          {eventLabel(t, e.kind, e.declined_reason)}
         </span>
         <span className="shrink-0 text-body text-faint tabular-nums">{time}</span>
       </span>

@@ -196,6 +196,8 @@ fn heartbeat_fixtures_cover_both_shapes() {
     let mut saw_vis_ok_alone = false;
     let mut saw_bg_hold = false;
     let mut saw_vis_absent = false;
+    let mut saw_secure_desktop = false;
+    let mut saw_secure_desktop_absent = false;
     for (file, _) in group("agent-to-viewer") {
         let raw = read_fixture(&file);
         let AgentDataMessage::Heartbeat(hb) =
@@ -298,6 +300,25 @@ fn heartbeat_fixtures_cover_both_shapes() {
             (true, true) => saw_bg_hold = true,
             (false, true) => {}
         }
+        // The input on another Windows desktop: absent while it is on the ordinary one; the pipeline
+        // itself healthy and still while it is elsewhere (no frame comes, and nothing failed).
+        match hb.secure_desktop {
+            None => {
+                saw_secure_desktop_absent = true;
+                assert!(
+                    raw.get("secure_desktop").is_none(),
+                    "{file}: secure_desktop is absent, not null"
+                );
+            }
+            Some(_) => {
+                saw_secure_desktop = true;
+                assert_eq!(
+                    hb.state,
+                    PipelineState::Ok,
+                    "{file}: a secure desktop is not a failure"
+                );
+            }
+        }
         // An agent that moves the cursor by exactly the `r` fraction says so; an older one's
         // heartbeat has no such field at all.
         saw_rel_exact |= hb.rel_exact;
@@ -348,6 +369,10 @@ fn heartbeat_fixtures_cover_both_shapes() {
     assert!(
         saw_vis_absent && saw_vis_ok_alone && saw_bg_hold,
         "need heartbeats without vis_ok, with vis_ok alone and with bg_hold"
+    );
+    assert!(
+        saw_secure_desktop && saw_secure_desktop_absent,
+        "need heartbeats with secure_desktop and without"
     );
 }
 
@@ -717,14 +742,15 @@ fn role_fixtures_cover_every_shape() {
     );
 }
 
-/// `binding_added` from the owner's invite (`binding_added_invite`) and from the PC's own «Разрешить»
-/// (`binding_added`): a mirror that dropped `via` would still round-trip the plain one, so both are
-/// checked for what they carry — `via: invite` with the guest's role, and no `via` key at all.
+/// `binding_added` from the owner's invite (`binding_added_invite`), from a party
+/// (`binding_added_party`) and from the PC's own «Разрешить» (`binding_added`): a mirror that dropped
+/// `via` would still round-trip the plain one, so each is checked for what it carries — `via: invite`
+/// or `via: party` with the guest's role, and no `via` key at all.
 #[test]
-fn binding_added_fixtures_cover_an_invite_and_none() {
+fn binding_added_fixtures_cover_an_invite_a_party_and_none() {
     use afklink_protocol::{BindingRole, BindingVia};
 
-    let (mut saw_invite, mut saw_none) = (false, false);
+    let (mut saw_invite, mut saw_party, mut saw_none) = (false, false, false);
     for (file, variant) in group("server-to-agent") {
         if variant.as_deref() != Some("binding_added") {
             continue;
@@ -736,12 +762,13 @@ fn binding_added_fixtures_cover_an_invite_and_none() {
             panic!("{file}: not a binding_added");
         };
         match via {
-            Some(BindingVia::Invite) => {
-                saw_invite = true;
+            Some(via @ (BindingVia::Invite | BindingVia::Party)) => {
+                saw_invite |= via == BindingVia::Invite;
+                saw_party |= via == BindingVia::Party;
                 assert_eq!(
                     role,
                     Some(BindingRole::Guest),
-                    "{file}: an invite always makes a guest"
+                    "{file}: an invite or a party always makes a guest"
                 );
             }
             Some(BindingVia::Other(word)) => {
@@ -754,8 +781,119 @@ fn binding_added_fixtures_cover_an_invite_and_none() {
         }
     }
     assert!(
-        saw_invite && saw_none,
-        "need a binding_added by invite and one without via"
+        saw_invite && saw_party && saw_none,
+        "need a binding_added by invite, one by party and one without via"
+    );
+}
+
+/// The bindings through parties: `agent_ready_party_guests` lists a guest with `via: party` and two
+/// parties and a friend with a personal reason and one party (no `via`), the owner with neither;
+/// `binding_added_party` names its party. A mirror that dropped `via` or `parties` would still
+/// round-trip the shapes without them, so each is checked for what it carries.
+#[test]
+fn bindings_through_parties_carry_via_and_parties() {
+    use afklink_protocol::BindingVia;
+
+    let ServerToAgent::AgentReady { bindings, .. } = serde_json::from_value(read_fixture(
+        "server-to-agent/agent_ready_party_guests.json",
+    ))
+    .expect("agent_ready_party_guests") else {
+        panic!("not an agent_ready");
+    };
+    let shape: Vec<(i64, bool, usize)> = bindings
+        .iter()
+        .map(|b| (b.telegram_user_id, b.party_only(), b.parties.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        [(12345, false, 0), (67890, true, 2), (24680, false, 1)]
+    );
+    assert_eq!(bindings[1].via, Some(BindingVia::Party));
+    assert!(bindings[2].via.is_none(), "a personal reason has no via");
+    assert!(bindings
+        .iter()
+        .flat_map(|b| &b.parties)
+        .all(|p| afklink_protocol::party::is_party_id(p)));
+    let ServerToAgent::BindingAdded { via, parties, .. } =
+        serde_json::from_value(read_fixture("server-to-agent/binding_added_party.json"))
+            .expect("binding_added_party")
+    else {
+        panic!("not a binding_added");
+    };
+    assert_eq!(via, Some(BindingVia::Party));
+    assert_eq!(parties, ["Rk9vZEJ1ZGR5UGFydHkxMg"]);
+    // An older server's binding says neither: a personal one.
+    let old: afklink_protocol::BindingInfo =
+        serde_json::from_str(r#"{"telegram_user_id":1,"username":null,"first_name":"A"}"#)
+            .expect("an older binding");
+    assert!(!old.party_only() && old.parties.is_empty());
+    let back = serde_json::to_value(&old).expect("serialises");
+    assert!(
+        back.get("via").is_none() && back.get("parties").is_none(),
+        "{back}"
+    );
+}
+
+/// The party messages (party spec §4.1) exist in the fixtures for their differences: `agent_ready`
+/// with `party`, a join's opaque statement, a leave, an answer to each op, and a `party_state` both
+/// with a delegation and empty. A mirror that dropped `party` or carried the join as anything but the
+/// whole object would still round-trip some of them, so each shape is checked for what it carries.
+#[test]
+fn party_fixtures_cover_every_shape() {
+    use afklink_protocol::{PartyAckOp, PartyAckResult};
+
+    let (mut ready_party, mut joins, mut leaves) = (0, 0, 0);
+    for (file, _) in group("server-to-agent") {
+        let raw = read_fixture(&file);
+        match serde_json::from_value(raw.clone()).unwrap_or_else(|e| panic!("{file}: {e}")) {
+            ServerToAgent::AgentReady { party, .. } => {
+                assert_eq!(party.is_some(), raw.get("party").is_some(), "{file}");
+                ready_party += usize::from(party == Some(true));
+            }
+            ServerToAgent::PartyJoin { join } => {
+                assert_eq!(join, raw["join"], "{file}: the join is carried whole");
+                joins += 1;
+            }
+            ServerToAgent::PartyLeave { party_id } => {
+                assert_eq!(raw["party_id"], party_id.as_str(), "{file}");
+                leaves += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        ready_party >= 1 && joins >= 1 && leaves >= 1,
+        "{ready_party} agent_ready with party, {joins} joins, {leaves} leaves"
+    );
+
+    let (mut ops, mut results) = (BTreeSet::new(), BTreeSet::new());
+    let (mut full, mut empty) = (false, false);
+    for (file, _) in group("agent-to-server") {
+        match serde_json::from_value(read_fixture(&file)).unwrap_or_else(|e| panic!("{file}: {e}"))
+        {
+            AgentToServer::PartyAck { op, result, .. } => {
+                ops.insert(op.as_str());
+                results.insert(result.as_str());
+            }
+            AgentToServer::PartyState { parties } => {
+                full |= !parties.is_empty();
+                empty |= parties.is_empty();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        ops,
+        PartyAckOp::ALL.iter().map(|o| o.as_str()).collect(),
+        "need a party_ack for each op"
+    );
+    assert!(
+        results.contains(PartyAckResult::Ok.as_str()) && results.len() >= 2,
+        "need an ok and a refusal: {results:?}"
+    );
+    assert!(
+        full && empty,
+        "need a party_state with a delegation and an empty one"
     );
 }
 
@@ -968,6 +1106,7 @@ fn telemetry_v2_fixtures_cover_every_new_shape() {
                     AgentEventKind::UpdateFinished { .. } => "update_finished",
                     AgentEventKind::DriverInstallFinished { .. } => "driver_install_finished",
                     AgentEventKind::PcSettingChanged { .. } => "pc_setting_changed",
+                    AgentEventKind::SecureDesktopEnded { .. } => "secure_desktop_ended",
                 });
             }
             _ => {}
@@ -992,6 +1131,7 @@ fn telemetry_v2_fixtures_cover_every_new_shape() {
             "agent_started",
             "driver_install_finished",
             "pc_setting_changed",
+            "secure_desktop_ended",
             "update_finished"
         ],
         "an agent_event fixture per kind"
@@ -1093,6 +1233,8 @@ fn every_message_the_agent_speaks_has_a_fixture() {
         "session_nonces",
         "key_mode",
         "grant_token",
+        "party_ack",
+        "party_state",
         "unbind",
         "owner_request",
         "owner_request_cancel",
@@ -1103,6 +1245,7 @@ fn every_message_the_agent_speaks_has_a_fixture() {
         "pong",
         "agent_goodbye",
         "agent_event",
+        "secure_desktop_ongoing",
     ]
     .into_iter()
     .collect();
@@ -1117,6 +1260,8 @@ fn every_message_the_agent_speaks_has_a_fixture() {
         "binding_removed",
         "owner_changed",
         "owner_request_state",
+        "party_join",
+        "party_leave",
         "session_request",
         "sdp",
         "ice",

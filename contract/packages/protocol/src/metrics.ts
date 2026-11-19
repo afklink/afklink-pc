@@ -239,6 +239,9 @@ export const SESSION_END_DETAILS = {
     "recover_bad_sig",
     "first_use_closed",
     "first_use_bad_sig",
+    // «Пати» (docs/design/party-protocol.md §5.1): the PC holds no delegation of the grant's party
+    // naming its `by` as the leader.
+    "party_leader",
   ],
   proof_invalid: ["malformed", "fp_bad", "key_mismatch", "bad_sig", "proof_mismatch", "busy"],
   key_list_damaged: ["read_failed", "write_failed"],
@@ -423,7 +426,7 @@ export const STACK_HASH_PATTERN = /^[0-9a-f]{8,64}$/;
 /* --- the agent's events -------------------------------------------------------------------- */
 
 /**
- * What the agent tells the server outside any session (`agent_event.kind`), each a product event of
+ * What the agent tells the server, mostly outside any session (`agent_event.kind`), each a product event of
  * the same name (§6):
  *
  *   agent_started            a process started (its boot, its build, how the last one ended)
@@ -432,6 +435,8 @@ export const STACK_HASH_PATTERN = /^[0-9a-f]{8,64}$/;
  *   update_finished          an update ended: confirmed, or rolled back
  *   driver_install_finished  the input driver's installer ended
  *   pc_setting_changed       the owner changed a setting on the PC (`PC_SETTING_KEYS`)
+ *   secure_desktop_ended     an episode of the PC's input on another Windows desktop (a UAC prompt,
+ *                            the lock screen; `secure-desktop.ts`) ended — in a session or not
  */
 export const AGENT_EVENT_KINDS = [
   "agent_started",
@@ -439,6 +444,7 @@ export const AGENT_EVENT_KINDS = [
   "update_finished",
   "driver_install_finished",
   "pc_setting_changed",
+  "secure_desktop_ended",
 ] as const;
 export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
 

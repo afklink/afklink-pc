@@ -32,6 +32,14 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
+    # The focus ladder's unassigned key (SendInput), and what the log says of the window in front:
+    # its DWM cloak, and whether its process is suspended (the threads' states from
+    # NtQuerySystemInformation). The workspace already builds these features (capture, transport,
+    # the app), so nothing more is compiled.
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Dwm",
+    "Wdk_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
 ] }
 
 [lints]

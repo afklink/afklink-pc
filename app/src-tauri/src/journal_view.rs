@@ -25,8 +25,10 @@ pub(crate) struct JournalEntryDto {
     /// The session's id, or the event's own.
     pub(crate) id: String,
     /// `"session"`, `"granted"`, `"invited"` (a guest the owner let in by his invite), `"revoked"`,
-    /// `"paused"`, `"trusted_on"` / `"trusted_off"` (the switch: user 0, an empty name) or
-    /// `"device_untrusted"`.
+    /// `"paused"`, `"trusted_on"` / `"trusted_off"` (the switch: user 0, an empty name),
+    /// `"device_untrusted"`, the trusted devices' other kinds, or a party's: `"party_added"` /
+    /// `"party_left"` (about the PC: user 0, an empty name), `"party_leader"` (the new leader),
+    /// `"party_guest"` (a member's first device).
     pub(crate) kind: &'static str,
     pub(crate) telegram_user_id: i64,
     /// First name, else `@username`, else `#id`, as of the entry.
@@ -66,6 +68,10 @@ pub(crate) struct JournalEntryDto {
     /// that as the kind). Absent for a refusal without one and elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declined_reason: Option<String>,
+    /// `"party_added"`, `"party_left"`, `"party_leader"`, `"party_guest"`, and `"device_added"` of
+    /// a member's new device through a party: the party's name. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) party: Option<String>,
 }
 
 /// A trusted device as a journal entry names it.
@@ -131,6 +137,7 @@ pub(crate) fn entry_dto(view: &View, locale: Locale, now_ms: i64) -> JournalEntr
         )
         .then(|| e.reason.clone())
         .flatten(),
+        party: e.party.clone(),
     }
 }
 
@@ -293,5 +300,72 @@ mod tests {
         j.session_ended("s1", "ice_timeout", T0 + 60_000);
         let s = entry_dto(&j.last().expect("done"), Locale::Ru, T0 + 60_000);
         assert_eq!(s.declined_reason, None);
+    }
+
+    /// A party's entries carry the party's name; the PC's own (added, left) name nobody, the
+    /// leader's names him, a member's first device names the member and the device, which says
+    /// it came by the party; a party's refusal keeps its reason.
+    #[test]
+    fn a_partys_entries_reach_the_window_with_the_party() {
+        use afklink_core::journal::TrustedDevice;
+        let j = Journal::open(None, T0);
+        j.party_event(Kind::PartyAdded, "Орлы", None, None, T0);
+        let e = entry_dto(&j.last().expect("added"), Locale::Ru, T0);
+        assert_eq!(e.kind, "party_added");
+        assert_eq!(e.party.as_deref(), Some("Орлы"));
+        assert_eq!((e.telegram_user_id, e.name.as_str()), (0, ""));
+        j.party_event(
+            Kind::PartyLeader,
+            "Орлы",
+            Some(Person {
+                user: 7,
+                name: "Лёха",
+                username: Some("lekha"),
+            }),
+            None,
+            T0 + 1,
+        );
+        let e = entry_dto(&j.last().expect("leader"), Locale::Ru, T0 + 1);
+        assert_eq!(e.kind, "party_leader");
+        assert_eq!((e.telegram_user_id, e.name.as_str()), (7, "Лёха"));
+        j.party_event(
+            Kind::PartyGuest,
+            "Орлы",
+            Some(Person {
+                user: 9,
+                name: "Коля",
+                username: None,
+            }),
+            Some(TrustedDevice {
+                kind: "telegram".into(),
+                platform: "iphone".into(),
+                source: "party".into(),
+            }),
+            T0 + 2,
+        );
+        let e = entry_dto(&j.last().expect("guest"), Locale::Ru, T0 + 2);
+        assert_eq!(e.kind, "party_guest");
+        assert_eq!(e.party.as_deref(), Some("Орлы"));
+        let d = e.trusted_device.expect("the device");
+        assert_eq!((d.kind, d.source), (Some("telegram"), "party"));
+        j.party_event(Kind::PartyLeft, "Орлы", None, None, T0 + 3);
+        let e = entry_dto(&j.last().expect("left"), Locale::Ru, T0 + 3);
+        assert_eq!(e.kind, "party_left");
+        assert_eq!(e.party.as_deref(), Some("Орлы"));
+        j.declined(
+            Kind::DeclinedUnknown,
+            Person {
+                user: 9,
+                name: "Коля",
+                username: None,
+            },
+            Some("party_leader"),
+            T0 + 4,
+        );
+        let e = entry_dto(&j.last().expect("declined"), Locale::Ru, T0 + 4);
+        assert_eq!(e.declined_reason.as_deref(), Some("party_leader"));
+        assert_eq!(e.party, None);
+        let json = serde_json::to_value(&e).expect("json");
+        assert!(json.get("party").is_none(), "absent elsewhere");
     }
 }

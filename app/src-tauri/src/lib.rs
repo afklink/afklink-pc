@@ -165,6 +165,12 @@ struct BindingDto {
     /// The PC's request to the owner on this person's row: in flight, or how it ended while that is
     /// shown (`afklink_core::owner_request`).
     owner_request: Option<OwnerRequestDto>,
+    /// `"party"`: the binding lives only through parties (the person stands under the party cards,
+    /// with no binding buttons); `None`: a personal binding, or a server that does not say.
+    via: Option<&'static str>,
+    /// The parties through which the person is a guest of this PC (`party_id`s; anything not one
+    /// is left out); empty: none, or a server that does not say.
+    parties: Vec<String>,
 }
 
 /// A request to the owner on a person's row.
@@ -267,6 +273,13 @@ fn binding_dto(
         username: afklink_core::person_name::shown_username(b.username.as_deref()),
         first_name: afklink_core::person_name::shown_first_name(b.first_name.as_deref()),
         role: b.role.map(afklink_core::BindingRole::as_str),
+        via: b.party_only.then_some("party"),
+        parties: b
+            .parties
+            .iter()
+            .filter(|p| afklink_protocol::party::is_party_id(p))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -2325,6 +2338,14 @@ pub fn run() {
         Some(queue) => agent.with_event_queue(Arc::clone(queue)),
         None => agent,
     };
+    // Which Windows desktop has the PC's input (a UAC prompt, the lock screen): one watcher for the
+    // process, on a thread of its own (`afklink_core::secure_desktop`); «Только игра» read from the
+    // config at an episode's start.
+    let secure_control = control.clone();
+    let agent = match afklink_core::secure_desktop::start(move || secure_control.game_only().0) {
+        Some(state) => agent.with_secure_desktop(state),
+        None => agent,
+    };
     // The upgrade names this build (`AFKLink/<version> (<channel>)`, kept by the backend per device),
     // `agent_hello` the build, this process and how the last one ended, and the sessions may sync
     // the clipboard for viewers that turn it on (`afklink_core::clipboard`; never in «Только игра»).
@@ -2814,7 +2835,8 @@ pub fn run() {
             trusted::confirm_trusted_device,
             trusted::attempt_allow,
             trusted::attempt_hide,
-            trusted::repair_trusted
+            trusted::repair_trusted,
+            trusted::leave_party
         ])
         .build(tauri::generate_context!())
         .expect("error while building AFKLink")
@@ -3244,6 +3266,39 @@ mod name_dto_tests {
         );
     }
 
+    /// «Доступ»: a binding through parties alone says `via: "party"` and its parties (anything not
+    /// a party id left out); a personal one says neither.
+    #[test]
+    fn the_access_lists_party_bindings_reach_the_window() {
+        let requests = OwnerRequests::default();
+        let id = "Rk9vZEJ1ZGR5UGFydHkxMg".to_string();
+        let row = |party_only, parties: Vec<String>| {
+            binding_dto(
+                &access_cache::CachedBinding {
+                    telegram_user_id: 42,
+                    first_name: Some("Коля".into()),
+                    username: None,
+                    role: Some(afklink_core::BindingRole::Guest),
+                    party_only,
+                    parties,
+                },
+                &requests,
+            )
+        };
+        let member = row(true, vec![id.clone(), "not an id".into()]);
+        assert_eq!(
+            (member.via, member.parties),
+            (Some("party"), vec![id.clone()])
+        );
+        let personal = row(false, vec![id.clone()]);
+        assert_eq!((personal.via, personal.parties), (None, vec![id]));
+        let json = serde_json::to_value(row(false, Vec::new())).expect("json");
+        assert_eq!(
+            (&json["via"], &json["parties"]),
+            (&serde_json::Value::Null, &serde_json::json!([]))
+        );
+    }
+
     /// «Доступ»: the same cleaning for every row, the role and the id as they were.
     #[test]
     fn the_access_lists_names_are_cleaned() {
@@ -3255,6 +3310,8 @@ mod name_dto_tests {
                     first_name: first.map(str::to_string),
                     username: user.map(str::to_string),
                     role: Some(afklink_core::BindingRole::Guest),
+                    party_only: false,
+                    parties: Vec::new(),
                 },
                 &requests,
             )
@@ -3389,6 +3446,8 @@ mod owner_request_tests {
             first_name: Some("Я".into()),
             username: None,
             role: Some(afklink_core::BindingRole::Owner),
+            party_only: false,
+            parties: Vec::new(),
         };
         let mut r = OwnerRequests::default();
         assert_eq!(held_pair_dto(&r, std::slice::from_ref(&owner)), None);
@@ -3420,6 +3479,8 @@ mod owner_request_tests {
             first_name: Some("Вася".into()),
             username: Some("vasya".into()),
             role: Some(afklink_core::BindingRole::Guest),
+            party_only: false,
+            parties: Vec::new(),
         };
         assert_eq!(
             held_pair_dto(&allowed, std::slice::from_ref(&owner))

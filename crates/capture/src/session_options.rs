@@ -423,8 +423,8 @@ mod win {
             .clone()
     }
 
-    /// What `ApiInformation` answers about `option`'s property.
-    pub(super) fn presence(option: SessionOption) -> Presence {
+    /// What `ApiInformation` answers about `option`'s property (also for `crate::start_probe`).
+    pub(crate) fn presence(option: SessionOption) -> Presence {
         match ApiInformation::IsPropertyPresent(
             &HSTRING::from(SESSION_CLASS),
             &HSTRING::from(option.property()),
@@ -525,6 +525,8 @@ mod win {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use win::presence;
 #[cfg(windows)]
 pub use win::{start, windows_build, Resolved};
 

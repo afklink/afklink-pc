@@ -1,7 +1,8 @@
 //! A simulated Windows cursor for the tests, on a virtual clock: what Windows does with the reports the
 //! planner asks for. Relative counts move the cursor by `S × speed factor` physical px each (EPP off,
 //! as measured: 1.5 px per count at 150 %) or along a nonlinear curve of the report's size (EPP on),
-//! with Windows' sub-pixel remainder kept and the cursor clamped to the screen; an absolute HID report
+//! with Windows' sub-pixel remainder kept and the cursor clamped to the screen (and to a
+//! monitor on its left, when there is one); an absolute HID report
 //! lands where Windows maps FakerInput's `0..32767` (`floor(X · width / 32768)`, the probe's data). Each input
 //! shows in [`CursorWorld::look`] only after [`SimCursor::delay`], like `GetCursorPos` ~2 ms after a
 //! report. Nothing here touches Windows.
@@ -21,6 +22,9 @@ enum Input {
 pub(crate) struct SimCursor {
     pub(crate) width: i32,
     pub(crate) height: i32,
+    /// A second monitor of this width to the primary's left (its pixels at negative x, the
+    /// primary's rows); 0 for none. Relative counts reach it, the absolute report does not.
+    pub(crate) left_monitor: i32,
     pub(crate) dpi: u32,
     pub(crate) epp: bool,
     pub(crate) speed: u32,
@@ -66,6 +70,7 @@ impl SimCursor {
         Self {
             width: 3600,
             height: 2400,
+            left_monitor: 0,
             dpi,
             epp: false,
             speed: 10,
@@ -155,7 +160,9 @@ impl SimCursor {
 
     fn clamp(&mut self) {
         self.pos = (
-            self.pos.0.clamp(0.0, f64::from(self.width - 1)),
+            self.pos
+                .0
+                .clamp(-f64::from(self.left_monitor), f64::from(self.width - 1)),
             self.pos.1.clamp(0.0, f64::from(self.height - 1)),
         );
     }

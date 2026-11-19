@@ -68,6 +68,13 @@ pub(crate) struct CachedBinding {
     /// that sends none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) role: Option<BindingRole>,
+    /// The binding lives only through parties (`via: party`); absent: a personal one, a file
+    /// written before parties, or a server that does not say.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) party_only: bool,
+    /// The parties through which the person is a guest of this PC (`party_id`s); absent: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) parties: Vec<String>,
 }
 
 impl From<&BindingInfo> for CachedBinding {
@@ -77,6 +84,8 @@ impl From<&BindingInfo> for CachedBinding {
             first_name: b.first_name.clone(),
             username: b.username.clone(),
             role: b.role,
+            party_only: b.party_only(),
+            parties: b.parties.clone(),
         }
     }
 }
@@ -374,6 +383,8 @@ impl AccessCache {
                     username: c.username.clone(),
                     first_name: c.first_name.clone(),
                     role: c.role,
+                    via: c.party_only.then_some(afklink_protocol::BindingVia::Party),
+                    parties: c.parties.clone(),
                 })
                 .collect()
         })
@@ -779,6 +790,8 @@ mod tests {
             first_name: Some(first_name.to_string()),
             username: username.map(str::to_string),
             role: None,
+            via: None,
+            parties: Vec::new(),
         }
     }
 

@@ -1126,6 +1126,9 @@ pub fn current() -> Option<&'static Arc<RunState>> {
 /// Record this process's exit as `kind` (`why`, for the log) in the claimed record. Before a claim
 /// (or in a process that keeps none) there is nothing to record into: said at debug.
 pub fn record_exit(kind: ExitKind, why: &str) {
+    // Every exit passes here: a secure-desktop episode it cuts is recorded with its duration so
+    // far, and said once (`crate::secure_desktop`).
+    crate::secure_desktop::process_exiting(why);
     match CURRENT.get() {
         Some(state) => state.exiting(kind, why),
         None => tracing::debug!(
@@ -1161,6 +1164,8 @@ pub fn record_agent_panic(place: Option<String>, thread: Option<&str>) {
 
 /// Take back a recorded `os_shutdown`: the end of the Windows session was cancelled.
 pub fn take_back_exit(why: &str) {
+    // The process goes on: the secure-desktop watch observes again.
+    crate::secure_desktop::process_exit_taken_back(why);
     match CURRENT.get() {
         Some(state) => state.exit_taken_back(why),
         None => tracing::debug!(why, "run state: none claimed; nothing to take back"),

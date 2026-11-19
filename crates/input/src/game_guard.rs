@@ -14,6 +14,19 @@
 //!   [`FOCUS_ATTEMPT_EVERY`] the game is asked back (`SetForegroundWindow`; Windows usually refuses
 //!   and flashes its taskbar button); no other window is ever minimized or touched. While the window
 //!   is not shown only releases pass.
+//! - **The activation click: the viewer's click asks for the game, and one click of ours brings
+//!   it.** Once such an attempt has been refused while a window keeps the front (whichever
+//!   program's: a cloaked Start or Search host of a suspended process holds it for good, and only a
+//!   real click activates the game then — but never with no window in front, nor a window of the
+//!   game's own process), the guard is armed on that window. Nothing of the viewer's passes then,
+//!   as before; but a mouse button going down is taken as the viewer asking for the game: at the
+//!   pixel of the viewer's last pointer target in the game's picture (`P`) — inside the primary
+//!   monitor and the game's client area, and a window of the game's under it by the press rule
+//!   below — the agent clicks once with that button ([`Activation`], at most every
+//!   [`ACTIVATION_EVERY`]); the viewer's press itself goes nowhere, its release passes as every
+//!   release does. Windows activates the game, the focus watch sees it, and input goes as usual.
+//!   The spell is one window's: it ends when the game has the front again, when the game is not
+//!   shown, or when another window takes the front (that one is asked for first, as before).
 //! - **A press lands only on the game.** The window under the pixel a button press will land on
 //!   (`WindowFromPoint` at the planner's target), or its top-level window, must belong to the game's
 //!   process — compared by process id, no process opened. An always-on-top window swallows no click.
@@ -36,12 +49,17 @@
 //! releases were sent; `held_*` say what was held); each focus attempt and Windows' answer; each
 //! blocked key or combo with its source (`src`); each Alt+F4 let through; each dropped press with
 //! why; every change of the text's route; one `game input` line a second while anything was dropped
-//! or blocked. `trace`: every event held back. The guard also feeds the key log (`crate::key_log`),
-//! which names only the viewer's own keys (`k.src`) or the combination a line is about.
+//! or blocked. The arming says the refused attempt; the line of another window in front says
+//! `armed`; each press taken while armed says what was decided — the click at `P` and the window
+//! under it, or why not; the game's return after a spell says whether an activation click came
+//! first. `trace`: every event held back. The guard also feeds
+//! the key log (`crate::key_log`), which names only the viewer's own keys (`k.src`) or the
+//! combination a line is about.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+use afklink_core::game::ScreenRect;
 use afklink_core::traits::{GameFocus, GameInputWindow, GameScope, InputScope};
 use afklink_protocol::{GameWindowState, InputMessage, KeySource};
 
@@ -104,6 +122,12 @@ pub(crate) struct WindowAt {
     pub(crate) root_pid: u32,
 }
 
+/// The press rule: a window of the game's process (`game_pid`), or one inside a top-level window
+/// of it (a child window of another process embedded in the game's window is the game's).
+fn on_game(at: &WindowAt, game_pid: u32) -> bool {
+    at.pid == game_pid || at.root_pid == game_pid
+}
+
 /// What the guard reads of the PC — behind a trait, so the tests drive a fake one.
 pub(crate) trait GuardHost {
     /// `GetForegroundWindow`: 0 for none.
@@ -116,6 +140,8 @@ pub(crate) trait GuardHost {
     fn describe(&mut self, window: usize) -> ForegroundInfo;
     /// `SetForegroundWindow`: whether Windows said yes.
     fn set_foreground(&mut self, window: usize) -> Result<bool, String>;
+    /// The primary monitor's size (`GetSystemMetrics`): the screen the absolute paths reach.
+    fn screen(&mut self) -> (i32, i32);
     /// `WindowFromPoint` at this pixel of the virtual screen.
     fn window_at(&mut self, px: i32, py: i32) -> Result<WindowAt, String>;
     /// Where a mouse button pressed now would land (the planner's: see
@@ -193,11 +219,14 @@ enum Look {
     /// The game's window has the front.
     Focused { game: usize },
     /// Another window has the front (0: none has). `game_pid`: the game's process, so a window of
-    /// its own (a dialog) is told apart without opening anything.
+    /// its own (a dialog) is told apart without opening anything. `armed`: the game was asked back
+    /// while this window had the front and Windows refused: a press of the viewer's
+    /// asks for an activation click.
     Away {
         game: usize,
         game_pid: u32,
         foreground: usize,
+        armed: bool,
     },
     /// The game's window cannot take input.
     NotShown { state: GameWindowState },
@@ -208,6 +237,7 @@ impl Look {
         match self {
             Self::Desktop => "desktop",
             Self::Focused { .. } => "focused",
+            Self::Away { armed: true, .. } => "armed",
             Self::Away { .. } => "unfocused",
             Self::NotShown { .. } => "not_shown",
         }
@@ -291,6 +321,9 @@ struct Stats {
     focus_attempts: u32,
     /// Attempts after which the game had the front.
     focus_won: u32,
+    /// Activation clicks decided, and presses taken while armed that made none.
+    activations: u32,
+    activations_refused: u32,
     /// Everything held released because the game lost the front.
     releases: u32,
 }
@@ -304,6 +337,8 @@ impl Stats {
             + self.keys_blocked
             + self.other_dropped
             + self.focus_attempts
+            + self.activations
+            + self.activations_refused
             + self.releases
             > 0
     }
@@ -317,6 +352,64 @@ pub(crate) struct Admission {
     pub(crate) release: bool,
     /// What to inject — the event, or text rewritten to the driver's typing — or nothing.
     pub(crate) event: Option<InputMessage>,
+    /// One click of the agent's to make at once, after the releases ([`Activation`]).
+    pub(crate) activate: Option<Activation>,
+}
+
+/// An activation click: one click of `button` at `px`, `py` — a pixel of the primary monitor
+/// (`screen` is its size, as the guard read it), inside the client area of the game's window
+/// (`game`), with a window of the game's under it by the press rule when the guard looked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Activation {
+    pub(crate) button: u8,
+    pub(crate) px: i32,
+    pub(crate) py: i32,
+    pub(crate) screen: (i32, i32),
+    pub(crate) game: usize,
+}
+
+/// At most one activation click this often in a spell.
+pub(crate) const ACTIVATION_EVERY: Duration = Duration::from_secs(1);
+
+/// The pixel of an activation click: the viewer's target `t` (fractions of the game's picture,
+/// like `m`) in the game's client area (`left + floor(x · width)`), never past its edges. `Err` when
+/// the target is not a number or outside the picture, the area is empty, or the pixel is off the
+/// primary monitor (`screen`), which the absolute paths do not reach.
+pub(crate) fn activation_pixel(
+    t: (f64, f64),
+    client: ScreenRect,
+    screen: (i32, i32),
+) -> Result<(i32, i32), &'static str> {
+    if !(t.0.is_finite() && t.1.is_finite()) {
+        return Err("the viewer's target is not a number");
+    }
+    if !((0.0..=1.0).contains(&t.0) && (0.0..=1.0).contains(&t.1)) {
+        return Err("the viewer's target is outside the game's picture");
+    }
+    let axis = |f: f64, origin: i32, size: i64| -> i64 {
+        i64::from(origin) + ((f * size as f64).floor() as i64).min(size - 1)
+    };
+    let (width, height) = (client.width(), client.height());
+    if width <= 0 || height <= 0 {
+        return Err("the game's client area is empty");
+    }
+    let px = axis(t.0, client.left, width);
+    let py = axis(t.1, client.top, height);
+    if !(0..i64::from(screen.0)).contains(&px) || !(0..i64::from(screen.1)).contains(&py) {
+        return Err("the pixel is off the primary monitor");
+    }
+    Ok((px as i32, py as i32))
+}
+
+/// Whether `SendInput` can click the game's window: not when it runs elevated and the agent does not
+/// (UIPI takes the events, answers success and drops them). Unknown either way: tried.
+pub(crate) fn sendinput_reaches(game: &ForegroundInfo) -> Result<(), &'static str> {
+    match (&game.elevated, &game.agent_elevated) {
+        (Ok(true), Ok(false)) => {
+            Err("the game runs elevated and the agent does not: SendInput would be dropped (UIPI)")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The guard: one per process-wide backend, asked for every event of every session.
@@ -339,6 +432,15 @@ pub(crate) struct GameGuard {
     lines: LineGate,
     /// A press dropped at [`MAX_GUARD_KEYS`] has been warned about since the guard's reset.
     cap_warned: bool,
+    /// The armed spell ([`Look::Away`]): the window that kept the front through a refused attempt.
+    armed: Option<usize>,
+    /// When the spell's last activation click was decided: its rate, and what the game's return
+    /// is put down to.
+    activated_at: Option<Instant>,
+    /// The activation click the event being judged asks for, for [`Admission::activate`].
+    activation: Option<Activation>,
+    /// The viewer's last pointer target (`m`, or `r` with `x`, `y`): where an activation click goes.
+    target: Option<(f64, f64)>,
 }
 
 impl GameGuard {
@@ -390,6 +492,17 @@ impl GameGuard {
         self.keys.flush_if_due(now);
         let (look, release) = self.look(scope, host, now);
         self.alt_f4 = false;
+        // The viewer's pointer target, whatever happens to the move: an activation click's pixel.
+        match event {
+            InputMessage::Move { x, y }
+            | InputMessage::Rel {
+                x: Some(x),
+                y: Some(y),
+                ..
+            } => self.target = Some((*x, *y)),
+            _ => {}
+        }
+        self.activation = None;
         let admitted = self.decide(event, look, scope.game_window(), host, now);
         if let InputMessage::Key { d, code, src, .. } = event {
             // After the guard's word, so the key log holds what reached the PC.
@@ -401,6 +514,7 @@ impl GameGuard {
         Admission {
             release,
             event: admitted,
+            activate: self.activation.take(),
         }
     }
 
@@ -446,14 +560,31 @@ impl GameGuard {
                         game: window.hwnd,
                         game_pid: window.pid,
                         foreground,
+                        // Armed: an attempt was refused while this very window had the front.
+                        armed: self.armed == Some(foreground),
                     }
                 }
             }
         };
+        // The spell ends when the window it was armed on loses the front: the game has it, it is
+        // not shown, the mode is off, or another window took it.
+        if !matches!(next, Look::Away { armed: true, .. }) {
+            self.armed = None;
+        }
         let before = self.look.replace(next);
         if before == Some(next) {
             return (next, false);
         }
+        // Into or out of game-only mode: the pointer's target was of another picture.
+        if matches!(next, Look::Desktop) || matches!(before, Some(Look::Desktop)) {
+            self.target = None;
+        }
+        // The spell's last activation click, for the game's return; the next spell starts afresh.
+        let activated_at = if matches!(before, Some(Look::Away { armed: true, .. })) {
+            self.activated_at.take()
+        } else {
+            None
+        };
         let release = match (before, next) {
             (_, Look::Desktop) | (None, _) => false,
             (Some(Look::Desktop), _) => true,
@@ -484,6 +615,26 @@ impl GameGuard {
         };
         if let Some(why) = stops {
             self.keys.dump(why, now);
+        }
+        if let (
+            Some(Look::Away {
+                armed: true,
+                foreground,
+                ..
+            }),
+            Look::Focused { game },
+        ) = (before, next)
+        {
+            tracing::debug!(
+                window = %format!("{game:#x}"),
+                was_in_front = %format!("{foreground:#x}"),
+                after_activation = activated_at.is_some(),
+                click_ms_before = activated_at
+                    .map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64),
+                "game input: the game has the front again after an armed spell \
+                 (after_activation=false: something else brought it — the helper, someone at the \
+                 PC)"
+            );
         }
         (next, release)
     }
@@ -520,6 +671,7 @@ impl GameGuard {
                 game,
                 game_pid,
                 foreground,
+                armed,
             } => {
                 if foreground == 0 {
                     tracing::debug!(
@@ -565,6 +717,7 @@ impl GameGuard {
                         pid = info.pid,
                         exe = %info.exe.clone().unwrap_or_else(|e| format!("unknown ({e})")),
                         elevated = %info.elevated.clone().map_or_else(|e| format!("unknown ({e})"), |v| v.to_string()),
+                        armed,
                         released,
                         held_keys = held.keys,
                         held_mods = held.mods,
@@ -572,8 +725,10 @@ impl GameGuard {
                         held_ours = %held.ours,
                         held_other = held.other,
                         "game input: another window has the front: input is held back (releases \
-                         pass) until the game has it again (released=true: releases were sent \
-                         whether or not anything was held; held_* say what was)"
+                         pass) until the game has it again; armed=true: the game was asked back \
+                         and this window kept the front, so a press asks for an activation click \
+                         (released=true: releases were sent whether or not anything was held; \
+                         held_* say what was)"
                     );
                 }
             }
@@ -613,9 +768,22 @@ impl GameGuard {
             _ => match (look, window) {
                 (Look::Desktop, _) => self.desktop(event, host, now),
                 (Look::Focused { .. }, Some(window)) => self.focused(event, window, host, now),
-                (Look::Away { game, .. }, _) => {
-                    self.try_focus(game, host, now);
-                    self.hold_back(event, "another window has the front", now);
+                (
+                    Look::Away {
+                        game,
+                        game_pid,
+                        foreground,
+                        armed,
+                    },
+                    window,
+                ) => {
+                    self.try_focus(game, game_pid, foreground, host, now);
+                    match (event, window) {
+                        (InputMessage::Down { b }, Some(window)) if armed => {
+                            self.activation(*b, window, host, now);
+                        }
+                        _ => self.hold_back(event, "another window has the front", now),
+                    }
                     None
                 }
                 (Look::NotShown { state }, _) => {
@@ -784,6 +952,89 @@ impl GameGuard {
         }
     }
 
+    /// A press of the viewer's while armed ([`Look::Away`]): it goes nowhere, and when the pixel of
+    /// the viewer's last target qualifies — on the primary monitor, in the game's client area, under
+    /// it a window of the game's by the press rule ([`on_game`]) — and none came in the last
+    /// [`ACTIVATION_EVERY`], one activation click there ([`Admission::activate`]). Every decision
+    /// said, line-gated.
+    fn activation(
+        &mut self,
+        button: u8,
+        window: GameInputWindow,
+        host: &mut dyn GuardHost,
+        now: Instant,
+    ) {
+        self.stats.since.get_or_insert(now);
+        let decided = (|| {
+            if let Some(at) = self
+                .activated_at
+                .filter(|at| now.saturating_duration_since(*at) < ACTIVATION_EVERY)
+            {
+                return Err(format!(
+                    "one came {} ms ago (at most one a second)",
+                    now.saturating_duration_since(at).as_millis()
+                ));
+            }
+            let target = self
+                .target
+                .ok_or_else(|| "no target of the viewer's pointer yet".to_owned())?;
+            let screen = host.screen();
+            let (px, py) =
+                activation_pixel(target, window.client, screen).map_err(str::to_owned)?;
+            let at = host
+                .window_at(px, py)
+                .map_err(|e| format!("the window at {px},{py} cannot be read ({e})"))?;
+            if !on_game(&at, window.pid) {
+                return Err(format!(
+                    "under {px},{py} is window {:#x} (top-level {:#x}, pid {}), not the game's \
+                     (pid {})",
+                    at.hwnd, at.root, at.root_pid, window.pid
+                ));
+            }
+            Ok((
+                Activation {
+                    button,
+                    px,
+                    py,
+                    screen,
+                    game: window.hwnd,
+                },
+                at,
+            ))
+        })();
+        let said = self.lines.admit(now, "activation");
+        match decided {
+            Ok((activation, at)) => {
+                self.stats.activations += 1;
+                self.activated_at = Some(now);
+                self.activation = Some(activation);
+                if said {
+                    tracing::debug!(
+                        button,
+                        px = activation.px,
+                        py = activation.py,
+                        window = %format!("{:#x}", at.hwnd),
+                        top_level = %format!("{:#x}", at.root),
+                        "game input: activation click: the viewer's press asks for the game; one \
+                         click of the agent's at the viewer's target, the game's window under it"
+                    );
+                }
+            }
+            Err(why) => {
+                self.stats.activations_refused += 1;
+                if said {
+                    tracing::debug!(
+                        button,
+                        %why,
+                        "game input: no activation click for the viewer's press"
+                    );
+                } else {
+                    tracing::trace!(button, "game input: no activation click");
+                }
+            }
+        }
+    }
+
     fn game_key_down(
         &mut self,
         code: &String,
@@ -874,7 +1125,7 @@ impl GameGuard {
             return None;
         };
         match host.window_at(px, py) {
-            Ok(at) if at.pid == window.pid || at.root_pid == window.pid => {
+            Ok(at) if on_game(&at, window.pid) => {
                 tracing::trace!(button, px, py, "game input: press onto the game's window");
                 Some(event.clone())
             }
@@ -922,7 +1173,16 @@ impl GameGuard {
 
     /// Ask the game back to the front — on the viewer's input only, at most every
     /// [`FOCUS_ATTEMPT_EVERY`].
-    fn try_focus(&mut self, game: usize, host: &mut dyn GuardHost, now: Instant) {
+    /// Refused while `foreground` keeps the front: the guard is armed for an activation click on
+    /// that window, taken in by the next look.
+    fn try_focus(
+        &mut self,
+        game: usize,
+        game_pid: u32,
+        foreground: usize,
+        host: &mut dyn GuardHost,
+        now: Instant,
+    ) {
         if self
             .attempted_at
             .is_some_and(|at| now.saturating_duration_since(at) < FOCUS_ATTEMPT_EVERY)
@@ -937,7 +1197,7 @@ impl GameGuard {
         if in_front {
             self.stats.focus_won += 1;
         }
-        match answer {
+        match &answer {
             Ok(accepted) => tracing::debug!(
                 window = %format!("{game:#x}"),
                 accepted,
@@ -952,6 +1212,35 @@ impl GameGuard {
                 "game input: SetForegroundWindow on the game's window failed"
             ),
         }
+        if in_front || self.armed == Some(foreground) {
+            return;
+        }
+        // Never on no window (the secure desktop, the lock screen, a desktop switch) nor on a window
+        // of the game's own process (its dialog is not the picture the viewer sees).
+        let unarmed = if foreground == 0 {
+            Some("no window has the front (the secure desktop, the lock screen or a switch)")
+        } else if host.window_pid(foreground) == game_pid {
+            Some("a window of the game's own process has the front")
+        } else {
+            None
+        };
+        if let Some(why) = unarmed {
+            tracing::debug!(
+                game = %format!("{game:#x}"),
+                foreground = %format!("{foreground:#x}"),
+                why,
+                "game input: not armed for an activation click"
+            );
+            return;
+        }
+        tracing::debug!(
+            game = %format!("{game:#x}"),
+            foreground = %format!("{foreground:#x}"),
+            refused = ?answer,
+            "game input: armed for an activation click: the game was not brought back while this \
+             window has the front (taken in by the next look)"
+        );
+        self.armed = Some(foreground);
     }
 
     /// An event dropped because input may not go now. A press is said at `debug` (presses are
@@ -1014,6 +1303,8 @@ impl GameGuard {
             other_dropped = s.other_dropped,
             focus_attempts = s.focus_attempts,
             focus_won = s.focus_won,
+            activations = s.activations,
+            activations_refused = s.activations_refused,
             releases = s.releases,
             "game input"
         );

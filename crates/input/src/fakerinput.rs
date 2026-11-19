@@ -61,7 +61,7 @@ use super::cursor_sync::Space;
 use super::cursor_sync::{CursorLook, Elevation, Plan, RelEvent, RelPath, WheelTally};
 use super::game_guard::Reach;
 #[cfg(windows)]
-use super::game_guard::{system::SystemGuard, GameGuard, GuardHost};
+use super::game_guard::{sendinput_reaches, system::SystemGuard, Activation, GameGuard, GuardHost};
 #[cfg(windows)]
 use super::reach::{Landing, Press as FreshPress, ReachWatch};
 use super::wheel::{HID_PIXELS_PER_NOTCH, PIXELS_PER_NOTCH, STEPPED_CARRY_PAUSE};
@@ -140,8 +140,9 @@ fn mouse(buttons: u8, x: i16, y: i16, wheel: i8, pan: i8) -> Report {
 /// FakerInput's absolute mouse report (`FakerInputAbsMouseReport`: id 4, buttons, X and Y as
 /// little-endian u16 over `LOGICAL 0..32767`, wheel — upstream `Device.c`, `fakerinputcommon.h`). A
 /// separate collection: to Windows a second mouse with its own buttons, so its buttons and wheel are
-/// always 0 here — the buttons stay on the relative report, and the cursor-sync planner moves
-/// absolutely only while none is held.
+/// always 0 here — the buttons stay on the relative report, held through an absolute move (the
+/// cursor-sync planner moves absolutely while one is held only to bring a cursor back from another
+/// monitor; an `m` during a drag is absolute too).
 fn absolute_mouse(x: u16, y: u16) -> Report {
     let [xl, xh] = x.to_le_bytes();
     let [yl, yh] = y.to_le_bytes();
@@ -885,6 +886,9 @@ const POSITION_HID: &str =
 /// the desktop game mode's click is a point move, then `d`). the probe saw a report show 1.6–1.8 ms after
 /// its write; this is several of those, and half a frame of the viewer's.
 const ORDER_WAIT_MAX: Duration = Duration::from_millis(8);
+
+/// Why an activation click does not go through the driver: the caller then clicks by `SendInput`.
+const DEVICE_UNUSABLE: &str = "the device is unusable";
 /// How often the waiting button looks again (the worker's wait rounds it up to the timer's 1 ms
 /// while a session raises the resolution).
 const ORDER_POLL: Duration = Duration::from_micros(500);
@@ -1046,6 +1050,8 @@ pub(crate) trait Host: Send {
     /// The foreground window (`GetForegroundWindow`; 0 for none). In game-only mode the worker asks
     /// before everything it sends unattended.
     fn foreground(&mut self) -> usize;
+    /// The monotonic clock: an activation click's wait for the cursor (the tests' is virtual).
+    fn now(&mut self) -> Instant;
     fn sendinput(&self) -> &dyn SendInputPath;
     fn keyboard(&mut self) -> &mut dyn Keyboard;
     /// Wait, on the calling thread. Only a queue sent at once without its worker does (once, for a
@@ -2337,6 +2343,72 @@ impl<D: Driver, H: Host> HidRuntime<D, H> {
         }
     }
 
+    /// An activation click of game-only mode (`game_guard::Activation`) through the driver, at once
+    /// on the caller's thread: the absolute report onto `px`, `py` of the `width`×`height` primary
+    /// monitor, then — only once `GetCursorPos` shows exactly that pixel, within [`ORDER_WAIT_MAX`]
+    /// of a monotonic deadline — `button` down and up, by the usual reports. Nothing queued,
+    /// nothing held and HID allowed on this desktop, or no click; a device that is unusable makes
+    /// none ([`DEVICE_UNUSABLE`]: the caller clicks by `SendInput`). A report that fails goes
+    /// through the usual recovery ([`Self::recover`]) and the click stops. `Err`: why no click.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn activation_click(
+        &mut self,
+        button: u8,
+        (px, py): (i32, i32),
+        (width, height): (i32, i32),
+        now: Instant,
+    ) -> Result<(), String> {
+        if self.broken {
+            return Err(DEVICE_UNUSABLE.to_owned());
+        }
+        if self.typist.has_work() {
+            return Err("input is queued on the device".to_owned());
+        }
+        if self.state.mouse.buttons() != 0 {
+            return Err("a mouse button is held on the device".to_owned());
+        }
+        if self.target_now(now) != Target::Allowed {
+            return Err("the driver may not drive this desktop now".to_owned());
+        }
+        if let Err(error) = self.state.position(px, py, width, height) {
+            self.recover();
+            return Err(format!("the absolute report failed ({error})"));
+        }
+        let deadline = self.host.now() + ORDER_WAIT_MAX;
+        loop {
+            let cursor = self.host.cursor_pos();
+            if cursor == Ok((px, py)) {
+                break;
+            }
+            let at = self.host.now();
+            if at >= deadline {
+                return Err(match cursor {
+                    Ok((cx, cy)) => format!(
+                        "the cursor did not show {px},{py} within {} ms (it is at {cx},{cy})",
+                        ORDER_WAIT_MAX.as_millis()
+                    ),
+                    Err(e) => format!("the cursor is unreadable ({e})"),
+                });
+            }
+            self.host.pause(ORDER_POLL.min(deadline - at));
+        }
+        let clicked = self
+            .state
+            .button(button, true)
+            .and_then(|()| self.state.button(button, false));
+        if let Err(error) = clicked {
+            let buttons = self.state.mouse.buttons();
+            self.recover();
+            return Err(format!(
+                "a button report failed ({error}); the usual recovery ran (buttons held before \
+                 it: {buttons:#04b}, after: {:#04b}, device unusable: {})",
+                self.state.mouse.buttons(),
+                self.broken
+            ));
+        }
+        Ok(())
+    }
+
     /// `ra`, `release_all`, the session's end: drop what is queued (counted) and release everything
     /// held on both paths.
     fn release_all(&mut self) {
@@ -2389,6 +2461,10 @@ impl Host for System {
     fn foreground(&mut self) -> usize {
         // SAFETY: plain call.
         unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as usize
+    }
+
+    fn now(&mut self) -> Instant {
+        Instant::now()
     }
 
     fn sendinput(&self) -> &dyn SendInputPath {
@@ -2561,6 +2637,21 @@ impl Drop for WorkerExit<'_> {
 
 #[cfg(windows)]
 impl FakerInputInjector {
+    /// An activation click through the driver ([`HidRuntime::activation_click`]), under the
+    /// router's lock.
+    pub(crate) fn activation_click(
+        &self,
+        button: u8,
+        pixel: (i32, i32),
+        screen: (i32, i32),
+    ) -> Result<(), String> {
+        let mut rt = lock(&self.shared.rt);
+        let changes = Self::changes(&rt);
+        let result = rt.activation_click(button, pixel, screen, Instant::now());
+        self.after(&mut rt, changes);
+        result
+    }
+
     /// One event, with where the typing worker may send what it queues ([`QueueGate`]): in
     /// game-only mode, game text and the input queued behind it go only while the game's window
     /// has the front.
@@ -2774,6 +2865,59 @@ impl SessionInputBackend {
         }
     }
 
+    /// The guard's activation click (`game_guard::Activation`) — the one place it is made, at once:
+    /// through the driver when it is open and usable ([`FakerInputInjector::activation_click`]),
+    /// else by one `SendInput` call ([`SendInputInjector::activation_click`]) — but not into a game
+    /// that runs elevated while the agent does not (UIPI would drop it). Said with its path and
+    /// result. Under the slot's lock; the driver's wait for the cursor is at most
+    /// [`ORDER_WAIT_MAX`].
+    fn activation_click(&self, slot: &HidSlot, activation: Activation) {
+        let Activation {
+            button,
+            px,
+            py,
+            screen,
+            game,
+        } = activation;
+        let driver = slot
+            .backend
+            .as_ref()
+            .map(|backend| backend.activation_click(button, (px, py), screen));
+        let (path, result) = match driver {
+            Some(result) if !matches!(&result, Err(e) if e == DEVICE_UNUSABLE) => {
+                ("driver", result)
+            }
+            _ => {
+                use super::cursor_sync::CursorWorld;
+                // The game's process, opened with limited information for its elevation only.
+                let info = super::cursor_sync::system::SystemCursor.describe_foreground(game);
+                let result = sendinput_reaches(&info)
+                    .map_err(str::to_owned)
+                    .and_then(|()| self.fallback.activation_click(button, px, py, screen));
+                ("sendinput", result)
+            }
+        };
+        match result {
+            Ok(()) => tracing::debug!(
+                button,
+                px,
+                py,
+                path,
+                game = %format!("{game:#x}"),
+                "game input: activation click made"
+            ),
+            Err(why) => tracing::debug!(
+                button,
+                px,
+                py,
+                path,
+                game = %format!("{game:#x}"),
+                %why,
+                "game input: activation click not made"
+            ),
+        }
+    }
+
     /// Release everything held on both paths (the slot's lock held by the caller).
     fn release_both(&self, slot: &HidSlot) {
         if let Some(backend) = slot.backend.as_ref() {
@@ -2931,16 +3075,17 @@ impl InputInjector for SessionInputBackend {
             }
         }
         let mut slot = lock(&self.hid);
-        let admission = {
-            let mut host = SystemGuard {
-                fallback: &self.fallback,
-                driver_open: slot.backend.is_some(),
-                now,
-            };
-            lock(&self.guard).admit(event, scope, &mut host, now)
+        let mut host = SystemGuard {
+            fallback: &self.fallback,
+            driver_open: slot.backend.is_some(),
+            now,
         };
+        let admission = lock(&self.guard).admit(event, scope, &mut host, now);
         if admission.release {
             self.release_both(&slot);
+        }
+        if let Some(activation) = admission.activate {
+            self.activation_click(&slot, activation);
         }
         let Some(event) = admission.event else {
             return Ok(());
@@ -3081,14 +3226,12 @@ impl InputInjector for SessionInputBackend {
     fn game_focus(&self, game: &GameScope) -> GameFocus {
         let now = Instant::now();
         let slot = lock(&self.hid);
-        let (focus, release) = {
-            let mut host = SystemGuard {
-                fallback: &self.fallback,
-                driver_open: slot.backend.is_some(),
-                now,
-            };
-            lock(&self.guard).watch(game, &mut host, now)
+        let mut host = SystemGuard {
+            fallback: &self.fallback,
+            driver_open: slot.backend.is_some(),
+            now,
         };
+        let (focus, release) = lock(&self.guard).watch(game, &mut host, now);
         if release {
             self.release_both(&slot);
         }

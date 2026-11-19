@@ -1,7 +1,9 @@
 //! Viewer device keys against the contract: the constants and vocabularies of `viewer-keys.ts` and
 //! `metrics.ts`, the `ks` message against the emitted JSON Schema, strict base64url against
 //! `vectors/viewer-keys/encoding.json`, and every device-key golden fixture against the agent's own
-//! form checks and limits (`afklink_protocol::viewer_keys`).
+//! form checks and limits (`afklink_protocol::viewer_keys`). Parties, which stand on the keys, the
+//! same way: the limits and lists of `party.ts`, the party messages' schemas, and every party fixture
+//! against `afklink_protocol::party`.
 //!
 //! The round trip of those fixtures is `tests/fixtures.rs`; this file checks what a round trip
 //! cannot see — that a value the contract emits is one the agent's checks accept, and that the
@@ -15,11 +17,14 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use afklink_protocol::party;
 use afklink_protocol::viewer_keys::{
     self as vk, b64url_decode, bytes, check_proof_wire, check_viewer_key_wire, is_b64url,
     is_device_desc, is_nonce_batch, KeyAdmit, KeyEndReason, KeyMode, KsVerdict,
 };
-use afklink_protocol::{AgentDataMessage, AgentToServer, ServerToAgent};
+use afklink_protocol::{
+    AgentDataMessage, AgentToServer, PartyAckOp, PartyAckResult, ServerToAgent,
+};
 use serde_json::Value;
 
 fn protocol_root() -> PathBuf {
@@ -77,12 +82,18 @@ fn ts_number(source: &str, name: &str) -> u64 {
         .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
-/// The words between `[` and the next `]` after `from`, a `...NAME` spread expanded from `source`.
+/// The words between `[` and the next `]` after `from`, a `...NAME` spread expanded from `source`;
+/// a `//` comment between them (with no `]` in it) is not a word.
 fn words_at(source: &str, from: usize) -> Vec<String> {
     let rest = &source[from..];
     let open = rest.find('[').expect("an opening bracket");
     let close = rest.find(']').expect("a closing bracket");
-    rest[open + 1..close]
+    let uncommented: String = rest[open + 1..close]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    uncommented
         .split(',')
         .map(str::trim)
         .filter(|w| !w.is_empty())
@@ -461,4 +472,241 @@ fn every_device_key_fixture_passes_the_agents_checks() {
         with_admit && with_detail,
         "need a ks with an admit and one with a detail"
     );
+}
+
+/* --- «Пати» (docs/design/party-protocol.md) ------------------------------------------------------ */
+
+/// One message of an emitted schema (`oneOf`), by its `type`.
+fn message_schema(file: &str, kind: &str) -> Value {
+    let schema = json(&["schema", file]);
+    schema["oneOf"]
+        .as_array()
+        .expect("the schema is a oneOf")
+        .iter()
+        .find(|v| v["properties"]["type"]["const"] == kind)
+        .unwrap_or_else(|| panic!("{file} has no {kind}"))
+        .clone()
+}
+
+fn required(message: &Value) -> BTreeSet<String> {
+    serde_json::from_value(message["required"].clone()).expect("required is a list")
+}
+
+/// The party limits and closed lists the agent holds to are the contract's (`party.ts`), and so are
+/// the shapes of the four party messages as the contract emits their schema.
+#[test]
+fn the_party_constants_and_lists_are_the_contracts() {
+    let src = read(&["src", "party.ts"]);
+    let usize_of = |name| usize::try_from(ts_number(&src, name)).expect("fits");
+    for (name, ours) in [
+        ("PARTY_ID_BYTES", party::PARTY_ID_BYTES),
+        ("PARTY_NAME_MAX", party::PARTY_NAME_MAX),
+        ("PARTY_LEADER_NAME_MAX", party::PARTY_LEADER_NAME_MAX),
+        (
+            "PARTY_LEADER_USERNAME_MAX",
+            party::PARTY_LEADER_USERNAME_MAX,
+        ),
+        ("PARTY_DELEGATIONS_MAX", party::PARTY_DELEGATIONS_MAX),
+    ] {
+        assert_eq!(usize_of(name), ours, "{name}");
+    }
+    assert_eq!(
+        ts_number(&src, "PARTY_STATEMENT_VERSION"),
+        u64::from(party::PARTY_STATEMENT_VERSION)
+    );
+    // The statement's bound is the keys' grant bound, by name.
+    assert!(src.contains("export const PARTY_STATEMENT_MAX_BYTES = GRANT_MAX_BYTES;"));
+    assert_eq!(
+        ts_number(&read(&["src", "viewer-keys.ts"]), "GRANT_MAX_BYTES"),
+        u64::try_from(party::PARTY_STATEMENT_MAX_BYTES).expect("fits")
+    );
+    let ops = strings(&PartyAckOp::ALL, PartyAckOp::as_str);
+    let results = strings(&PartyAckResult::ALL, PartyAckResult::as_str);
+    assert_eq!(ts_list(&src, "PARTY_ACK_OPS"), ops);
+    assert_eq!(ts_list(&src, "PARTY_ACK_RESULTS"), results);
+
+    let ack = message_schema("agent-to-server.json", "party_ack");
+    let enum_of = |name: &str| -> Vec<String> {
+        serde_json::from_value(ack["properties"][name]["enum"].clone()).expect("an enum")
+    };
+    assert_eq!(enum_of("op"), ops);
+    assert_eq!(enum_of("result"), results);
+    assert_eq!(
+        required(&ack),
+        ["type", "party_id", "op", "result"]
+            .map(String::from)
+            .into()
+    );
+    let id_pattern = "^[A-Za-z0-9_-]{21}[AQgw]$";
+    assert_eq!(ack["properties"]["party_id"]["pattern"], id_pattern);
+    let state = message_schema("agent-to-server.json", "party_state");
+    let parties = &state["properties"]["parties"];
+    assert_eq!(
+        parties["maxItems"].as_u64(),
+        Some(u64::try_from(party::PARTY_DELEGATIONS_MAX).expect("fits"))
+    );
+    assert_eq!(
+        required(&state),
+        ["type", "parties"].map(String::from).into()
+    );
+    assert_eq!(
+        required(&parties["items"]),
+        ["party_id", "leader"].map(String::from).into()
+    );
+    assert_eq!(
+        parties["items"]["properties"]["party_id"]["pattern"],
+        id_pattern
+    );
+
+    let ready = message_schema("server-to-agent.json", "agent_ready");
+    assert_eq!(ready["properties"]["party"]["const"], true);
+    assert!(!required(&ready).contains("party"), "party is optional");
+    let join = message_schema("server-to-agent.json", "party_join");
+    assert_eq!(required(&join), ["type", "join"].map(String::from).into());
+    assert_eq!(join["properties"]["join"]["type"], "object");
+    let leave = message_schema("server-to-agent.json", "party_leave");
+    assert_eq!(
+        required(&leave),
+        ["type", "party_id"].map(String::from).into()
+    );
+    assert_eq!(leave["properties"]["party_id"]["pattern"], id_pattern);
+
+    // The id's pattern: 21 free characters and a last one with its unused bits zero. The agent's
+    // strict decoder agrees on every possible last character.
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for last in alphabet.chars() {
+        let id = format!("{}{last}", "x".repeat(21));
+        assert_eq!(party::is_party_id(&id), "AQgw".contains(last), "{id}");
+    }
+}
+
+/// Every party fixture the agent receives is of the form its checks take and within its limits, and
+/// what it sends passes the checks it runs before sending. The member's offer is the viewer's fixture
+/// (`sdp_proof_party`): the server relays its `proof` unchanged, so it is what reaches the agent.
+#[test]
+fn every_party_fixture_passes_the_agents_checks() {
+    let (mut joins, mut leaves, mut ready) = (0, 0, 0);
+    for file in group("server-to-agent") {
+        let msg: ServerToAgent =
+            serde_json::from_value(fixture(&file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        match msg {
+            ServerToAgent::PartyJoin { join } => {
+                assert_eq!(party::check_party_statement_wire(&join), Ok(()), "{file}");
+                let text = |f: &str| join[f].as_str().unwrap_or_else(|| panic!("{file}: {f}"));
+                assert_eq!(
+                    join["v"].as_u64(),
+                    Some(u64::from(party::PARTY_STATEMENT_VERSION))
+                );
+                assert!(party::is_party_id(text("party_id")), "{file}");
+                assert!(party::is_party_name(text("party")), "{file}");
+                assert!(vk::is_grant_token(text("grant_token")), "{file}");
+                assert!(is_b64url(text("by"), bytes::KEY_ID), "{file}");
+                assert!(is_b64url(text("sig"), bytes::SIGNATURE), "{file}");
+                let leader = &join["leader"];
+                assert!(
+                    leader["spki"]
+                        .as_str()
+                        .is_some_and(|s| is_b64url(s, bytes::SPKI)),
+                    "{file}"
+                );
+                assert!(leader["telegram_user_id"].as_u64().is_some_and(|n| n >= 1));
+                for (f, max) in [
+                    ("name", party::PARTY_LEADER_NAME_MAX),
+                    ("username", party::PARTY_LEADER_USERNAME_MAX),
+                ] {
+                    assert!(
+                        leader[f].is_null()
+                            || leader[f].as_str().is_some_and(|s| s.chars().count() <= max),
+                        "{file}: leader.{f}"
+                    );
+                }
+                joins += 1;
+            }
+            ServerToAgent::PartyLeave { party_id } => {
+                assert!(party::is_party_id(&party_id), "{file}");
+                leaves += 1;
+            }
+            ServerToAgent::AgentReady {
+                party: Some(takes), ..
+            } => {
+                assert!(takes, "{file}: the contract's literal true");
+                ready += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        joins >= 1 && leaves >= 1 && ready >= 1,
+        "{joins} joins, {leaves} leaves, {ready} agent_ready with party"
+    );
+
+    let (mut acks, mut states) = (0, 0);
+    for file in group("agent-to-server") {
+        let msg: AgentToServer =
+            serde_json::from_value(fixture(&file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        match msg {
+            AgentToServer::PartyAck { party_id, .. } => {
+                assert!(party::is_party_id(&party_id), "{file}");
+                acks += 1;
+            }
+            AgentToServer::PartyState { parties } => {
+                assert_eq!(party::check_party_state(&parties), Ok(()), "{file}");
+                states += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(acks >= 2 && states >= 2, "{acks} acks, {states} states");
+
+    // The tree may hold only this group's offer fixtures, so only those are read.
+    let offers: Vec<String> = group("viewer-to-server")
+        .into_iter()
+        .filter(|f| f.rsplit('/').next().is_some_and(|n| n.starts_with("sdp")))
+        .collect();
+    assert!(!offers.is_empty(), "the manifest lists no offer fixtures");
+    let mut grants = 0;
+    for file in offers {
+        let raw = fixture(&file);
+        if raw["type"] != "sdp" {
+            continue;
+        }
+        let Some(proof) = raw.get("proof") else {
+            continue;
+        };
+        assert_eq!(check_proof_wire(proof), Ok(()), "{file}");
+        for admit in proof["admit"].as_array().map_or(&[][..], Vec::as_slice) {
+            if KeyAdmit::from_admit_kind(admit["kind"].as_str().unwrap_or(""))
+                != Some(KeyAdmit::Party)
+            {
+                continue;
+            }
+            assert!(
+                admit.get("invite").is_none(),
+                "{file}: a party grant has no invite"
+            );
+            let grant = &admit["grant"];
+            assert_eq!(party::check_party_statement_wire(grant), Ok(()), "{file}");
+            let text = |f: &str| grant[f].as_str().unwrap_or_else(|| panic!("{file}: {f}"));
+            assert_eq!(
+                grant["v"].as_u64(),
+                Some(u64::from(vk::VIEWER_KEYS_VERSION))
+            );
+            assert_eq!(text("role"), "guest", "{file}");
+            assert_eq!(
+                text("key_id"),
+                proof["key_id"],
+                "{file}: the grant is for this key"
+            );
+            assert!(party::is_party_id(text("party_id")), "{file}");
+            assert!(is_b64url(text("grant_id"), bytes::ID), "{file}");
+            assert!(vk::is_grant_token(text("grant_token")), "{file}");
+            assert!(is_b64url(text("by"), bytes::KEY_ID), "{file}");
+            assert!(is_b64url(text("sig"), bytes::SIGNATURE), "{file}");
+            for f in ["name", "username"] {
+                assert!(grant[f].is_null() || grant[f].is_string(), "{file}: {f}");
+            }
+            grants += 1;
+        }
+    }
+    assert!(grants >= 1, "need a member's offer with a party grant");
 }

@@ -13,9 +13,11 @@
 //! 16–25 s; a session may end, and another begin, in that time. So every action — the launch,
 //! `WM_CLOSE`, TerminateProcess, bringing the window to the front — reads the signal again right
 //! before it ([`Desktop::signal`]); not set any more, the action is not done, the signal's going off
-//! is taken in at once (the counts stop with it) and the rest of the tick does nothing. A count
-//! toward closing the game counts only time the helper watched the signal: two ticks' reads more
-//! than [`SIGNAL_GAP_MAX`] apart, and it starts over. A slow tick is logged ([`slow_tick`]).
+//! is taken in at once (the counts stop with it) and the rest of the tick does nothing. The count
+//! toward closing a game whose window went, and a closing begun, count only time the helper
+//! watched the signal: two ticks' reads more than [`SIGNAL_GAP_MAX`] apart, and they start over.
+//! The count after the helper's launch runs on the clock from the launch («A launch's fate»). A
+//! slow tick is logged ([`slow_tick`]).
 //!
 //! # A launch's fate
 //!
@@ -35,7 +37,31 @@
 //! stays pending and nothing is launched. A process of the game in that time, and the launch goes
 //! on; none, and it is a failed start. There is no wait for a game that is its own launch exe, a
 //! window exe's process seen and then gone, a game the helper closed as hung, or a launch
-//! [`LAUNCHER_WAIT_MAX`] old. The signal off ends the wait, no failed start counted.
+//! [`LAUNCHER_WAIT_MAX`] old. The signal off pauses the wait; the next session goes on with it,
+//! counted from when the loader went (below).
+//!
+//! A session's end does not end a launch whose window has not come: a viewer replaced by the next
+//! one turns the signal off for a second or two, and that may be right after the helper's launch.
+//! The next session keeps such a launch, unless its own session gave up, and the one after it too
+//! while its window has not come: pending, its counts going on. Those are anchored on the launch,
+//! on the clock, and neither a new session nor a slow tick restarts them — it is the helper's own
+//! launch and its window never came, so the lost window's restart (someone at the PC may be at it)
+//! does not apply, and viewers coming and going every minute cannot keep it from its count. It
+//! stays the launch while one of the game's processes it was last seen as runs; during its
+//! loader's handover, at most [`HANDOVER_WITHIN`] after the loader went, any process of the game
+//! counts as its; and while it has seen only its loader run, a process of the window exe counts as
+//! its, since the loader may have handed over and exited while no session was looking. A game
+//! started by hand then — the helper's loader handed over unseen, or died — is taken for the
+//! launch. Other processes — the game started by hand between sessions — end it, and
+//! nothing is closed for it. It is not the new session's launch: its end, or its closing as hung,
+//! is never a failed start, and the launch after it comes at once, as the session's first. After a
+//! long stretch with no session the next session's first look may find its counts long over: a
+//! game of that launch without its window is closed then — a loader that exited in the gap gets
+//! no [`HANDOVER_WITHIN`] after it — and a loader still running past
+//! [`LAUNCHER_WAIT_MAX`] is given up on then, with the failed-launch mark. A game that always hangs
+//! without its window, under sessions each shorter than [`WINDOW_WITHIN`], is so closed and
+//! launched again about every two minutes and never gets the mark. The launch is kept in the
+//! helper's memory only, not in `state.json`: a helper restarted forgets it.
 //!
 //! # A game that hangs
 //!
@@ -46,14 +72,17 @@
 //! - its window was up and has been gone [`WINDOW_LOST_AFTER`] while the process that showed it
 //!   still runs — up in this session or in an earlier one of this helper's run, so a session
 //!   started again after the crash still finds it; or
-//! - [`WINDOW_WITHIN`] after the helper's launch no window has come at all;
+//! - [`WINDOW_WITHIN`] after the helper's launch no window has come at all — counted from the
+//!   launch across sessions (above); a game the helper did not launch is never counted so;
 //!
 //! in both only while no loader is starting the game (it may be patching) and [`HANDOVER_WITHIN`]
 //! after the last one exited. It then asks the game's windows to close (`WM_CLOSE`), waits up to
 //! [`CLOSE_GRACE`] and ends what is left with TerminateProcess — processes whose path cannot be read
 //! are never touched. The usual restart policy follows. A loader still running
 //! [`LAUNCHER_WAIT_MAX`] after the helper's launch with no window ever is not closed: the helper
-//! gives up until the next session.
+//! gives up until the next session. The closing, the giving up and the 5-minute summary say what
+//! the game's processes show instead of its window: the class and title of each of their visible
+//! top-level windows.
 //!
 //! # «Игра не запускается»: the failed-launch mark
 //!
@@ -232,13 +261,17 @@ pub struct StateFile {
     pub launches: u32,
     pub failed_starts: u32,
     /// Since the helper started: focus returned by each method, and refused.
+    /// `focus_set_foreground` counts SetForegroundWindow with and without the unassigned key before
+    /// it ([`FocusMethod::KeyThenSetForeground`]).
     pub focus_set_foreground: u32,
     pub focus_uia: u32,
     pub focus_refused: u32,
     /// The helper launched the game itself in this session and waits for its window: from the
     /// launch until the window comes, the start fails (the game gone — for a loader gone with
     /// nothing of the game after it, once its handover has had [`HANDOVER_WITHIN`] — or closed as
-    /// hung) or the helper gives up — and only while the app allows it to act. Also while the
+    /// hung) or the helper gives up — and only while the app allows it to act. Also for such a
+    /// launch of an earlier session, kept while its window has not come (the module's «A launch's
+    /// fate»). Also while the
     /// helper is about to close the game as hung and launch it again: its window gone while its
     /// process runs (a crash report keeping it alive), or the closing itself — when a launch
     /// follows. Never for a game started by hand before its window is up, one Windows refused to
@@ -323,6 +356,36 @@ pub struct Observation {
     pub foreground: Foreground,
     /// The process the helper started exited since the last look: its pid and exit code.
     pub launched_exit: Option<(u32, Option<i32>)>,
+    /// With no game window (`window` is `None`): the visible top-level windows of `game_pids`,
+    /// ordered by pid and window — what the game shows instead (a crash report's dialog, a
+    /// splash), for the log. Empty while the game's window is up.
+    pub shown: Vec<ShownWindow>,
+}
+
+/// A visible top-level window of the game's processes that is not the game's window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownWindow {
+    pub pid: u32,
+    pub window: usize,
+    pub class: String,
+    pub title: String,
+}
+
+/// What the game's processes show instead of its window, for the log.
+fn shown(windows: &[ShownWindow]) -> String {
+    if windows.is_empty() {
+        return "no visible window of theirs".to_string();
+    }
+    let each: Vec<String> = windows
+        .iter()
+        .map(|w| {
+            format!(
+                "window {:#x} of pid {} (class {:?}, title {:?})",
+                w.window, w.pid, w.class, w.title
+            )
+        })
+        .collect();
+    format!("what they show: {}", each.join(", "))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,6 +399,10 @@ pub enum LaunchError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusMethod {
     SetForeground,
+    /// An unassigned key ([`UNASSIGNED_VK`]) sent by the helper, then SetForegroundWindow: the
+    /// helper's own input makes it the process that received the last input event, which Windows
+    /// asks of a caller before it hands over the front.
+    KeyThenSetForeground,
     Uia,
 }
 
@@ -343,8 +410,175 @@ impl FocusMethod {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SetForeground => "SetForegroundWindow",
+            Self::KeyThenSetForeground => "an unassigned key (0xE8) and SetForegroundWindow",
             Self::Uia => "UI Automation SetFocus",
         }
+    }
+}
+
+/// The key of the ladder's second step: VK 0xE8, which Windows leaves unassigned — no layout maps
+/// it to a character, no shortcut uses it, and a program that sees it ignores it.
+pub const UNASSIGNED_VK: u16 = 0xE8;
+
+/// What one rung of the focus ladder answers ([`focus_ladder`]): whether Windows granted the call,
+/// and whether the game's window was in front within the rung's short wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub granted: bool,
+    pub in_front: bool,
+}
+
+/// The process of the window in front, as the ladder's third rung asks about it: UI Automation's
+/// `SetFocus` waits on that process (its timeout, 0x800705B4, every time when the process is
+/// suspended), so it is not asked of a suspended one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontProcess {
+    pub pid: u32,
+    pub exe: String,
+    /// Threads waiting suspended, of all its threads: suspended when all are ([`all_suspended`]).
+    pub suspended_threads: u32,
+    pub threads: u32,
+}
+
+impl FrontProcess {
+    pub fn suspended(&self) -> bool {
+        all_suspended(self.suspended_threads, self.threads)
+    }
+}
+
+/// The one predicate of a suspended process: it has threads, and every one waits suspended
+/// (`windows.rs` counts a thread so: waiting, reason `Suspended` or `WrSuspended`).
+pub fn all_suspended(suspended_threads: u32, threads: u32) -> bool {
+    threads > 0 && suspended_threads == threads
+}
+
+/// Whether focus may be asked for with this window in front — part of the one check before the
+/// ladder (`windows.rs`): from another program's window, and from the game's own process only to
+/// restore its bound window while that is minimized (`game_minimized`: one of the game's other
+/// windows is in front). Never from AFKLink's own window, a menu, no window, or one that cannot be
+/// read.
+pub fn front_allows(foreground: &Foreground, game_minimized: bool) -> Result<(), String> {
+    match foreground {
+        Foreground::Other { .. } => Ok(()),
+        Foreground::Game if game_minimized => Ok(()),
+        Foreground::Game => Err("the game's process has the front now".into()),
+        Foreground::Nothing => Err("no window is in front".into()),
+        Foreground::AfkLink { exe } => Err(format!("AFKLink's own window is in front ({exe})")),
+        Foreground::Menu { exe } => Err(format!("a menu is open in front ({exe})")),
+        Foreground::Unreadable { error, .. } => {
+            Err(format!("the window in front cannot be read ({error})"))
+        }
+    }
+}
+
+/// The steps the focus ladder is made of, one Windows call each (`windows.rs`), on the game's
+/// window the caller has just checked. No step touches another window or presses anything but
+/// [`UNASSIGNED_VK`].
+pub trait FocusSteps {
+    /// Right before the key and before UI Automation: the app's signal still allows it, and the
+    /// window in front is still the one the ladder began with. `Err`: why the ladder stops.
+    fn still(&mut self) -> Result<(), String>;
+    /// Restore the game's window if it is minimized (`ShowWindowAsync(SW_RESTORE)`): what was done,
+    /// or `None` when it is not minimized.
+    fn restore(&mut self) -> Option<String>;
+    /// SetForegroundWindow on the game's window, then a short wait for it to be in front.
+    fn set_foreground(&mut self) -> Answer;
+    /// [`UNASSIGNED_VK`] down and up in one SendInput; only the down in, the up once more.
+    /// `Ok(resent)`: the pair went in (`resent`: the up needed its second try); `Err` says why not.
+    fn unassigned_key(&mut self) -> Result<bool, String>;
+    /// The process of the window in front now: `Ok(None)` when no window is in front.
+    fn front_process(&mut self) -> Result<Option<FrontProcess>, String>;
+    /// UI Automation's SetFocus on the game's window and a short wait: `None` when UI Automation did
+    /// not start, else whether the game was in front, or what it answered.
+    fn uia_set_focus(&mut self) -> Option<Result<bool, String>>;
+}
+
+/// The one decision of how the helper asks for the front, in order, each rung only when the one
+/// before left the game behind: (a) SetForegroundWindow; (b) [`UNASSIGNED_VK`] down and up, then
+/// SetForegroundWindow again; (c) UI Automation's SetFocus — skipped when the window in front
+/// belongs to a suspended process (it would wait out its timeout and answer nothing). Before (b)
+/// and (c) the signal and the window in front are looked at again ([`FocusSteps::still`]). `detail`
+/// says what each rung answered, or why it was skipped.
+pub fn focus_ladder(steps: &mut impl FocusSteps, mut detail: Vec<String>) -> FocusOutcome {
+    let done = |method, detail: Vec<String>| FocusOutcome {
+        method: Some(method),
+        detail: detail.join("; "),
+    };
+    let refused = |detail: Vec<String>| FocusOutcome {
+        method: None,
+        detail: detail.join("; "),
+    };
+    if let Some(restored) = steps.restore() {
+        detail.push(restored);
+    }
+    let first = steps.set_foreground();
+    detail.push(format!(
+        "SetForegroundWindow={}, {}",
+        first.granted,
+        front_word(first.in_front)
+    ));
+    if first.in_front {
+        return done(FocusMethod::SetForeground, detail);
+    }
+    if let Err(why) = steps.still() {
+        detail.push(format!("stopped before the key 0xE8: {why}"));
+        return refused(detail);
+    }
+    match steps.unassigned_key() {
+        Ok(resent) => {
+            let second = steps.set_foreground();
+            detail.push(format!(
+                "key 0xE8 sent{}, SetForegroundWindow={}, {}",
+                if resent {
+                    " (its release once more)"
+                } else {
+                    ""
+                },
+                second.granted,
+                front_word(second.in_front)
+            ));
+            if second.in_front {
+                return done(FocusMethod::KeyThenSetForeground, detail);
+            }
+        }
+        Err(e) => detail.push(format!(
+            "key 0xE8 not sent ({e}): SetForegroundWindow not asked again"
+        )),
+    }
+    match steps.front_process() {
+        Ok(Some(front)) if front.suspended() => {
+            detail.push(format!(
+                "UI Automation skipped: the window in front belongs to a suspended process \
+                 ({}, pid {}, {}/{} threads suspended), which cannot answer it",
+                front.exe, front.pid, front.suspended_threads, front.threads
+            ));
+            return refused(detail);
+        }
+        Ok(_) => {}
+        // Not known: asked all the same; its timeout bounds the wait.
+        Err(e) => detail.push(format!("the front process's threads not read ({e})")),
+    }
+    if let Err(why) = steps.still() {
+        detail.push(format!("stopped before UI Automation: {why}"));
+        return refused(detail);
+    }
+    match steps.uia_set_focus() {
+        None => detail.push("UI Automation unavailable".into()),
+        Some(Ok(true)) => {
+            detail.push("UI Automation SetFocus ok, in front".into());
+            return done(FocusMethod::Uia, detail);
+        }
+        Some(Ok(false)) => detail.push("UI Automation SetFocus ok, not in front".into()),
+        Some(Err(e)) => detail.push(format!("UI Automation SetFocus: {e}")),
+    }
+    refused(detail)
+}
+
+fn front_word(in_front: bool) -> &'static str {
+    if in_front {
+        "in front"
+    } else {
+        "not in front"
     }
 }
 
@@ -419,8 +653,11 @@ pub trait Desktop {
     fn observe(&mut self, record: &Record) -> Result<Observation, String>;
     /// Start the launch exe, with no arguments, in its folder: the new process's id.
     fn launch(&mut self, exe: &str) -> Result<u32, LaunchError>;
-    /// Restore the window if it is minimized and bring it to the front.
+    /// Restore the window if it is minimized and bring it to the front ([`focus_ladder`]).
     fn focus(&mut self, record: &Record, window: GameWindow) -> FocusOutcome;
+    /// The window in front, for the log: its class, whether it is visible, its `DWMWA_CLOAKED`,
+    /// whether its process is suspended. Read only when a line about it is written.
+    fn describe_front(&mut self, window: usize) -> String;
     /// Post `WM_CLOSE` to every visible top-level window of these processes, each process first
     /// checked to be the game's: in this Windows session, its full path one of the record's two
     /// exes. Posted, not sent: a hung window cannot hold the helper.
@@ -540,11 +777,18 @@ struct Launch {
     /// Waits for a handover this launch has had (a loader back during one, then gone again, gets
     /// another): for the log.
     handovers: u32,
+    /// Kept from an earlier session, its window not come (the module's «A launch's fate»).
+    from_earlier: bool,
+    /// The game's processes at the last look that saw them, else the launched one: what it is
+    /// known by in a later session.
+    pids: Vec<u32>,
 }
 
 impl Launch {
     fn new(at: Instant, pid: u32) -> Self {
         Self {
+            from_earlier: false,
+            pids: vec![pid],
             at,
             pid,
             window_seen: false,
@@ -654,6 +898,7 @@ struct FocusRetry {
 #[derive(Debug, Default, Clone, Copy)]
 struct Totals {
     focus_set_foreground: u32,
+    focus_key: u32,
     focus_uia: u32,
     focus_refused: u32,
 }
@@ -848,7 +1093,12 @@ impl Supervisor {
             elevated,
             launches: self.period.launches,
             failed_starts: self.period.failed_starts,
-            focus_set_foreground: self.totals.focus_set_foreground,
+            // The state file's count of SetForegroundWindow takes the key-assisted ones too: the
+            // app reads the file's format as it is.
+            focus_set_foreground: self
+                .totals
+                .focus_set_foreground
+                .saturating_add(self.totals.focus_key),
             focus_uia: self.totals.focus_uia,
             focus_refused: self.totals.focus_refused,
             launch_pending: self.launch_pending,
@@ -1036,6 +1286,13 @@ impl Supervisor {
             ));
         };
         let ran = gone_at.saturating_duration_since(launch.at);
+        if launch.from_earlier {
+            return Ok(format!(
+                "the helper's launch of an earlier session (pid {}), never a failed start: {}",
+                launch.pid,
+                self.relaunch_when(now, gone_at, self.period.failed_starts)
+            ));
+        }
         if ran >= FAST_EXIT_WITHIN && launch.window_seen && launch.survived {
             return Ok(format!(
                 "a normal run of {} after the helper's launch: {}",
@@ -1380,7 +1637,31 @@ impl Supervisor {
                     ),
                 );
             }
-            self.period = Period::default();
+            // A launch whose window has not come goes on (the module's «A launch's fate»).
+            let gave_up = self.period.gave_up;
+            let mut launch = self
+                .period
+                .launch
+                .take()
+                .filter(|l| !l.window_seen && !gave_up);
+            if let Some(launch) = launch.as_mut() {
+                launch.from_earlier = true;
+                log.line(
+                    Level::Info,
+                    &format!(
+                        "the helper's launch of pid {}, {} ago, has not shown the game's window: \
+                         kept for this session while its processes (pids {:?}) run, its counts \
+                         going on from the launch; never a failed start",
+                        launch.pid,
+                        secs(now.saturating_duration_since(launch.at)),
+                        launch.pids
+                    ),
+                );
+            }
+            self.period = Period {
+                launch,
+                ..Period::default()
+            };
             self.last_summary = now;
             log.line(
                 Level::Info,
@@ -1428,16 +1709,15 @@ impl Supervisor {
                     );
                 }
             }
-            // A wait for a loader's handover is the session's: it ends here, no failed start
-            // counted, and the next session's period starts without it.
-            if let Some(launch) = self.period.launch.as_mut() {
-                if let Some(since) = launch.handover_since.take() {
+            // A wait for a loader's handover pauses: the next session goes on with it.
+            if let Some(launch) = self.period.launch.as_ref() {
+                if let Some(since) = launch.handover_since {
                     log.line(
                         Level::Info,
                         &format!(
-                            "the wait for the handover of the launched loader (pid {}, {}) stops \
-                             with it, {} after its loader went: no failed start is counted, \
-                             nothing is launched",
+                            "the wait for the handover of the launched loader (pid {}, {}) pauses \
+                             with it, {} after its loader went: a next session goes on with it, \
+                             counted from then",
                             launch.pid,
                             launch.exit_note(),
                             secs(now.saturating_duration_since(since))
@@ -1517,6 +1797,42 @@ impl Supervisor {
             ""
         };
         let has_loader = self.record.is_loader(&self.record.launch_exe);
+        let pids: Vec<u32> = obs
+            .game_pids
+            .iter()
+            .chain(&obs.unreadable)
+            .copied()
+            .collect();
+        // A launch of an earlier session is the game only while its processes run, or any of the
+        // game's within its loader's handover, or the window exe's after only its loader was
+        // seen: else the game was started some other way.
+        if let Some(launch) = self
+            .period
+            .launch
+            .as_ref()
+            .filter(|l| l.from_earlier && running)
+        {
+            let handing_over = launch
+                .handover_since
+                .is_some_and(|since| now.saturating_duration_since(since) < HANDOVER_WITHIN)
+                // Only its loader seen so far: it may have handed over unseen, between sessions.
+                || (!launch.game_seen
+                    && obs.game_pids.iter().any(|pid| !obs.loader_pids.contains(pid)));
+            if !handing_over && !pids.iter().any(|pid| launch.pids.contains(pid)) {
+                log.line(
+                    Level::Info,
+                    &format!(
+                        "the game's processes (pids {pids:?}) are none of those the helper's launch \
+                         of an earlier session (pid {}) was last seen as ({:?}): the game was \
+                         started some other way, by hand perhaps — that launch is dropped, nothing \
+                         is closed for it, no failed start",
+                        launch.pid, launch.pids
+                    ),
+                );
+                self.period.launch = None;
+                self.dirty = true;
+            }
+        }
         if let Some(launch) = self.period.launch.as_mut() {
             let after = now.saturating_duration_since(launch.at);
             if let Some((_, code)) = obs.launched_exit.filter(|(pid, _)| *pid == launch.pid) {
@@ -1537,6 +1853,7 @@ impl Supervisor {
                 }
             }
             if running {
+                launch.pids = pids;
                 let window_exe: Vec<u32> = obs
                     .game_pids
                     .iter()
@@ -1615,6 +1932,7 @@ impl Supervisor {
             }
             let (pid, at, window_seen, survived) =
                 (launch.pid, launch.at, launch.window_seen, launch.survived);
+            let from_earlier = launch.from_earlier;
             // A window that came has shown the game ran: only a launch without one may be waiting
             // for its loader's handover.
             let (gone_at, handover_note) = if window_seen {
@@ -1635,7 +1953,17 @@ impl Supervisor {
             let ran = gone_at.saturating_duration_since(at);
             self.period.launch = None;
             self.period.gone_at = Some(gone_at);
-            if ran < FAST_EXIT_WITHIN || !window_seen || !survived {
+            if from_earlier {
+                log.line(
+                    Level::Info,
+                    &format!(
+                        "the game is gone {} after the helper's launch of an earlier session (pid \
+                         {pid}{closed_note}{handover_note}): not a failed start; the next launch is \
+                         this session's first",
+                        secs(ran)
+                    ),
+                );
+            } else if ran < FAST_EXIT_WITHIN || !window_seen || !survived {
                 self.failed_start(
                     now,
                     format!(
@@ -2061,11 +2389,12 @@ impl Supervisor {
                     Level::Error,
                     &format!(
                         "no game window {} after the launch, and the launch exe still runs (pids \
-                         {starting:?}; game pids {:?}): the helper gives up until the next \
+                         {starting:?}; game pids {:?}; {}): the helper gives up until the next \
                          session; the launch exe is left running — it may be patching, or \
                          waiting for someone",
                         secs(waited),
-                        obs.game_pids
+                        obs.game_pids,
+                        shown(&obs.shown)
                     ),
                 );
                 self.give_up(now, why, log);
@@ -2209,14 +2538,15 @@ impl Supervisor {
         log.line(
             Level::Warn,
             &format!(
-                "the game hangs: {what} (game pids {:?}{}) — closing it: WM_CLOSE to its windows, \
-                 TerminateProcess if it is still there after {}",
+                "the game hangs: {what} (game pids {:?}{}; {}) — closing it: WM_CLOSE to its \
+                 windows, TerminateProcess if it is still there after {}",
                 obs.game_pids,
                 if obs.unreadable.is_empty() {
                     String::new()
                 } else {
                     format!("; unreadable pids {:?} are not touched", obs.unreadable)
                 },
+                shown(&obs.shown),
                 secs(CLOSE_GRACE)
             ),
         );
@@ -2636,6 +2966,7 @@ impl Supervisor {
             Some(method) => {
                 match method {
                     FocusMethod::SetForeground => self.totals.focus_set_foreground += 1,
+                    FocusMethod::KeyThenSetForeground => self.totals.focus_key += 1,
                     FocusMethod::Uia => self.totals.focus_uia += 1,
                 }
                 log.line(
@@ -2656,15 +2987,19 @@ impl Supervisor {
                 retry.retry_at = Some(now + delay);
                 retry.refused_on = Some(front);
                 self.totals.focus_refused += 1;
+                let refused = retry.refused;
+                // What held the front, for the next field report: a cloaked shell window of a
+                // suspended process tells itself apart here.
+                let described = desktop.describe_front(front);
                 log.line(
-                    if retry.refused == 1 {
+                    if refused == 1 {
                         Level::Warn
                     } else {
                         Level::Info
                     },
                     &format!(
-                        "focus refused (try {}, {front_exe} in front{restored}): {}; next try in {}",
-                        retry.refused,
+                        "focus refused (try {refused}, {front_exe} in front{restored}): {}; in \
+                         front: {described}; next try in {}",
                         outcome.detail,
                         secs(delay)
                     ),
@@ -2681,12 +3016,18 @@ impl Supervisor {
         log.line(
             Level::Info,
             &format!(
-                "summary: {} for {}; game pids {:?}; this session {} launch(es), {} failed start(s) \
-                 in a row; failed-launch mark {}; focus returned {} time(s) via \
-                 SetForegroundWindow, {} via UI Automation, refused {} (since the helper started)",
+                "summary: {} for {}; game pids {:?}{}; this session {} launch(es), {} failed \
+                 start(s) in a row; failed-launch mark {}; focus returned {} time(s) via \
+                 SetForegroundWindow, {} via an unassigned key and SetForegroundWindow, {} via UI \
+                 Automation, refused {} (since the helper started)",
                 self.state.as_str(),
                 secs(now.saturating_duration_since(self.since)),
                 obs.game_pids,
+                if obs.window.is_none() && !obs.game_pids.is_empty() {
+                    format!(" without the game's window, {}", shown(&obs.shown))
+                } else {
+                    String::new()
+                },
                 self.period.launches,
                 self.period.failed_starts,
                 if self.failed_launch.is_some() {
@@ -2695,6 +3036,7 @@ impl Supervisor {
                     "not set"
                 },
                 self.totals.focus_set_foreground,
+                self.totals.focus_key,
                 self.totals.focus_uia,
                 self.totals.focus_refused
             ),
@@ -2738,6 +3080,8 @@ mod tests {
         launch_error: Option<LaunchError>,
         focuses: Vec<GameWindow>,
         focus_works: Option<FocusMethod>,
+        /// The windows described for a line.
+        described: Vec<usize>,
         /// The pids each `close_windows` was asked about.
         closes: Vec<Vec<u32>>,
         /// Pids `close_windows` cannot confirm the game's.
@@ -2794,6 +3138,10 @@ mod tests {
                 method: self.focus_works,
                 detail: "fake".into(),
             }
+        }
+        fn describe_front(&mut self, window: usize) -> String {
+            self.described.push(window);
+            format!("window {window:#x} class Windows.UI.Core.CoreWindow, visible yes, cloaked 2")
         }
         fn close_windows(&mut self, record: &Record, pids: &[u32]) -> CloseRequest {
             self.closes.push(pids.to_vec());
@@ -3640,6 +3988,364 @@ mod tests {
         assert_eq!(run.fake.focuses.len(), 11);
     }
 
+    /// The window in front is described on each refusal — never on a left-alone line, nor on a
+    /// tick that writes nothing.
+    #[test]
+    fn the_window_in_front_is_described_where_focus_is_refused() {
+        let mut run = Run::new();
+        run.game(&[10], true);
+        run.fake.obs.foreground = Foreground::Other {
+            window: 5,
+            exe: "SearchHost.exe".into(),
+        };
+        run.on(0.0);
+        run.on(0.5);
+        assert_eq!(run.fake.focuses.len(), 1);
+        assert_eq!(run.fake.described, vec![5], "one refusal, one description");
+        assert_eq!(
+            run.log
+                .count("in front: window 0x5 class Windows.UI.Core.CoreWindow, visible yes"),
+            1
+        );
+        run.fake.obs.foreground = Foreground::Menu {
+            exe: "explorer.exe".into(),
+        };
+        run.on(1.0);
+        assert_eq!(run.fake.described, vec![5], "not on a left-alone line");
+    }
+
+    /// The key-assisted rung counts on its own in the summary, and with SetForegroundWindow in the
+    /// state file the app reads.
+    #[test]
+    fn the_key_assisted_rung_is_counted_and_said() {
+        let mut run = Run::new();
+        run.game(&[10], true);
+        run.fake.obs.foreground = Foreground::Other {
+            window: 5,
+            exe: "explorer.exe".into(),
+        };
+        run.fake.focus_works = Some(FocusMethod::KeyThenSetForeground);
+        run.on(0.0);
+        assert_eq!(run.sup.totals.focus_key, 1);
+        assert_eq!(
+            run.log.count(
+                "focus back on the game via an unassigned key (0xE8) and SetForegroundWindow"
+            ),
+            1
+        );
+        let state = run.sup.state_file(
+            run.t0 + Duration::from_secs(1),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000),
+            7,
+            true,
+        );
+        assert_eq!(state.focus_set_foreground, 1);
+        assert_eq!(state.focus_uia, 0);
+    }
+
+    /// A scripted ladder: what each step answers, and the order the steps were asked in.
+    #[derive(Default)]
+    struct Ladder {
+        /// What each look before a rung answers, in turn; none left: fine.
+        stills: std::collections::VecDeque<Result<(), String>>,
+        /// What each SetForegroundWindow answers, in turn; none left: refused.
+        set: std::collections::VecDeque<Answer>,
+        key: Option<String>,
+        front: Option<Result<Option<FrontProcess>, String>>,
+        /// What SetFocus answers; `None`: UI Automation did not start.
+        uia: Option<Result<bool, String>>,
+        /// The game's window is minimized: restored first.
+        minimized: bool,
+        calls: Vec<&'static str>,
+    }
+
+    impl FocusSteps for Ladder {
+        fn still(&mut self) -> Result<(), String> {
+            self.calls.push("still");
+            self.stills.pop_front().unwrap_or(Ok(()))
+        }
+        fn restore(&mut self) -> Option<String> {
+            self.minimized.then(|| {
+                self.calls.push("restore");
+                "restored (ShowWindowAsync=true)".to_owned()
+            })
+        }
+        fn set_foreground(&mut self) -> Answer {
+            self.calls.push("set");
+            self.set.pop_front().unwrap_or(Answer {
+                granted: false,
+                in_front: false,
+            })
+        }
+        fn unassigned_key(&mut self) -> Result<bool, String> {
+            self.calls.push("key");
+            self.key.clone().map_or(Ok(false), Err)
+        }
+        fn front_process(&mut self) -> Result<Option<FrontProcess>, String> {
+            self.calls.push("front");
+            self.front.clone().unwrap_or(Ok(None))
+        }
+        fn uia_set_focus(&mut self) -> Option<Result<bool, String>> {
+            self.calls.push("uia");
+            self.uia.clone()
+        }
+    }
+
+    /// The steps that act, in order: the looks between them left out.
+    fn acts(ladder: &Ladder) -> Vec<&'static str> {
+        ladder
+            .calls
+            .iter()
+            .copied()
+            .filter(|&c| c != "still")
+            .collect()
+    }
+
+    fn front(suspended_threads: u32, threads: u32) -> FrontProcess {
+        FrontProcess {
+            pid: 812,
+            exe: "SearchHost.exe".into(),
+            suspended_threads,
+            threads,
+        }
+    }
+
+    const IN_FRONT: Answer = Answer {
+        granted: true,
+        in_front: true,
+    };
+
+    #[test]
+    fn the_ladder_stops_at_the_first_rung_that_brings_the_game_forward() {
+        let mut first = Ladder::default();
+        first.set.push_back(IN_FRONT);
+        let outcome = focus_ladder(&mut first, Vec::new());
+        assert_eq!(outcome.method, Some(FocusMethod::SetForeground));
+        assert_eq!(first.calls, ["set"]);
+        assert_eq!(outcome.detail, "SetForegroundWindow=true, in front");
+
+        let mut second = Ladder::default();
+        second.set.push_back(Answer {
+            granted: false,
+            in_front: false,
+        });
+        second.set.push_back(IN_FRONT);
+        let outcome = focus_ladder(&mut second, Vec::new());
+        assert_eq!(outcome.method, Some(FocusMethod::KeyThenSetForeground));
+        assert_eq!(second.calls, ["set", "still", "key", "set"]);
+        assert!(
+            outcome
+                .detail
+                .contains("key 0xE8 sent, SetForegroundWindow=true, in front"),
+            "{}",
+            outcome.detail
+        );
+
+        let mut third = Ladder {
+            front: Some(Ok(Some(front(3, 40)))),
+            uia: Some(Ok(true)),
+            ..Ladder::default()
+        };
+        let outcome = focus_ladder(&mut third, Vec::new());
+        assert_eq!(outcome.method, Some(FocusMethod::Uia));
+        assert_eq!(
+            third.calls,
+            ["set", "still", "key", "set", "front", "still", "uia"]
+        );
+    }
+
+    /// The signal gone or another window in front: the ladder stops before the key, or before UI
+    /// Automation, and says why.
+    #[test]
+    fn the_ladder_looks_again_before_the_key_and_before_ui_automation() {
+        let mut before_key = Ladder::default();
+        before_key
+            .stills
+            .push_back(Err("another window has the front now".into()));
+        let outcome = focus_ladder(&mut before_key, Vec::new());
+        assert_eq!(outcome.method, None);
+        assert_eq!(acts(&before_key), ["set"], "no key pressed");
+        assert!(
+            outcome
+                .detail
+                .ends_with("stopped before the key 0xE8: another window has the front now"),
+            "{}",
+            outcome.detail
+        );
+
+        let mut before_uia = Ladder {
+            uia: Some(Ok(true)),
+            ..Ladder::default()
+        };
+        before_uia.stills.push_back(Ok(()));
+        before_uia
+            .stills
+            .push_back(Err("the app's signal went off: not set".into()));
+        let outcome = focus_ladder(&mut before_uia, Vec::new());
+        assert_eq!(outcome.method, None);
+        assert_eq!(acts(&before_uia), ["set", "key", "set", "front"], "no UIA");
+        assert!(
+            outcome
+                .detail
+                .ends_with("stopped before UI Automation: the app's signal went off: not set"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    /// The key not sent (the input desktop is another, SendInput blocked): SetForegroundWindow is
+    /// not asked again for nothing, and UI Automation still is. Its release needing a second try is
+    /// said.
+    #[test]
+    fn a_key_not_sent_skips_the_second_call_and_goes_on() {
+        let mut ladder = Ladder {
+            key: Some("SendInput inserted 0 of 2 events".into()),
+            uia: Some(Ok(false)),
+            ..Ladder::default()
+        };
+        let outcome = focus_ladder(&mut ladder, Vec::new());
+        assert_eq!(outcome.method, None);
+        assert_eq!(acts(&ladder), ["set", "key", "front", "uia"]);
+        assert_eq!(
+            outcome.detail,
+            "SetForegroundWindow=false, not in front; key 0xE8 not sent (SendInput inserted 0 of \
+             2 events): SetForegroundWindow not asked again; UI Automation SetFocus ok, not in \
+             front"
+        );
+
+        struct Resent(Ladder);
+        impl FocusSteps for Resent {
+            fn still(&mut self) -> Result<(), String> {
+                self.0.still()
+            }
+            fn restore(&mut self) -> Option<String> {
+                self.0.restore()
+            }
+            fn set_foreground(&mut self) -> Answer {
+                self.0.set_foreground()
+            }
+            fn unassigned_key(&mut self) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn front_process(&mut self) -> Result<Option<FrontProcess>, String> {
+                self.0.front_process()
+            }
+            fn uia_set_focus(&mut self) -> Option<Result<bool, String>> {
+                self.0.uia_set_focus()
+            }
+        }
+        let mut resent = Resent(Ladder::default());
+        let outcome = focus_ladder(&mut resent, Vec::new());
+        assert!(
+            outcome
+                .detail
+                .contains("key 0xE8 sent (its release once more)"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    /// The field's stuck case: a suspended process's window in front. UI Automation would wait out
+    /// its timeout every try; it is skipped and the reason said. Only a process with every thread
+    /// suspended counts; one that cannot be read is asked as before.
+    #[test]
+    fn ui_automation_is_skipped_only_when_the_front_process_is_suspended() {
+        let mut stuck = Ladder {
+            front: Some(Ok(Some(front(41, 41)))),
+            uia: Some(Err("0x800705B4".into())),
+            ..Ladder::default()
+        };
+        let outcome = focus_ladder(&mut stuck, Vec::new());
+        assert_eq!(outcome.method, None);
+        assert_eq!(acts(&stuck), ["set", "key", "set", "front"], "no UIA");
+        assert!(
+            outcome.detail.contains(
+                "UI Automation skipped: the window in front belongs to a suspended process \
+                 (SearchHost.exe, pid 812, 41/41 threads suspended)"
+            ),
+            "{}",
+            outcome.detail
+        );
+
+        for (front, why) in [
+            (Ok(Some(front(40, 41))), "one thread runs"),
+            (Ok(Some(front(0, 0))), "no threads read"),
+            (Ok(None), "no window in front"),
+            (
+                Err("NtQuerySystemInformation: 0xC0000004".into()),
+                "not read",
+            ),
+        ] {
+            let mut ladder = Ladder {
+                front: Some(front),
+                uia: Some(Err("0x800705B4".into())),
+                ..Ladder::default()
+            };
+            let outcome = focus_ladder(&mut ladder, Vec::new());
+            assert_eq!(acts(&ladder).last(), Some(&"uia"), "{why}");
+            assert!(
+                outcome
+                    .detail
+                    .contains("UI Automation SetFocus: 0x800705B4"),
+                "{why}"
+            );
+        }
+        let mut unavailable = Ladder::default();
+        let outcome = focus_ladder(&mut unavailable, Vec::new());
+        assert!(
+            outcome.detail.ends_with("UI Automation unavailable"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    /// The game's own process in front with its bound window minimized: focus may be asked, the
+    /// window is restored first and brought forward. Not minimized, nothing is asked.
+    #[test]
+    fn a_minimized_game_whose_process_has_the_front_is_restored() {
+        assert_eq!(front_allows(&Foreground::Game, true), Ok(()));
+        assert!(front_allows(&Foreground::Game, false)
+            .is_err_and(|e| e.contains("the game's process has the front")));
+        let mut ladder = Ladder {
+            minimized: true,
+            ..Ladder::default()
+        };
+        ladder.set.push_back(IN_FRONT);
+        let outcome = focus_ladder(&mut ladder, Vec::new());
+        assert_eq!(outcome.method, Some(FocusMethod::SetForeground));
+        assert_eq!(ladder.calls, ["restore", "set"]);
+        assert_eq!(
+            outcome.detail,
+            "restored (ShowWindowAsync=true); SetForegroundWindow=true, in front"
+        );
+    }
+
+    /// Focus is asked only with another program's window in front, or to restore the game; never
+    /// with AFKLink, a menu, no window or an unreadable one in front.
+    #[test]
+    fn the_front_allows_focus_only_from_another_window_or_to_restore_the_game() {
+        let other = Foreground::Other {
+            window: 5,
+            exe: "SearchHost.exe".into(),
+        };
+        assert_eq!(front_allows(&other, false), Ok(()));
+        for refused in [
+            Foreground::Nothing,
+            Foreground::AfkLink {
+                exe: "AFKLink.exe".into(),
+            },
+            Foreground::Menu {
+                exe: "explorer.exe".into(),
+            },
+            Foreground::Unreadable {
+                window: 4,
+                error: "denied".into(),
+            },
+        ] {
+            assert!(front_allows(&refused, true).is_err(), "{refused:?}");
+        }
+    }
+
     #[test]
     fn the_state_file_says_what_the_app_shows() {
         let mut run = Run::new();
@@ -4247,10 +4953,11 @@ mod tests {
         assert_eq!(run.log.count("launch pending off (given up"), 1);
     }
 
-    /// The session over: not pending, whatever the game does; the next session starts afresh and
-    /// does not count a launch of the last one as its own.
+    /// The session over: not pending, whatever the game does. The next session, the loader still
+    /// running and the window not come, keeps the launch (the module's «A launch's fate»): pending
+    /// again, nothing launched twice, and not counted among this session's launches.
     #[test]
-    fn a_launch_is_pending_only_during_the_session() {
+    fn a_launch_is_pending_only_during_a_session_and_kept_into_the_next() {
         let mut run = Run::new();
         run.on(0.0);
         run.game_with_loader(&[10], &[], false);
@@ -4263,10 +4970,18 @@ mod tests {
             1
         );
         run.at(3.0, Signal::Absent);
-        // A new session while the loader still runs: it is not this session's launch.
-        run.on(4.0);
         assert!(!run.sup.launch_pending());
+        run.on(4.0);
+        assert!(run.sup.launch_pending());
+        assert_eq!(
+            run.log.count(
+                "launch pending on (launched pid 1001 4.0 s ago, its window not up yet (game pids \
+                 running: yes)"
+            ),
+            1
+        );
         assert_eq!(run.fake.launches.len(), 1);
+        assert_eq!(file_at(&run, 4.0).launches, 0);
     }
 
     /// `launch_pending` is a field older apps skip and this app reads as `false` from an older
@@ -4648,11 +5363,12 @@ mod tests {
         assert_eq!(run.fake.launches.len(), 2);
     }
 
-    /// The session ends during the wait for a handover: the wait stops with it — nothing pending,
-    /// no failed start counted, nothing launched — and the next session starts afresh: its own
-    /// launch at once, and the last session's wait never comes back as a failed start.
+    /// The session ends during the wait for a handover: the wait pauses — nothing pending while
+    /// no session allows it — and the next session goes on with it, counted from when the loader
+    /// went: nothing is launched beside the handover, and with nothing come by its 30 s the launch
+    /// is over, not a failed start, and the session launches as its first.
     #[test]
-    fn a_wait_for_a_handover_ends_with_the_session_and_does_not_reach_the_next() {
+    fn a_wait_for_a_handover_goes_on_into_the_next_session() {
         let mut run = Run::new();
         run.on(0.0);
         run.fake.obs.launched_exit = Some((1001, Some(0)));
@@ -4666,35 +5382,396 @@ mod tests {
             run.log.count_at(
                 Level::Info,
                 "the wait for the handover of the launched loader (pid 1001, exited with code 0) \
-                 stops with it, 5.0 s after its loader went: no failed start is counted, nothing \
-                 is launched"
+                 pauses with it, 5.0 s after its loader went"
             ),
             1
         );
-        assert_eq!(
-            run.log.count("launch pending off (not allowed by the app)"),
-            1
-        );
-        for s in 6..=60 {
+        for s in 6..=20 {
             run.at(f64::from(s), Signal::NotSet);
         }
-        assert_eq!(run.fake.launches.len(), 1);
-        assert_eq!(run.sup.period.failed_starts, 0);
-        // The next session: launched at once, as the first of a session.
-        run.on(61.0);
-        assert_eq!(run.fake.launches.len(), 2);
+        run.on_through(21.0, 30.0);
+        assert_eq!(run.fake.launches.len(), 1, "the handover has until 30.5 s");
         assert!(run.sup.launch_pending());
+        assert_eq!(run.sup.state(), HelperState::Launching);
+        run.on(30.5);
+        assert_eq!(run.fake.launches.len(), 2);
+        assert_eq!(
+            run.log.count(
+                "the game is gone 0.5 s after the helper's launch of an earlier session (pid 1001; \
+                 nothing of the game came within 30.0 s after its loader went): not a failed start"
+            ),
+            1
+        );
         assert_eq!(
             run.log
                 .count_at(Level::Info, ": the first launch this session"),
             2
         );
         run.game(&[11], true);
-        run.on_through(61.5, 130.0);
+        run.on_through(31.0, 100.0);
         assert_eq!(run.sup.period.failed_starts, 0);
         assert_eq!(run.sup.state(), HelperState::Running);
         assert_eq!(run.log.count_at(Level::Warn, "failed start"), 0);
-        assert_eq!(run.log.count("the wait for the handover"), 1);
+    }
+
+    /// A viewer change while the loader hands over through a process the record does not know:
+    /// the game's process comes in the next session within the wait — the launch goes on, and
+    /// nothing is launched twice.
+    #[test]
+    fn a_viewer_change_during_a_loaders_handover_launches_nothing_twice() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.fake.obs.launched_exit = Some((1001, Some(0)));
+        run.on_through(0.5, 1.5);
+        for t in [2.0, 2.5, 3.0, 3.5] {
+            run.at(t, Signal::NotSet);
+        }
+        run.on_through(4.0, 4.5);
+        assert_eq!(run.fake.launches.len(), 1);
+        run.game(&[11], false);
+        run.on_through(5.0, 16.5);
+        assert_eq!(
+            run.log
+                .count("the game's process came 4.5 s after the launched loader went"),
+            1
+        );
+        run.game(&[11], true);
+        run.on_through(17.0, 100.0);
+        assert_eq!(run.fake.launches.len(), 1);
+        assert!(run.fake.closes.is_empty());
+        assert_eq!(run.sup.state(), HelperState::Running);
+    }
+
+    /* ── A launch kept across sessions ───────────────────────────────────────────────────────── */
+
+    /// A dialog of the `.bin`'s in its window's place.
+    fn dialog(title: &str) -> ShownWindow {
+        ShownWindow {
+            pid: 11,
+            window: 0x900,
+            class: "#32770".into(),
+            title: title.into(),
+        }
+    }
+
+    /// Signal off from `from` to `to`, every half second.
+    fn off_through(run: &mut Run, from: f64, to: f64) {
+        let mut t = from;
+        while t <= to + 1e-9 {
+            run.at(t, Signal::NotSet);
+            t += 0.5;
+        }
+    }
+
+    /// A real case: the helper launches the game (its loader, pid 10), and 1.2 s later the viewer is
+    /// replaced by the next one — the signal off for 1.5 s. From 3 s the new session sees the
+    /// loader with the `.bin` (11), which keeps a dialog where its window should be; the loader
+    /// still runs at 7.5 s.
+    fn launched_then_handed_over(run: &mut Run) {
+        run.on(0.0);
+        run.game_with_loader(&[10], &[], false);
+        run.on_through(0.5, 1.0);
+        off_through(run, 1.5, 2.5);
+        run.game_with_loader(&[10], &[11], false);
+        run.fake.obs.shown = vec![dialog("LineageII")];
+        run.on_through(3.0, 7.5);
+    }
+
+    /// The incident: the launch kept by the next session, its count going on from the launch; the
+    /// `.bin` still without its window at 120 s — closed as hung, saying what it showed, and
+    /// launched again at once as the session's first, no failed start; pending throughout.
+    #[test]
+    fn a_launch_whose_viewer_is_replaced_at_once_is_closed_as_hung_in_the_next_session() {
+        let mut run = Run::new();
+        launched_then_handed_over(&mut run);
+        assert_eq!(run.log.count("not allowed any more"), 1);
+        assert_eq!(
+            run.log.count_at(
+                Level::Info,
+                "the helper's launch of pid 1001, 3.0 s ago, has not shown the game's window: kept \
+                 for this session while its processes (pids [10]) run"
+            ),
+            1
+        );
+        assert!(run.sup.launch_pending());
+        // The loader exits at 8 s; the `.bin` runs on behind its dialog.
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(8.0, 119.5);
+        assert!(run.fake.closes.is_empty(), "120 s from the launch");
+        assert_eq!(run.sup.state(), HelperState::Launching);
+        assert!(run.sup.launch_pending());
+        run.on(120.0);
+        assert_eq!(run.fake.closes, vec![vec![11]]);
+        assert_eq!(
+            run.log.count_at(
+                Level::Warn,
+                "the game hangs: no game window 120.0 s after the launch, its launch exe gone \
+                 112.5 s ago (game pids [11]; what they show: window 0x900 of pid 11 (class \
+                 \"#32770\", title \"LineageII\"))"
+            ),
+            1
+        );
+        assert!(run.sup.launch_pending(), "closed, then launched again");
+        run.game(&[], false);
+        run.fake.obs.shown.clear();
+        run.on(120.5);
+        assert_eq!(run.fake.launches.len(), 2);
+        assert_eq!(
+            run.log.count(
+                "the game is gone 120.0 s after the helper's launch of an earlier session (pid \
+                 1001; closed by the helper: it hung): not a failed start"
+            ),
+            1
+        );
+        assert_eq!(
+            run.log
+                .count_at(Level::Info, ": the first launch this session"),
+            2
+        );
+        assert_eq!(run.sup.period.failed_starts, 0);
+        assert!(run.sup.launch_pending());
+        assert_eq!(run.log.count("launch pending on"), 2);
+        assert_eq!(run.log.count("launch pending off"), 1);
+        assert_no_drift(&run);
+    }
+
+    /// The window comes in the new session: nothing is closed, it is not pending, and a later
+    /// session keeps nothing.
+    #[test]
+    fn a_kept_launch_whose_window_comes_is_not_closed() {
+        let mut run = Run::new();
+        launched_then_handed_over(&mut run);
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(8.0, 40.0);
+        run.fake.obs.shown.clear();
+        run.game(&[11], true);
+        run.on(40.5);
+        assert_eq!(
+            run.log
+                .count("the game's window is up 40.5 s after the launch"),
+            1
+        );
+        assert!(!run.sup.launch_pending());
+        run.on_through(41.0, 400.0);
+        assert!(run.fake.closes.is_empty());
+        assert_eq!(run.sup.state(), HelperState::Running);
+        assert_eq!(run.fake.launches.len(), 1);
+        run.at(400.5, Signal::NotSet);
+        run.on(401.0);
+        assert_eq!(run.log.count("kept for this session"), 1);
+        assert!(!run.sup.launch_pending());
+    }
+
+    /// No session after the launch's: nothing is looked at, closed or launched, however long. The
+    /// next session's first look finds the count long over and closes the game, still without its
+    /// window (an accepted risk: the module's «A launch's fate»).
+    #[test]
+    fn a_kept_launch_is_left_alone_while_no_session_allows_it() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.game_with_loader(&[10], &[11], false);
+        run.on(0.5);
+        let observed = run.fake.observed;
+        for s in 1..=900 {
+            run.at(f64::from(s), Signal::NotSet);
+        }
+        assert_eq!(run.fake.observed, observed);
+        assert!(run.fake.closes.is_empty() && run.fake.terminated.is_empty());
+        assert_eq!(run.fake.launches.len(), 1);
+        assert!(!run.sup.launch_pending());
+        assert_eq!(run.sup.state(), HelperState::Idle);
+        run.game_with_loader(&[], &[11], false);
+        run.on(901.0);
+        assert_eq!(run.fake.closes, vec![vec![11]]);
+    }
+
+    /// A game started by hand that runs without its window is no launch of the helper's: never
+    /// closed, never pending, nothing kept — in its session or the next.
+    #[test]
+    fn a_game_started_by_hand_without_its_window_is_never_closed() {
+        let mut run = Run::new();
+        run.game_with_loader(&[10], &[11], false);
+        run.on_through(0.0, 10.0);
+        run.game_with_loader(&[], &[11], false);
+        run.fake.obs.shown = vec![dialog("LineageII Crash Report")];
+        run.on_through(10.5, 300.0);
+        off_through(&mut run, 300.5, 301.0);
+        run.on_through(302.0, 700.0);
+        assert!(run.fake.launches.is_empty());
+        assert!(run.fake.closes.is_empty());
+        assert!(!run.sup.launch_pending());
+        assert_eq!(run.log.count("launch pending"), 0);
+        assert_eq!(run.log.count("kept for this session"), 0);
+    }
+
+    /// The stuck auto-launch killed between sessions and the game started by hand, without its
+    /// window in the next session for long: not the launch's processes — the launch is dropped,
+    /// said, and nothing is closed.
+    #[test]
+    fn a_game_restarted_by_hand_between_sessions_is_not_closed() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.game_with_loader(&[10], &[11], false);
+        run.on_through(0.5, 1.0);
+        off_through(&mut run, 1.5, 60.0);
+        run.game_with_loader(&[], &[21], false);
+        run.on_through(61.0, 400.0);
+        assert!(run.fake.closes.is_empty());
+        assert_eq!(run.fake.launches.len(), 1);
+        assert!(!run.sup.launch_pending());
+        assert_eq!(
+            run.log.count_at(
+                Level::Info,
+                "the game's processes (pids [21]) are none of those the helper's launch of an \
+                 earlier session (pid 1001) was last seen as ([10, 11]): the game was started \
+                 some other way, by hand perhaps — that launch is dropped, nothing is closed for \
+                 it, no failed start"
+            ),
+            1
+        );
+    }
+
+    /// The loader hands over and exits while no session looks (a game's loader started its
+    /// `.bin` 3.5 s after the launch and exited at 8.5 s): the next session sees only the `.bin`,
+    /// a pid the launch never saw — still its own, as it had seen only its loader. Closed at 120 s
+    /// from the launch, launched again at once, no failed start.
+    #[test]
+    fn a_handover_during_the_gap_is_still_the_kept_launch() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.game_with_loader(&[10], &[], false);
+        run.on_through(0.5, 1.0);
+        off_through(&mut run, 1.5, 20.0);
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(20.5, 119.5);
+        assert_eq!(
+            run.log
+                .count("are none of those the helper's launch of an earlier session"),
+            0
+        );
+        assert!(run.fake.closes.is_empty());
+        assert!(run.sup.launch_pending());
+        run.on(120.0);
+        assert_eq!(run.fake.closes, vec![vec![11]]);
+        run.game(&[], false);
+        run.on(120.5);
+        assert_eq!(run.fake.launches.len(), 2);
+        assert_eq!(run.sup.period.failed_starts, 0);
+        assert_eq!(
+            run.log
+                .count("of an earlier session (pid 1001; closed by the helper: it hung): not a failed start"),
+            1
+        );
+    }
+
+    /// The kept launch's loader still runs: not closed while it does — said once — and closed once
+    /// its handover has had its 30 s, as in the launch's own session.
+    #[test]
+    fn a_kept_launch_is_not_closed_while_its_loader_runs() {
+        let mut run = Run::new();
+        launched_then_handed_over(&mut run);
+        run.on_through(8.0, 299.5);
+        assert!(run.fake.closes.is_empty(), "the loader may be patching");
+        assert_eq!(
+            run.log.count_at(
+                Level::Warn,
+                "no game window 120.0 s after the launch, and the launch exe runs (pids [10]"
+            ),
+            1
+        );
+        assert!(run.sup.launch_pending());
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(300.0, 329.0);
+        assert!(run.fake.closes.is_empty(), "the handover gets its 30 s");
+        run.on(329.5);
+        assert_eq!(run.fake.closes, vec![vec![11]]);
+    }
+
+    /// Short sessions after the launch (a real case: 34, 1.5, 0.5 s…): the launch is kept
+    /// through each, and closed at the first look with the signal set once 120 s have passed since it.
+    #[test]
+    fn short_sessions_after_the_launch_end_in_a_close_once_its_count_is_over() {
+        let mut run = Run::new();
+        launched_then_handed_over(&mut run);
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(8.0, 33.0);
+        off_through(&mut run, 33.5, 35.0);
+        run.on_through(35.5, 69.5);
+        off_through(&mut run, 70.0, 71.5);
+        run.on_through(72.0, 73.5);
+        off_through(&mut run, 74.0, 75.5);
+        run.on_through(76.0, 76.5);
+        // No session at 120 s.
+        off_through(&mut run, 77.0, 124.5);
+        assert!(run.fake.closes.is_empty());
+        run.on(125.0);
+        assert_eq!(run.fake.closes, vec![vec![11]]);
+        assert_eq!(run.log.count("kept for this session"), 5);
+        assert_eq!(run.fake.launches.len(), 1);
+    }
+
+    /// A launch its session gave up on (its loader ran 10 min) is not kept: the next session
+    /// neither counts nor closes it, nor says it is starting.
+    #[test]
+    fn a_launch_given_up_on_is_not_kept() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.game_with_loader(&[10], &[], false);
+        for s in 1..=600 {
+            run.on(f64::from(s));
+        }
+        assert_eq!(run.sup.state(), HelperState::GaveUp);
+        off_through(&mut run, 600.5, 602.0);
+        run.on_through(602.5, 700.0);
+        run.game_with_loader(&[], &[11], false);
+        run.on_through(700.5, 900.0);
+        assert_eq!(run.log.count("kept for this session"), 0);
+        assert!(run.fake.closes.is_empty());
+        assert!(!run.sup.launch_pending());
+        assert_eq!(run.fake.launches.len(), 1);
+    }
+
+    /// A kept launcher (waiting for «Play», maybe) gets 10 min from the launch, not 10 min with
+    /// every viewer: it gives up once, with the failed-launch mark, and the session after does
+    /// not keep it.
+    #[test]
+    fn a_kept_launcher_gives_up_once_at_ten_minutes_after_the_launch() {
+        let mut run = Run::new();
+        run.on(0.0);
+        run.game_with_loader(&[10], &[], false);
+        for s in 1..=300 {
+            run.on(f64::from(s));
+        }
+        off_through(&mut run, 301.0, 302.0);
+        for s in 303..=599 {
+            run.on(f64::from(s));
+        }
+        assert_eq!(run.sup.state(), HelperState::Launching);
+        assert!(run.sup.launch_pending());
+        run.on(600.0);
+        assert_eq!(run.sup.state(), HelperState::GaveUp);
+        assert!(run.sup.failed_launch());
+        assert!(!run.sup.launch_pending());
+        assert_eq!(
+            run.log.count_at(
+                Level::Error,
+                "no game window 600.0 s after the launch, and the launch exe still runs (pids \
+                 [10]; game pids [10]; no visible window of theirs)"
+            ),
+            1
+        );
+        run.at(601.0, Signal::NotSet);
+        for s in 602..=900 {
+            run.on(f64::from(s));
+        }
+        assert_eq!(run.log.count("kept for this session"), 1);
+        assert_eq!(
+            run.log
+                .count_at(Level::Error, "the helper gives up until the next session"),
+            1
+        );
+        assert!(run.fake.closes.is_empty());
+        assert!(!run.sup.launch_pending());
     }
 
     /* ── «Игра не запускается»: the failed-launch mark ─────────────────────────────────────── */

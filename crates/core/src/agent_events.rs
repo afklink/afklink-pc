@@ -1,6 +1,6 @@
 //! What happened on the PC outside any session, for the server: `agent_event` (a process started,
 //! the last one crashed, an update ended, the input driver's installer ended, the owner changed a
-//! setting). Kept in a queue on disk until a connection took them.
+//! setting, a secure-desktop episode ended). Kept in a queue on disk until a connection took them.
 //!
 //! The queue is `agent_events.json` in the data directory ([`crate::paths::afklink_dir`]:
 //! `%APPDATA%\AFKLink`, or the CLI's `--data-dir`), beside `run_state.json`, rewritten whole on
@@ -14,6 +14,9 @@
 //!
 //! # Delivery
 //!
+//! - **Only to a server that takes the kind.** `secure_desktop_ended` goes only on a connection whose
+//!   `agent_ready` said `secure_desktop`; on any other it is dropped from the queue rather than sent
+//!   ([`EventQueue::due`]), so an older server never answers it `bad_message`.
 //! - **Only after `agent_ready`.** The orchestrator sends the queue on a connection whose handshake
 //!   is done ([`crate::Agent`], `connect_and_serve`), again when something is queued while it is
 //!   up, and on its tick for what the budget held back. A server older than the message answers
@@ -45,8 +48,24 @@ const VERSION: u32 = 1;
 
 /// Events that wait, at most. A healthy PC has one or two at a time; this is a bound on a PC that
 /// stays offline through a crash loop, not a budget. Past it the oldest goes (counted in the file's
-/// `dropped`, warned once a process).
+/// `dropped`, warned once a process) — the oldest `secure_desktop_ended` first ([`evicted`]).
 pub const QUEUE_CAP: usize = 64;
+
+/// Which waiting event goes when the queue is full: the oldest `secure_desktop_ended` if one waits,
+/// else the oldest of all. A PC that stays offline and is locked and unlocked again and again makes
+/// one of those each time; they must not push out the rarer facts (a crash, an update, the input
+/// driver's installer). `None` for an empty queue.
+fn evicted(events: &[Stored]) -> Option<usize> {
+    if events.is_empty() {
+        return None;
+    }
+    Some(
+        events
+            .iter()
+            .position(|s| matches!(s.event.event, AgentEventKind::SecureDesktopEnded { .. }))
+            .unwrap_or(0),
+    )
+}
 
 /// Sends an hour, resends included: a fifth of what the server takes from a device (300), so the
 /// agent never comes near its limit. The times of the sends are kept in the file, so a crash loop
@@ -279,7 +298,11 @@ fn read_file(text: &str) -> Result<QueueFile, serde_json::Error> {
     }
     if file.events.len() > QUEUE_CAP {
         let over = file.events.len() - QUEUE_CAP;
-        file.events.drain(..over);
+        for _ in 0..over {
+            if let Some(i) = evicted(&file.events) {
+                file.events.remove(i);
+            }
+        }
         file.dropped = file.dropped.saturating_add(over as u64);
         tracing::warn!(
             cap = QUEUE_CAP,
@@ -409,7 +432,7 @@ impl EventQueue {
     /// - Each fact once: an event identical to one waiting, or to one delivered by this process, is
     ///   not queued again. One of the same kind at the same `at` with other props is moved a
     ///   millisecond on, so the server's kind-and-`at` rule cannot merge two facts.
-    /// - Bounded by [`QUEUE_CAP`]: past it the oldest goes.
+    /// - Bounded by [`QUEUE_CAP`]: past it the oldest goes, the oldest `secure_desktop_ended` first.
     pub fn record(&self, mut event: AgentEvent) -> Recorded {
         let kind = event.event.kind();
         if let Err(e) = event.check() {
@@ -459,8 +482,10 @@ impl EventQueue {
                 "agent event moved on: its `at` was another fact's"
             );
         }
-        if inner.file.events.len() >= QUEUE_CAP {
-            let gone = inner.file.events.remove(0);
+        if let Some(i) =
+            evicted(&inner.file.events).filter(|_| inner.file.events.len() >= QUEUE_CAP)
+        {
+            let gone = inner.file.events.remove(i);
             inner.in_flight.remove(&gone.id);
             inner.file.dropped = inner.file.dropped.saturating_add(1);
             if std::mem::replace(&mut inner.cap_warned, true) {
@@ -474,7 +499,8 @@ impl EventQueue {
                     dropped = gone.event.event.kind(),
                     dropped_at = gone.event.at,
                     dropped_ever = inner.file.dropped,
-                    "agent events: the queue is full (offline for long?); the oldest is dropped"
+                    "agent events: the queue is full (offline for long?); the oldest is dropped \
+                     (the oldest secure_desktop_ended first)"
                 );
             }
         }
@@ -508,14 +534,45 @@ impl EventQueue {
     /// The events to send now on connection `link`: every waiting one not already on its way on
     /// that connection, as far as the budget allows, marked as sent at `now` on a connection held
     /// to `silence_limit` (`afklink_transport::LinkHealth::silence_limit`).
+    ///
+    /// `secure_desktop`: the connection's `agent_ready` said it takes `secure_desktop_ended`. On one
+    /// that did not (an older server, which would answer `bad_message`), such events are never sent:
+    /// they leave the queue here, as the contract has it ("the agent drops a finished episode's
+    /// event rather than queue it for such a server"), so they neither reach it nor wait in the
+    /// queue's bound for a server that may never come.
     pub fn due(
         &self,
         link: u64,
         now: Instant,
         now_ms: u64,
         silence_limit: Duration,
+        secure_desktop: bool,
     ) -> Vec<AgentEvent> {
         let mut inner = lock(&self.inner);
+        if !secure_desktop {
+            let before = inner.file.events.len();
+            let Inner {
+                file, in_flight, ..
+            } = &mut *inner;
+            file.events.retain(|s| {
+                let keep = !matches!(s.event.event, AgentEventKind::SecureDesktopEnded { .. });
+                if !keep {
+                    in_flight.remove(&s.id);
+                }
+                keep
+            });
+            let dropped = before - inner.file.events.len();
+            if dropped > 0 {
+                tracing::info!(
+                    link,
+                    dropped,
+                    waiting = inner.file.events.len(),
+                    "agent events: this connection's server does not take secure_desktop_ended (an \
+                     older one); those events are dropped, not sent"
+                );
+                self.write(&mut inner, "dropped for the server");
+            }
+        }
         let window_ms = u64::try_from(BUDGET_WINDOW.as_millis()).unwrap_or(u64::MAX);
         inner.file.sends.retain(|&at| {
             now_ms.saturating_sub(at) < window_ms && at <= now_ms.saturating_add(window_ms)
@@ -761,6 +818,17 @@ fn props_line(e: &AgentEventKind) -> String {
         AgentEventKind::PcSettingChanged { key, value } => {
             format!("key={} value={value}", key.as_str())
         }
+        AgentEventKind::SecureDesktopEnded {
+            desktop,
+            duration_ms,
+            session_id,
+            game_only,
+        } => format!(
+            "desktop={} duration_ms={duration_ms} session={} game_only={}",
+            desktop.as_str(),
+            session_id.as_deref().unwrap_or("-"),
+            game_only.map_or_else(|| "-".to_string(), |g| g.to_string())
+        ),
     }
 }
 
@@ -940,6 +1008,54 @@ mod tests {
         }
     }
 
+    fn secure_desktop(at: u64) -> AgentEvent {
+        AgentEvent {
+            at,
+            event: AgentEventKind::SecureDesktopEnded {
+                desktop: afklink_protocol::SecureDesktopKind::Uac,
+                duration_ms: 47_310,
+                session_id: Some("3fa85f64-5717-4562-b3fc-2c963f66afa6".into()),
+                game_only: Some(true),
+            },
+        }
+    }
+
+    /// A finished episode's event goes only to a server that takes it. On one that does not it is
+    /// never sent and leaves the queue — on disk too — while the rest of the queue goes as before;
+    /// one already on its way on another connection is forgotten with it.
+    #[test]
+    fn a_secure_desktop_event_never_reaches_a_server_that_does_not_take_it() {
+        let d = dir("secure-desktop");
+        let q = EventQueue::open(&d);
+        q.claim();
+        let t0 = Instant::now();
+        assert!(matches!(
+            q.record(secure_desktop(1_789_600_400_000)),
+            Recorded::Queued { .. }
+        ));
+        assert!(matches!(
+            q.record(setting(1_789_600_300_000, true)),
+            Recorded::Queued { pending: 2, .. }
+        ));
+        // A connection that takes it: both go.
+        let sent = q.due(1, t0, 1_789_600_401_000, SHORT, true);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(q.link_down(1), 2);
+        // An older server's: only the setting, and the episode's event is gone for good.
+        let sent = q.due(2, t0, 1_789_600_402_000, SHORT, false);
+        assert_eq!(sent, [setting(1_789_600_300_000, true)]);
+        assert_eq!(q.pending(), 1);
+        drop(q);
+        let q = EventQueue::open(&d);
+        assert_eq!(
+            q.waiting(),
+            [setting(1_789_600_300_000, true)],
+            "on disk too"
+        );
+        q.claim();
+        assert_eq!(q.due(3, t0, 1_789_600_403_000, SHORT, true).len(), 1);
+    }
+
     /// Queued on disk, still there for the next process, sent on its connection with the `at` it
     /// was recorded at, and gone once the connection stayed up past the confirmation.
     #[test]
@@ -960,7 +1076,7 @@ mod tests {
         ));
         // Sent on a connection that ends at once: still waiting.
         let t0 = Instant::now();
-        assert_eq!(q.due(1, t0, 1_789_600_301_000, SHORT).len(), 2);
+        assert_eq!(q.due(1, t0, 1_789_600_301_000, SHORT, true).len(), 2);
         assert_eq!(q.link_down(1), 2);
         drop(q);
 
@@ -968,7 +1084,7 @@ mod tests {
         let q = EventQueue::open(&d);
         assert_eq!(q.pending(), 2);
         q.claim();
-        let sent = q.due(1, t0, 1_789_600_400_000, SHORT);
+        let sent = q.due(1, t0, 1_789_600_400_000, SHORT, true);
         let ats: Vec<u64> = sent.iter().map(|e| e.at).collect();
         assert_eq!(
             ats,
@@ -976,7 +1092,7 @@ mod tests {
             "the same `at`, in order"
         );
         assert!(
-            q.due(1, t0, 1_789_600_400_000, SHORT).is_empty(),
+            q.due(1, t0, 1_789_600_400_000, SHORT, true).is_empty(),
             "not twice on one connection"
         );
         let soon = t0 + Duration::from_secs(5);
@@ -1018,7 +1134,7 @@ mod tests {
         ));
         // Delivered, then recorded again by the same process: still once.
         let t0 = Instant::now();
-        q.due(7, t0, 2_000, SHORT);
+        q.due(7, t0, 2_000, SHORT, true);
         q.confirm(
             7,
             t0 + SHORT + CONFIRM_MARGIN,
@@ -1062,13 +1178,16 @@ mod tests {
         }
         let t0 = Instant::now();
         let now_ms = 1_789_600_000_000;
-        assert_eq!(q.due(1, t0, now_ms, SHORT).len(), 40);
+        assert_eq!(q.due(1, t0, now_ms, SHORT, true).len(), 40);
         q.link_down(1);
         // The same forty again on the next connection: only twenty fit the hour.
-        assert_eq!(q.due(2, t0, now_ms + 1_000, SHORT).len(), SEND_BUDGET - 40);
+        assert_eq!(
+            q.due(2, t0, now_ms + 1_000, SHORT, true).len(),
+            SEND_BUDGET - 40
+        );
         // An hour on, room again.
         q.link_down(2);
-        assert_eq!(q.due(3, t0, now_ms + 3_601_000, SHORT).len(), 40);
+        assert_eq!(q.due(3, t0, now_ms + 3_601_000, SHORT, true).len(), 40);
     }
 
     /// Events go out the moment a connection is up, and its path dies a second later. The pump
@@ -1082,7 +1201,7 @@ mod tests {
         q.record(setting(1_000, true));
         q.record(driver(2_000));
         let t0 = Instant::now();
-        assert_eq!(q.due(1, t0, 1_789_600_000_000, LONG).len(), 2);
+        assert_eq!(q.due(1, t0, 1_789_600_000_000, LONG, true).len(), 2);
         // The path dies a second after the send: the last word heard.
         let dead = up(t0 + Duration::from_secs(1), LONG);
         for after in [5u64, 30, 45, 49, 60, 120] {
@@ -1101,7 +1220,7 @@ mod tests {
         // The next connection is healthy: its pings are judged fast ten seconds in (the limit
         // drops to 20 s) and keep coming. The limit at the send (45 s) still governs.
         let t1 = t0 + Duration::from_secs(60);
-        assert_eq!(q.due(2, t1, 1_789_600_060_000, LONG).len(), 2);
+        assert_eq!(q.due(2, t1, 1_789_600_060_000, LONG, true).len(), 2);
         let pinging = |at: u64| up(t1 + Duration::from_secs(at), SHORT);
         assert_eq!(q.confirm(2, t1 + Duration::from_secs(25), pinging(24)), 0);
         assert_eq!(q.confirm(2, t1 + Duration::from_secs(49), pinging(48)), 0);
@@ -1119,7 +1238,7 @@ mod tests {
         let q = EventQueue::in_memory();
         q.record(setting(1_000, true));
         let t0 = Instant::now();
-        q.due(1, t0, 1_789_600_000_000, SHORT);
+        q.due(1, t0, 1_789_600_000_000, SHORT, true);
         let late = t0 + SHORT + CONFIRM_MARGIN;
         let just_before = t0 + HEARD_AFTER - Duration::from_millis(1);
         assert_eq!(q.confirm(1, late, up(just_before, SHORT)), 0);
@@ -1139,6 +1258,41 @@ mod tests {
         let inner = lock(&q.inner);
         assert_eq!(inner.file.dropped, 5);
         assert_eq!(inner.file.events[0].event.at, 105, "the oldest went");
+    }
+
+    /// A full queue lets the oldest `secure_desktop_ended` go before any other kind: a PC locked and
+    /// unlocked again and again while offline keeps its driver install's event; with none of them
+    /// left, the oldest of all goes as before.
+    #[test]
+    fn a_full_queue_lets_secure_desktop_events_go_first() {
+        let q = EventQueue::in_memory();
+        q.claim();
+        assert!(matches!(q.record(driver(10)), Recorded::Queued { .. }));
+        for i in 0..(QUEUE_CAP as u64 + 10) {
+            q.record(secure_desktop(1_000 + i));
+        }
+        assert_eq!(q.pending(), QUEUE_CAP);
+        let waiting = q.waiting();
+        assert_eq!(waiting[0], driver(10), "the driver's event stays");
+        assert_eq!(waiting[1].at, 1_011, "the oldest episodes went");
+        assert_eq!(lock(&q.inner).file.dropped, 11);
+
+        let q = EventQueue::in_memory();
+        q.claim();
+        q.record(secure_desktop(5));
+        for i in 0..(QUEUE_CAP as u64) {
+            q.record(setting(100 + i, true));
+        }
+        let waiting = q.waiting();
+        assert_eq!(waiting.len(), QUEUE_CAP);
+        assert!(
+            waiting
+                .iter()
+                .all(|e| !matches!(e.event, AgentEventKind::SecureDesktopEnded { .. })),
+            "the episode went first, though newer settings came"
+        );
+        q.record(setting(1_000, false));
+        assert_eq!(q.waiting()[0].at, 101, "then the oldest of all");
     }
 
     /// A start after a panic: `agent_crashed` at the panic's time, then `agent_started` at this

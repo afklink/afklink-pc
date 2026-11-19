@@ -226,6 +226,12 @@ pub struct Heartbeat {
     /// [`Self::vis_ok`]. Absent (false) otherwise, and from older agents.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bg_hold: bool,
+    /// The PC's input is on another Windows desktop now (`afklink_core::secure_desktop`): a UAC
+    /// prompt, the lock screen, another one. Meanwhile no frame comes — the pipeline's own fields go
+    /// on as they are, typically `ok` and `still` — and the viewer shows its status over the frozen
+    /// picture. Absent while the input is on the ordinary desktop, and from older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure_desktop: Option<crate::SecureDesktopKind>,
 }
 
 /// Everything the agent sends the viewer over a DataChannel. The discriminant is `t`.
@@ -286,6 +292,29 @@ mod tests {
             input_blocked: false,
             vis_ok: false,
             bg_hold: false,
+            secure_desktop: None,
+        }
+    }
+
+    /// Absent while the input is on the ordinary desktop — an older agent's heartbeat and this
+    /// one's then read alike — and each kind in its wire spelling while it is elsewhere.
+    #[test]
+    fn secure_desktop_is_on_the_wire_only_while_the_input_is_elsewhere() {
+        let json = AgentDataMessage::Heartbeat(ok_beat()).to_json().unwrap();
+        assert!(!json.contains("secure_desktop"), "{json}");
+        for kind in crate::SecureDesktopKind::ALL {
+            let beat = Heartbeat {
+                secure_desktop: Some(kind),
+                still: true,
+                ..ok_beat()
+            };
+            let json = AgentDataMessage::Heartbeat(beat.clone()).to_json().unwrap();
+            assert!(
+                json.contains(&format!(r#""secure_desktop":"{}""#, kind.as_str())),
+                "{json}"
+            );
+            let back: AgentDataMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, AgentDataMessage::Heartbeat(beat));
         }
     }
 

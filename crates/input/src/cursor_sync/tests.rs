@@ -442,9 +442,10 @@ fn a_camera_turn_moves_as_before_and_the_cursor_is_re_anchored_after_it() {
     assert!(error <= 1.5, "{before_turn:?} + (30, 15) -> {end:?}");
 }
 
-/// Everything that is not a visible cursor on the captured screen is the camera's.
+/// A hidden, suppressed or unreadable cursor is the camera's, wherever it is and whatever the viewer
+/// sends; so is a visible one on another monitor when there is no target to put it on.
 #[test]
-fn hidden_suppressed_offscreen_and_unreadable_cursors_are_the_cameras() {
+fn hidden_suppressed_unreadable_and_untargeted_offscreen_cursors_are_the_cameras() {
     let sets: [fn(&mut SimCursor); 3] = [
         |s| s.showing = false,
         |s| s.suppressed = true,
@@ -456,34 +457,378 @@ fn hidden_suppressed_offscreen_and_unreadable_cursors_are_the_cameras() {
         assert_eq!(r.frame((5.0, 0.0), Some((10, 10))), Plan::Camera);
         assert_eq!(r.frame((5.0, 0.0), None), Plan::Camera);
     }
-    // Off the captured screen: on a second monitor to its left.
-    let mut r = Rig::new(144);
-    struct Offscreen(SimCursor);
-    impl CursorWorld for Offscreen {
-        fn look(&mut self) -> Result<CursorLook, String> {
-            let mut l = self.0.look()?;
-            l.x = -300;
-            Ok(l)
-        }
-        fn screen(&mut self) -> (i32, i32) {
-            self.0.screen()
-        }
-        fn settings(&mut self) -> Result<PointerSettings, String> {
-            self.0.settings()
-        }
-        fn foreground(&mut self) -> usize {
-            self.0.foreground()
-        }
-        fn describe_foreground(&mut self, window: usize) -> ForegroundInfo {
-            self.0.describe_foreground(window)
-        }
+    // On a second monitor to the left, with no target (a finger mode): the camera's counts, and the
+    // counts move it there as before.
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sim.warp(-300, 500);
+    for _ in 0..5 {
+        assert_eq!(r.frame((-6.0, 0.0), None), Plan::Camera);
     }
-    let mut world = Offscreen(SimCursor::new(144, r.sim.now));
-    let event = r.event((5.0, 0.0), Some((10, 10)));
+    assert!(r.settled().0 < -300, "{:?}", r.sim.position());
+}
+
+/// A game turning its camera hides the cursor: off the captured screen and with a target, it stays
+/// the camera's. Its counts are the hand's own pixels of the screen (73 and -21 for ten moves of
+/// 7.3 and -2.1 px), not exact mode's pixels over the gain, so the camera's sensitivity is unchanged.
+#[test]
+fn a_hidden_cursor_off_the_captured_screen_keeps_the_cameras_counts() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sync.set_space(Some(CLIENT), r.sim.now);
+    r.sim.warp(-1200, 500);
+    r.sim.showing = false;
+    for i in 0..10 {
+        let plan = r.frame((7.3, -2.1), Some((1800, 1000 + i)));
+        assert_eq!(plan, Plan::Camera);
+    }
+    let total = r
+        .camera_counts
+        .iter()
+        .fold((0, 0), |t, c| (t.0 + c.0, t.1 + c.1));
+    assert_eq!(total, (73, -21));
+    assert_eq!(r.absolute_plans(), 0);
+    assert_eq!(r.sync.mode, Some(Mode::Camera));
+    // Windows moved the hidden cursor 1.5 px a count at 150 %, still on the other monitor.
+    let at = r.settled();
+    assert_eq!(at, (-1200 + 109, 500 - 32), "{at:?}");
+}
+
+/// A visible cursor on another monitor and a viewer pointing at the picture: one absolute move puts
+/// it on the pointer's pixel, and the moves after it, inside, are point moves as usual.
+#[test]
+fn a_visible_cursor_off_the_captured_screen_is_put_onto_the_target() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sim.warp(-1123, 524);
+    let plan = r.frame((4.0, 0.0), Some((2000, 900)));
+    assert_eq!(
+        plan,
+        Plan::Absolute {
+            px: 2000,
+            py: 900,
+            width: 3600,
+            height: 2400
+        }
+    );
+    assert_eq!(r.sync.mode, Some(Mode::Point));
+    assert_eq!(r.settled(), (2000, 900));
+    let plan = r.frame((4.0, 0.0), Some((2004, 900)));
+    assert!(matches!(plan, Plan::Absolute { .. }), "{plan:?}");
+    assert_eq!(r.settled(), (2004, 900));
+}
+
+/// With a button held (a drag that started inside, the PC's own mouse took the cursor away): one
+/// absolute move brings it back onto the target, and the drag goes on relatively from there.
+#[test]
+fn a_held_button_off_the_captured_screen_is_brought_in_once_then_dragged() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sim.warp(-500, 700);
+    r.held = true;
+    let plan = r.frame((10.0, 0.0), Some((1500, 900)));
+    assert!(matches!(plan, Plan::Absolute { .. }), "{plan:?}");
+    assert_eq!(r.settled(), (1500, 900));
+    let mut target = (1500, 900);
+    for _ in 0..10 {
+        target.0 += 15;
+        let plan = r.frame((15.0, 0.0), Some(target));
+        assert!(
+            matches!(plan, Plan::Relative { .. } | Plan::Nothing),
+            "inside, a drag moves relatively: {plan:?}"
+        );
+        assert_eq!(r.sync.mode, Some(Mode::Exact));
+    }
+    let end = r.settled();
+    assert!(dist(end, pixel(target)) <= 1.5, "{end:?} vs {target:?}");
+    assert_eq!(r.absolute_plans(), 1);
+}
+
+/// The live case: two 2560×1440 monitors, the second at x = −2560; game-only mode with the game's
+/// client area 2560×1376 at 0,31; the cursor showing over a browser on the second monitor at
+/// (−1123, 524). The viewer's first move with a target puts the cursor in the game where it points,
+/// a press is judged there, and the moves after it keep it in the game.
+#[test]
+fn in_game_only_mode_a_cursor_on_the_other_monitor_comes_into_the_game() {
+    let game = Space {
+        left: 0,
+        top: 31,
+        width: 2560,
+        height: 1376,
+    };
+    let mut r = Rig::with(96, |s| {
+        s.width = 2560;
+        s.height = 1440;
+        s.left_monitor = 2560;
+    });
+    r.sim.warp(-1123, 524);
+    r.sync.set_space(Some(game), r.sim.now);
+    let to = |x: f64, y: f64| RelEvent {
+        dx: 0.002,
+        dy: 0.0,
+        x: Some(x),
+        y: Some(y),
+        s: None,
+    };
+    r.sim.advance(FRAME);
+    let plan = r.send_event(to(0.25, 0.5));
+    assert_eq!(
+        plan,
+        Plan::Absolute {
+            px: 640,
+            py: 31 + 688,
+            width: 2560,
+            height: 1440
+        }
+    );
     let now = r.sim.now;
     assert_eq!(
-        r.sync.plan(event, false, RelPath::Hid, &mut world, now),
-        Plan::Camera
+        r.sync.press_target(&mut r.sim, now),
+        Some((640, 719)),
+        "a press right after it is judged on the game, not on the browser"
+    );
+    assert_eq!(r.settled(), (640, 719));
+    for (x, y) in [(0.0, 0.0), (1.0, 1.0), (0.5539, 0.0), (0.3, 0.7)] {
+        r.sim.advance(FRAME);
+        r.send_event(to(x, y));
+        let at = r.settled();
+        assert!(
+            game.contains(at.0, at.1),
+            "{at:?} left the game's client area"
+        );
+    }
+}
+
+/// Whatever the target says, the placement lands inside the game's client area on the primary
+/// monitor: the corners, coordinates out of range or absurd, clamped; a target that is not a number
+/// is no target, and the cursor stays the camera's. A game partly off the primary monitor, pointed at
+/// in its part on the other monitor: clamped into its part on the primary one.
+#[test]
+fn in_game_only_mode_a_placement_from_another_monitor_stays_in_the_game() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sync.set_space(Some(CLIENT), r.sim.now);
+    let at = |x: f64, y: f64| RelEvent {
+        dx: 0.001,
+        dy: 0.0,
+        x: Some(x),
+        y: Some(y),
+        s: None,
+    };
+    for (x, y) in [(0.0, 0.0), (1.0, 1.0), (-5.0, 7.0), (1e300, -1e300)] {
+        r.sim.warp(-1123, 524);
+        r.sim.advance(FRAME);
+        let plan = r.send_event(at(x, y));
+        assert!(
+            matches!(plan, Plan::Absolute { .. }),
+            "({x}, {y}): {plan:?}"
+        );
+        let p = r.settled();
+        assert!(
+            CLIENT.contains(p.0, p.1) && (0..3600).contains(&p.0) && (0..2400).contains(&p.1),
+            "({x}, {y}) -> {p:?}"
+        );
+    }
+    let before = r.absolute_plans();
+    r.sim.warp(-1123, 524);
+    r.sim.advance(FRAME);
+    assert_eq!(r.send_event(at(f64::NAN, 0.5)), Plan::Camera);
+    assert_eq!(
+        r.absolute_plans(),
+        before,
+        "no absolute move without a target"
+    );
+
+    let straddling = Space {
+        left: -1000,
+        top: 100,
+        width: 3000,
+        height: 1200,
+    };
+    r.sync.set_space(Some(straddling), r.sim.now);
+    r.sim.warp(-2000, 500);
+    r.sim.advance(FRAME);
+    // 0.1 of the way across is x = -700, on the other monitor.
+    let plan = r.send_event(at(0.1, 0.5));
+    assert_eq!(
+        plan,
+        Plan::Absolute {
+            px: 0,
+            py: 700,
+            width: 3600,
+            height: 2400
+        }
+    );
+    let p = r.settled();
+    assert!(straddling.contains(p.0, p.1) && p.0 >= 0, "{p:?}");
+}
+
+/// Game-only mode, a button held, the cursor on the other monitor: exactly one absolute move into
+/// the client area, then exact moves, which keep the cursor and the aim in it as the drag pushes
+/// past its edge.
+#[test]
+fn in_game_only_mode_a_held_button_from_another_monitor_is_brought_in_once_and_kept_in() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sync.set_space(Some(CLIENT), r.sim.now);
+    r.sim.warp(-800, 900);
+    r.held = true;
+    let mut target = (3300, 2000);
+    let plan = r.frame((5.0, 0.0), Some(target));
+    assert!(matches!(plan, Plan::Absolute { .. }), "{plan:?}");
+    let p = r.settled();
+    assert!(CLIENT.contains(p.0, p.1), "{p:?}");
+    for i in 0..30 {
+        target = ((target.0 + 20).min(3599), (target.1 + 20).min(2399));
+        let plan = r.frame((20.0, 20.0), Some(target));
+        assert!(
+            matches!(plan, Plan::Relative { .. } | Plan::Nothing),
+            "frame {i}: {plan:?}"
+        );
+        assert_eq!(r.sync.mode, Some(Mode::Exact));
+        let aim = r.sync.aim.unwrap();
+        assert!(
+            (12.0..=3587.0).contains(&aim.0) && (47.0..=2314.0).contains(&aim.1),
+            "frame {i}: the aim {aim:?} left the client area"
+        );
+        let p = r.settled();
+        assert!(CLIENT.contains(p.0, p.1), "frame {i}: {p:?}");
+    }
+    assert_eq!(r.absolute_plans(), 1);
+}
+
+/// A drag in exact mode (an aim kept), then the PC's own mouse takes the cursor to the other
+/// monitor: the next targeted move is a point move that drops the stale aim; the jump it makes is
+/// ours, so the exact moves after it neither re-anchor nor count someone else's motion; and the
+/// report's `ack` stays below the placement until it shows. A second targeted move before the jump
+/// shows is a second point move, and the `ack` holds below it until it shows too.
+#[test]
+fn a_drag_whose_cursor_went_to_another_monitor_is_put_back_without_a_false_re_anchor() {
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.next_s = Some(0);
+    r.held = true;
+    let mut target = r.sim.position();
+    r.frame((0.0, 0.0), Some(target));
+    for _ in 0..8 {
+        target.0 += 15;
+        let plan = r.frame((15.0, 0.0), Some(target));
+        assert!(
+            matches!(plan, Plan::Relative { .. } | Plan::Nothing),
+            "{plan:?}"
+        );
+    }
+    r.sim.drain();
+    assert!(r.sync.aim.is_some(), "the drag keeps an aim");
+    assert_eq!(r.unshown(), None);
+    let (reanchors, external) = (r.sync.stats.reanchors, r.sync.stats.external);
+
+    // The PC's own mouse: onto the other monitor.
+    r.sim.warp(-900, 600);
+    r.sim.advance(FRAME);
+    let first = (1600, 1000);
+    let s1 = r.next_s.unwrap();
+    let plan = r.send((10.0, 0.0), Some(first));
+    assert!(matches!(plan, Plan::Absolute { .. }), "{plan:?}");
+    assert_eq!(r.sync.mode, Some(Mode::Point));
+    assert_eq!(r.sync.aim, None, "the stale aim is dropped");
+    assert_eq!(r.unshown(), Some(s1), "the placement does not show yet");
+
+    // One millisecond later, before it shows: another targeted move, still off-screen to the planner.
+    r.sim.advance(Duration::from_millis(1));
+    let second = (1640, 1010);
+    let s2 = r.next_s.unwrap();
+    let plan = r.send((10.0, 0.0), Some(second));
+    assert_eq!(
+        plan,
+        Plan::Absolute {
+            px: second.0,
+            py: second.1,
+            width: 3600,
+            height: 2400
+        }
+    );
+    assert_eq!(r.unshown(), Some(s1));
+    // The first shows 2 ms after it was sent, the second a millisecond later.
+    r.sim.advance(Duration::from_millis(1));
+    assert_eq!(r.sim.position(), first);
+    assert_eq!(r.unshown(), Some(s2), "the second does not show yet");
+    r.sim.advance(Duration::from_millis(1));
+    assert_eq!(r.sim.position(), second);
+    assert_eq!(r.unshown(), None);
+
+    // Inside again with the button held: exact moves from the placement, nothing taken for someone
+    // else's motion.
+    let mut target = second;
+    for _ in 0..6 {
+        target.0 += 12;
+        let plan = r.frame((12.0, 0.0), Some(target));
+        assert!(
+            matches!(plan, Plan::Relative { .. } | Plan::Nothing),
+            "{plan:?}"
+        );
+        assert_eq!(r.sync.mode, Some(Mode::Exact));
+    }
+    assert_eq!(r.sync.stats.reanchors, reanchors, "no re-anchor");
+    assert_eq!(r.sync.stats.external, external, "no external motion");
+    let end = r.settled();
+    assert!(dist(end, pixel(target)) <= 1.5, "{end:?} vs {target:?}");
+    assert_eq!(r.absolute_plans(), 2);
+}
+
+/// The absolute paths reach the primary monitor only: a cursor over a game on another monitor, or
+/// a game wholly off the primary monitor, is not pulled onto the primary one.
+#[test]
+fn a_game_off_the_primary_monitor_keeps_its_cursor_the_cameras() {
+    let elsewhere = Space {
+        left: -3000,
+        top: 100,
+        width: 2000,
+        height: 1200,
+    };
+    let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+    r.sync.set_space(Some(elsewhere), r.sim.now);
+    r.sim.warp(-2000, 500);
+    assert_eq!(r.frame((3.0, 0.0), Some((10, 10))), Plan::Camera);
+    r.sim.warp(-3500, 500);
+    assert_eq!(r.frame((3.0, 0.0), Some((10, 10))), Plan::Camera);
+    // A game straddling the monitors, the cursor over its part on the other monitor: the camera's.
+    let straddling = Space {
+        left: -1000,
+        top: 100,
+        width: 3000,
+        height: 1200,
+    };
+    r.sync.set_space(Some(straddling), r.sim.now);
+    r.sim.warp(-500, 500);
+    assert_eq!(r.frame((3.0, 0.0), Some((10, 10))), Plan::Camera);
+    // The cursor off the straddling game too: put on its part on the primary monitor.
+    r.sim.warp(-2000, 500);
+    let plan = r.frame((3.0, 0.0), Some((10, 10)));
+    assert!(matches!(plan, Plan::Absolute { .. }), "{plan:?}");
+    let at = r.settled();
+    assert!(at.0 >= 0 && straddling.contains(at.0, at.1), "{at:?}");
+    assert_eq!(r.absolute_plans(), 1);
+}
+
+/// The placement is said at `debug` with the cursor, the screen and the area, even when the mode
+/// was point already (only the reason changed).
+#[test]
+fn a_placement_from_another_monitor_is_said_with_the_cursor_and_the_area() {
+    let debug = logged(tracing::Level::DEBUG, || {
+        let mut r = Rig::with(144, |s| s.left_monitor = 3600);
+        r.sync.set_space(Some(CLIENT), r.sim.now);
+        r.frame((1.0, 0.0), Some((900, 900)));
+        r.settled();
+        r.sim.warp(-1123, 524);
+        r.frame((1.0, 0.0), Some((900, 900)));
+    });
+    let line = debug
+        .lines()
+        .find(|l| l.contains("placed onto the target"))
+        .unwrap_or_else(|| panic!("no placement line:\n{debug}"));
+    assert!(
+        line.contains("from=\"point\"") || line.contains("from=point"),
+        "{line}"
+    );
+    assert!(line.contains("cursor=-1123,524"), "{line}");
+    assert!(line.contains("screen=3600x2400"), "{line}");
+    assert!(
+        line.contains("area=the game's client area 3576x2268 at 12,47"),
+        "{line}"
     );
 }
 

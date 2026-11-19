@@ -44,6 +44,7 @@ import {
   UPDATE_OUTCOMES,
   VIEWER_BUILD_PATTERN,
 } from "./metrics";
+import { SECURE_DESKTOP_KINDS, SECURE_DESKTOP_LIMITS } from "./secure-desktop";
 import { AGENT_BUILD_CHANNELS } from "./start-failure";
 import { KEY_MODES } from "./viewer-keys";
 
@@ -418,6 +419,31 @@ export const pcSettingChangedPropsSchema = z.object({
   value: z.union([z.boolean(), shortId]),
 });
 
+/**
+ * `secure_desktop_ended`: an episode of the PC's input on another Windows desktop ended
+ * (`secure-desktop.ts`) — in a session or not. Its `agent_event.at` is the episode's start.
+ *
+ * `session_id`: present exactly when a session of this PC was live at some moment of the episode —
+ * the one live when the episode started, otherwise the first that started during it; the server
+ * writes it to the event's `session_id` column. Absent — the episode was outside any session.
+ * `game_only`: the PC's «Только игра» was on when the episode started; absent from an agent that
+ * does not say.
+ *
+ * The agent measures `duration_ms` itself, from leaving the ordinary desktop to coming back to it,
+ * and reports an episode longer than `SECURE_DESKTOP_LIMITS.durationMaxMs` at that bound.
+ */
+export const secureDesktopEndedPropsSchema = z.object({
+  /** Which desktop had the input (`SECURE_DESKTOP_KINDS`); not `kind`, which is the event's. */
+  desktop: z.enum(SECURE_DESKTOP_KINDS),
+  duration_ms: z.number().int().nonnegative().max(SECURE_DESKTOP_LIMITS.durationMaxMs),
+  session_id: sessionIdSchema.optional(),
+  game_only: z.boolean().optional(),
+});
+/** `secure_desktop_ended` as `events` keeps it: `session_id` is the row's column, not a prop. */
+export const secureDesktopEndedStoredPropsSchema = secureDesktopEndedPropsSchema.omit({
+  session_id: true,
+});
+
 /** Each agent event's props, by kind (`AGENT_EVENT_KINDS`). */
 export const AGENT_EVENT_PROPS = {
   agent_started: agentStartedPropsSchema,
@@ -425,6 +451,7 @@ export const AGENT_EVENT_PROPS = {
   update_finished: updateFinishedPropsSchema,
   driver_install_finished: driverInstallFinishedPropsSchema,
   pc_setting_changed: pcSettingChangedPropsSchema,
+  secure_desktop_ended: secureDesktopEndedPropsSchema,
 } as const satisfies Record<AgentEventKind, z.ZodObject>;
 
 /* --- the viewer's connect attempt ---------------------------------------------------------- */

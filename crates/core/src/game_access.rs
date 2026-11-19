@@ -650,6 +650,8 @@ mod tests {
             username: None,
             first_name: Some(format!("n{id}")),
             role,
+            via: None,
+            parties: Vec::new(),
         }
     }
 

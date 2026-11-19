@@ -29,6 +29,16 @@ pub mod game;
 #[cfg(windows)]
 mod wgc;
 
+/// A step-by-step WGC start of the game's window, logged once per failure kind when the crate's
+/// start fails with no `CreateForWindow` error recorded. See the module.
+#[cfg(windows)]
+mod start_probe;
+
+/// The game window capture's last frame, kept on the GPU for the resend after a background hold.
+/// See the module.
+#[cfg(windows)]
+mod retain;
+
 /// The capturer of a session in game mode: the bound game's window only, black frames whenever it
 /// cannot be shown (`afklink_core::game::GameCapturer`, over the Win32 window list and the WGC
 /// window capture). Nothing it can do captures the monitor.
@@ -38,7 +48,7 @@ pub fn game_capturer(request: &GameCaptureRequest) -> Box<dyn Capturer> {
         Box::new(GameCapturer::new(
             request,
             Box::new(game::Win32Windows::new()),
-            Box::new(game::WgcWindowBackend),
+            Box::new(game::WgcWindowBackend::default()),
         ))
     }
     #[cfg(not(windows))]

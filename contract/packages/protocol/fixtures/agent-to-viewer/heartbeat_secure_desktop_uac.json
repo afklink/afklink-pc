@@ -1,0 +1,13 @@
+{
+  "t": "hb",
+  "seq": 91,
+  "state": "ok",
+  "since_capture_ms": 12040,
+  "since_encode_ms": 12043,
+  "still": true,
+  "h": 1080,
+  "fps": 60,
+  "restarts": 0,
+  "rel_exact": true,
+  "secure_desktop": "uac"
+}

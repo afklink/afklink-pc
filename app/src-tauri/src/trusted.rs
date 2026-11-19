@@ -25,7 +25,7 @@ use afklink_core::trusted::{
     DeviceRef, RepairAction, TrustedAsk, TrustedAttempt, TrustedDeviceView, TrustedError,
     TrustedView,
 };
-use afklink_core::viewer_keys::{DamageKind, KeyId, KEY_ID_SHORT_LEN};
+use afklink_core::viewer_keys::{DamageKind, GroundId, KeyId, KEY_ID_SHORT_LEN};
 use afklink_core::{AgentControl, BindingRole};
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,26 @@ pub(crate) struct TrustedDto {
     /// The window token: the epoch, as a decimal string.
     token: String,
     full: bool,
+    /// The parties the PC is in, in join order: a card each in «Доступ».
+    parties: Vec<TrustedPartyDto>,
+}
+
+/// A party the PC is in (party spec §3.1).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedPartyDto {
+    /// In full, for the IPC only (`leave_party`).
+    party_id: String,
+    /// The party's name as the join signed it (cleaned).
+    party: String,
+    leader: TrustedLeaderDto,
+}
+
+/// A party's leader as the join named him.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedLeaderDto {
+    telegram_user_id: i64,
+    first_name: Option<String>,
+    username: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -106,8 +126,10 @@ pub(crate) struct TrustedDeviceDto {
     key_short: String,
     /// `"owner"` | `"guest"`.
     role: &'static str,
-    /// `"pairing"` | `"endorsed"` | `"owner"` | `"restored"` | `"migrated"`.
+    /// `"pairing"` | `"endorsed"` | `"owner"` | `"restored"` | `"migrated"` | `"party"`.
     source: &'static str,
+    /// `"party"`: the party whose leader let it in, by its id (`TrustedPartyDto::party_id`).
+    party_id: Option<String>,
     by: Option<TrustedDeviceRefDto>,
     by_key_id: Option<String>,
     unconfirmed: bool,
@@ -139,6 +161,7 @@ pub(crate) fn source_name(source: &str) -> &'static str {
         "grant" => "owner",
         "recover" => "restored",
         "first_use" => "migrated",
+        "party" => "party",
         other => {
             tracing::debug!(
                 source = other,
@@ -178,6 +201,7 @@ fn device_dto(d: &TrustedDeviceView) -> TrustedDeviceDto {
         key_short: key_short(&d.key_id),
         role: role_name(d.role),
         source: source_name(d.source),
+        party_id: d.party.as_ref().map(|p| p.as_str().to_string()),
         by: d.by.as_ref().map(device_ref),
         by_key_id: d.by_key_id.as_ref().map(|k| k.as_str().to_string()),
         unconfirmed: d.unconfirmed,
@@ -247,6 +271,19 @@ pub(crate) fn trusted_dto(view: &TrustedView) -> TrustedDto {
         clean: view.clean,
         token: view.token.to_string(),
         full: view.full,
+        parties: view
+            .parties
+            .iter()
+            .map(|p| TrustedPartyDto {
+                party_id: p.party_id.as_str().to_string(),
+                party: p.party.clone(),
+                leader: TrustedLeaderDto {
+                    telegram_user_id: p.leader.telegram_user_id,
+                    first_name: p.leader.first_name.clone(),
+                    username: p.leader.username.clone(),
+                },
+            })
+            .collect(),
     }
 }
 
@@ -507,6 +544,33 @@ fn repair_ask(action: &str, token: Option<&str>) -> Result<TrustedAsk, String> {
     Ok(TrustedAsk::Repair(action))
 }
 
+/// «Убрать ПК из пати» as the window asks it: the party by its id; anything that is not one is a
+/// party the PC is not in (`not_found`).
+fn leave_party_ask(party_id: &str) -> Result<TrustedAsk, String> {
+    let Some(party_id) = GroundId::parse(party_id) else {
+        tracing::debug!(
+            len = party_id.len(),
+            "trusted devices: leave_party refused not_found (not a party id)"
+        );
+        return Err(TrustedError::NotFound.as_str().to_string());
+    };
+    Ok(TrustedAsk::PartyLeave { party_id })
+}
+
+/// «Убрать ПК из пати» (party spec §6): an organ of trust — the orchestrator refuses it `session`
+/// while any session not signed by a confirmed owner key is live or pending, as every other trust
+/// command of the window. The number of keys that left; `not_found` when the PC is not in it,
+/// `damaged` on a list that does not read.
+#[tauri::command]
+pub(crate) async fn leave_party(
+    control: State<'_, AgentControl>,
+    party_id: String,
+) -> Result<u32, String> {
+    let control = control.inner().clone();
+    let ask_for = leave_party_ask(&party_id)?;
+    ask(&control, "leave_party", ask_for).await
+}
+
 /// A repair at the PC: `"reopen"`, `"restore"` (with the dialog's window token) or `"reset"`.
 #[tauri::command]
 pub(crate) async fn repair_trusted(
@@ -539,6 +603,7 @@ mod tests {
             },
             role: BindingRole::Guest,
             source,
+            party: None,
             by: None,
             by_key_id: None,
             unconfirmed: true,
@@ -594,6 +659,7 @@ mod tests {
             clean: false,
             token: 42,
             full: true,
+            parties: vec![],
         };
         let dto = trusted_dto(&view);
         let json = serde_json::to_value(&dto).expect("json");
@@ -750,6 +816,7 @@ mod tests {
             clean: true,
             token: 1,
             full: false,
+            parties: vec![],
         };
         let mut dto = trusted_dto(&view);
         let live: std::collections::BTreeSet<String> =
@@ -786,6 +853,7 @@ mod tests {
                 clean: true,
                 token: 1,
                 full: false,
+                parties: vec![],
             };
             let json = serde_json::to_value(trusted_dto(&view)).expect("json");
             assert_eq!(json["state"], "damaged");
@@ -818,6 +886,79 @@ mod tests {
             Ok(TrustedAsk::Repair(RepairAction::Reset))
         );
         assert_eq!(repair_ask("wipe", Some("1")), Err("refused".to_string()));
+    }
+
+    /// The parties reach the window as cards, and a party's device names its party; the leave
+    /// asks for a party by its id only.
+    #[test]
+    fn the_parties_and_a_partys_device_map_to_the_contract() {
+        use afklink_core::trusted::TrustedParty;
+        use afklink_core::viewer_keys::Person;
+        let party = GroundId::parse(&format!("{}A", "B".repeat(21))).expect("a party id");
+        let mut member = device(kid('C'), "telegram", "party");
+        member.party = Some(party.clone());
+        let view = TrustedView {
+            rev: 3,
+            damage: None,
+            trusted_mode: true,
+            people: vec![TrustedPerson {
+                telegram_user_id: 9,
+                first_name: Some("Коля".into()),
+                username: None,
+                devices: vec![member],
+                attempts: Vec::new(),
+                role: BindingRole::Guest,
+                needs_second_step: false,
+            }],
+            waiting: vec![],
+            owner_device: afklink_core::viewer_keys::OwnerDevice::Ready,
+            clean: true,
+            token: 4,
+            full: false,
+            parties: vec![TrustedParty {
+                party_id: party.clone(),
+                party: "Орлы".into(),
+                leader: Person {
+                    telegram_user_id: 7,
+                    first_name: Some("Лёха".into()),
+                    username: Some("lekha".into()),
+                },
+            }],
+        };
+        let json = serde_json::to_value(trusted_dto(&view)).expect("json");
+        assert_eq!(
+            json["parties"],
+            serde_json::json!([{
+                "party_id": party.as_str(),
+                "party": "Орлы",
+                "leader": {"telegram_user_id": 7, "first_name": "Лёха", "username": "lekha"},
+            }])
+        );
+        let d = &json["people"][0]["devices"][0];
+        assert_eq!(d["source"], "party");
+        assert_eq!(d["party_id"], party.as_str());
+        assert_eq!(
+            serde_json::to_value(trusted_dto(&TrustedView {
+                parties: vec![],
+                ..view
+            }))
+            .expect("json")["parties"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            leave_party_ask(party.as_str()),
+            Ok(TrustedAsk::PartyLeave {
+                party_id: party.clone()
+            })
+        );
+        let padded = format!("{}=", party.as_str());
+        for bad in ["", "Орлы", "short", padded.as_str()] {
+            assert_eq!(
+                leave_party_ask(bad),
+                Err("not_found".to_string()),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

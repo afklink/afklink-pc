@@ -1642,3 +1642,102 @@ fn a_flood_of_presses_routed_via_sendinput_says_a_bounded_number_of_lines() {
         "{lines} lines for 10 000 presses"
     );
 }
+
+/* ── Game-only mode's activation click (`game_guard::Activation`) through the driver ── */
+
+/// Through the driver: the absolute report onto the pixel, the wait until the cursor shows exactly
+/// it (2 ms in the simulated Windows), then the button down and up. Nothing stays pressed. A cursor
+/// that never shows it (clipped, the PC's own mouse): no button, refused at the 8 ms deadline.
+#[test]
+fn an_activation_click_goes_only_once_the_cursor_shows_the_pixel() {
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.world().foreground = 0x20;
+    h.at(16);
+    let now = h.now;
+    assert_eq!(
+        h.rt.activation_click(0, (2600, 400), (3600, 2400), now),
+        Ok(())
+    );
+    assert_eq!(mouse_line(&h), line(&[(16, "a"), (18, "b1"), (18, "b0")]));
+    assert_eq!(h.rt.state.mouse.buttons(), 0);
+    assert_eq!(h.cursor_at(), (2600, 400));
+
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.world().cursor.as_mut().unwrap().sim.deaf = true;
+    h.at(16);
+    let now = h.now;
+    let result = h.rt.activation_click(0, (2600, 400), (3600, 2400), now);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|e| e.contains("did not show 2600,400 within 8 ms")),
+        "{result:?}"
+    );
+    assert_eq!(mouse_line(&h), line(&[(16, "a")]), "no button");
+    assert_eq!(
+        h.world().now.saturating_duration_since(now),
+        ORDER_WAIT_MAX,
+        "the deadline, not more"
+    );
+}
+
+/// A button report that fails: the usual recovery (the neutral report) runs, the click stops, and
+/// nothing stays pressed. The neutral report failing too: the device is unusable, and the next
+/// click is refused as such — the caller then clicks by `SendInput`.
+#[test]
+fn an_activation_clicks_failed_report_goes_through_the_recovery() {
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.at(16);
+    // The move, the press: in; the release: refused; the neutral report: in.
+    h.world().failures.extend([false, false, true]);
+    let now = h.now;
+    let result = h.rt.activation_click(0, (2600, 400), (3600, 2400), now);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|e| e.contains("a button report failed")),
+        "{result:?}"
+    );
+    assert_eq!(h.rt.state.mouse.buttons(), 0, "nothing left pressed");
+    assert!(!h.rt.broken);
+
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.at(16);
+    h.world().failures.extend([false, true, true]);
+    let now = h.now;
+    assert!(h
+        .rt
+        .activation_click(0, (2600, 400), (3600, 2400), now)
+        .is_err());
+    assert!(h.rt.broken);
+    let now = h.now;
+    assert_eq!(
+        h.rt.activation_click(0, (2600, 400), (3600, 2400), now),
+        Err(DEVICE_UNUSABLE.to_owned())
+    );
+}
+
+/// With input queued, a button held, or the desktop not the driver's, nothing at all is written.
+#[test]
+fn an_activation_click_needs_nothing_held_and_the_desktop() {
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.button(0, true).unwrap();
+    let before = mouse_line(&h).len();
+    let now = h.now;
+    let result = h.rt.activation_click(2, (2600, 400), (3600, 2400), now);
+    assert!(result.is_err_and(|e| e.contains("a mouse button is held")));
+    assert_eq!(mouse_line(&h).len(), before, "nothing written");
+
+    let mut h = fake::Harness::new();
+    h.plan_moves(144);
+    h.world().target = Target::Blocked;
+    let now = h.now;
+    let result = h.rt.activation_click(0, (2600, 400), (3600, 2400), now);
+    assert!(result.is_err_and(|e| e.contains("may not drive")));
+    assert!(mouse_line(&h).is_empty());
+}

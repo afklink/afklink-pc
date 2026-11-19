@@ -28,12 +28,12 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use afklink_core::game::{
-    client_crop, CaptureGeometry, ClientCrop, Crop, DpiAwareness, GameBinding, GateSend, OwnRects,
-    ScreenRect, WindowCapture, WindowCaptureBackend, WindowCaptureContext, WindowDpi,
-    WindowGeometry, WindowInfo, WindowSource,
+    client_crop, Admit, CaptureGeometry, ClientCrop, Crop, CropRefusal, DpiAwareness, GameBinding,
+    GateSend, OwnRects, Retained, ScreenRect, WindowCapture, WindowCaptureBackend,
+    WindowCaptureContext, WindowDpi, WindowGeometry, WindowInfo, WindowSource,
 };
 use afklink_core::scale::Scaler;
 use afklink_core::sync::lock;
@@ -77,13 +77,15 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use crate::pace;
+use crate::retain::{LastFrame, ReadError, Retainer};
 use crate::session_options::{self, Resolved, SessionOption};
+use crate::start_probe;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /* ── Win32 reads ───────────────────────────────────────────────────────────────────────────── */
 
-fn hwnd_of(hwnd: usize) -> HWND {
+pub(crate) fn hwnd_of(hwnd: usize) -> HWND {
     HWND(hwnd as *mut c_void)
 }
 
@@ -265,12 +267,49 @@ pub fn window_geometry(hwnd: usize) -> Result<(WindowGeometry, Option<String>), 
     ))
 }
 
-/// [`window_geometry`] read under per-monitor-v2 DPI awareness on the calling thread itself. The
-/// WGC dispatcher window can restore its own DPI context during a callback, so a consumer that
-/// reads geometry on the callback thread (a `FrameGate::bounded` one) uses this to stay in the
-/// physical pixels WGC frames are in.
+/// [`window_geometry`] read under per-monitor-v2 DPI awareness on the calling thread itself,
+/// whatever context the thread is in: physical pixels, what WGC frames are in. A thread's own
+/// per-monitor setting does not hold inside a window message: while Windows dispatches one, the
+/// thread takes the awareness of the window it goes to. WGC's frame callback runs inside such a
+/// dispatch, to the capture thread's dispatcher window, which has the process's default awareness
+/// — DPI-unaware in a process without a manifest, where the window and client rectangles and the
+/// monitor's DPI read in 96-DPI units (DWM's frame bounds stay physical in any context).
 pub fn window_geometry_physical(hwnd: usize) -> Result<(WindowGeometry, Option<String>), String> {
     with_physical_dpi(|| window_geometry(hwnd))
+}
+
+/// A frame's crop to the client area, worked out from the window's geometry as [`frame_crop`]
+/// reads it.
+struct FrameCrop {
+    geometry: WindowGeometry,
+    /// Why a stretched window's own rectangles could not be read ([`window_geometry`]).
+    own_unread: Option<String>,
+    /// The crop of the frame, or why it has none.
+    plan: Result<ClientCrop, CropRefusal>,
+}
+
+/// The game window's geometry, read in physical pixels ([`window_geometry_physical`]), and the
+/// crop of a `fw`×`fh` frame of it. The one way the window capture crops: a live frame on the WGC
+/// callback thread and the retained frame on the game capture's thread both come here, so for the
+/// same window and frame size they get the same crop, and the region a sent frame was retained
+/// with is the crop its resend asks for. An error is the geometry unreadable.
+fn frame_crop(hwnd: usize, fw: u32, fh: u32) -> Result<FrameCrop, String> {
+    frame_crop_with(|| window_geometry(hwnd), fw, fh)
+}
+
+/// [`frame_crop`] with the window read by `read`, which is called in per-monitor-v2 context.
+fn frame_crop_with(
+    read: impl FnOnce() -> Result<(WindowGeometry, Option<String>), String>,
+    fw: u32,
+    fh: u32,
+) -> Result<FrameCrop, String> {
+    let (geometry, own_unread) = with_physical_dpi(read)?;
+    let plan = client_crop(fw, fh, &geometry);
+    Ok(FrameCrop {
+        geometry,
+        own_unread,
+        plan,
+    })
 }
 
 fn with_physical_dpi<T>(read: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -281,15 +320,17 @@ fn with_physical_dpi<T>(read: impl FnOnce() -> Result<T, String>) -> Result<T, S
     if is_physical {
         return read();
     }
+    // A failed call returns null; not `is_invalid()`, which also takes -1, the unaware context.
     // SAFETY: changes only this thread and the prior context is restored below.
     let previous = unsafe { SetThreadDpiAwarenessContext(physical) };
-    if previous.is_invalid() {
+    if previous.0.is_null() {
         return Err("could not set physical pixels for window geometry".into());
     }
-    tracing::trace!(target: afklink_core::EMBED_LOG_TARGET, "window geometry entered per-monitor v2 context");
+    tracing::trace!("window geometry entered per-monitor v2 context");
     let result = read();
     // SAFETY: restores the context returned above on the same thread.
-    if unsafe { SetThreadDpiAwarenessContext(previous) }.is_invalid() {
+    let restored = unsafe { SetThreadDpiAwarenessContext(previous) };
+    if restored.0.is_null() {
         return Err("could not restore DPI context after window geometry".into());
     }
     result
@@ -355,6 +396,122 @@ mod physical_dpi_tests {
         let crop = client_crop(2882, 1668, &geometry).unwrap().crop;
         assert_eq!((crop.w, crop.h), (2878, 1618));
         assert!(crop.y >= 48);
+    }
+
+    /// The thread's DPI context is per-monitor v2.
+    fn thread_is_physical() -> bool {
+        // SAFETY: queries this thread and compares it with a predefined context.
+        unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+            .as_bool()
+        }
+    }
+
+    /// The thread's DPI context is DPI-unaware.
+    fn thread_is_unaware() -> bool {
+        // SAFETY: as above.
+        unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_UNAWARE,
+            )
+            .as_bool()
+        }
+    }
+
+    /// A live frame's crop is read on the WGC callback thread inside a dispatch to the dispatcher
+    /// window, in its awareness — DPI-unaware in a process without a manifest — and the retained
+    /// frame's resend on the game capture's per-monitor aware thread. Both go through
+    /// `frame_crop`, so a still window's resend asks for exactly the region its last sent frame
+    /// was retained with. The window: borderless, per-monitor v2, 1280×720 physical at (40, 40)
+    /// on a 150 % display, read as each context sees it.
+    #[test]
+    fn live_and_resend_crops_agree_from_an_unaware_dispatcher_context() {
+        let rect = |left, top, right, bottom| ScreenRect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let bounds = rect(40, 40, 1320, 760);
+        let physical = rect(40, 40, 1320, 760);
+        let read = || -> Result<(WindowGeometry, Option<String>), String> {
+            Ok(if thread_is_physical() {
+                (
+                    WindowGeometry {
+                        bounds,
+                        client: physical,
+                        dpi: WindowDpi {
+                            awareness: DpiAwareness::PerMonitorV2,
+                            window: 144,
+                            monitor: 144,
+                        },
+                        own: None,
+                    },
+                    None,
+                )
+            } else {
+                // An unaware thread: the client and window rectangles in 96-DPI units, the
+                // monitor's DPI 96; DWM's bounds and the window's own rectangles (read in its own
+                // per-monitor context) stay physical.
+                (
+                    WindowGeometry {
+                        bounds,
+                        client: rect(27, 27, 880, 507),
+                        dpi: WindowDpi {
+                            awareness: DpiAwareness::PerMonitorV2,
+                            window: 144,
+                            monitor: 96,
+                        },
+                        own: Some(OwnRects {
+                            window_px: rect(27, 27, 880, 507),
+                            window: physical,
+                            client: physical,
+                        }),
+                    },
+                    None,
+                )
+            })
+        };
+        let whole = Crop {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        };
+
+        // SAFETY: only the test thread changes context; its original one is restored below.
+        let original = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
+        assert!(!original.is_invalid());
+        // The crop as read straight in the dispatcher's context: the window taken for one DWM
+        // stretches, and only its top-left part cropped.
+        let unaware = read().map(|(g, _)| client_crop(1280, 720, &g).map(|p| p.crop));
+        let live = frame_crop_with(read, 1280, 720);
+        let live_restored = thread_is_unaware();
+        // SAFETY: as above.
+        let unaware_before = unsafe { SetThreadDpiAwarenessContext(original) };
+        per_monitor_dpi_for_this_thread("test: the game capture's thread");
+        let resend = frame_crop_with(read, 1280, 720);
+        let resend_physical = thread_is_physical();
+        // SAFETY: as above; the test thread goes back to the context it started in.
+        unsafe { SetThreadDpiAwarenessContext(original) };
+
+        assert!(!unaware_before.is_invalid());
+        assert!(
+            live_restored,
+            "the dispatcher's context is restored after the read"
+        );
+        assert!(resend_physical);
+        let unaware = unaware.expect("read").expect("a crop");
+        assert_ne!(unaware, whole, "the fixture is the mis-cropped case");
+        let live = live.expect("read");
+        let resend = resend.expect("read");
+        assert_eq!(live.geometry, resend.geometry);
+        assert_eq!(live.plan.map(|p| p.crop), Ok(whole));
+        assert_eq!(resend.plan.map(|p| p.crop), Ok(whole));
     }
 }
 
@@ -799,10 +956,14 @@ pub struct WindowFlags {
     ctx: WindowCaptureContext,
 }
 
-/// The frame handler of the game window's capture: pace, crop to the client area, scale to the rung,
-/// and hand the frame to the gate — or drop it. An uncropped frame never goes out.
+/// The frame handler of the game window's capture: retain the frame as the capture's last one,
+/// pace, crop to the client area, scale to the rung, and hand the frame to the gate — or drop it.
+/// An uncropped frame never goes out.
 pub struct WindowHandler {
     ctx: WindowCaptureContext,
+    /// Every live frame, as it arrived, on the GPU ([`crate::retain`]); `None` behind a bounded
+    /// consumer, which is never held.
+    retainer: Option<Retainer>,
     start: Instant,
     scratch: Vec<u8>,
     scaler: Scaler,
@@ -901,23 +1062,167 @@ impl WindowHandler {
         );
         self.last_crop = Some(key);
     }
+
+    /// Retain `frame` as the capture's last one ([`crate::retain`]): `region` of it — this
+    /// frame's own client area, computed for it — or else (`None`) the whole frame. True when it
+    /// was; each copy submitted and its bytes are counted for the pipeline line
+    /// ([`afklink_core::game::GameStatus::note_retain_copy`]).
+    fn retain(&mut self, frame: &WgcFrame, region: Option<Crop>, now: Instant, held: bool) -> bool {
+        let Some(retainer) = self.retainer.as_mut() else {
+            return false;
+        };
+        match retainer.keep(frame, region, now, held) {
+            Some(bytes) => {
+                self.ctx.status.note_retain_copy(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The retained last frame, made now like a live one: the window's geometry read as it is now
+    /// (a still window's is its last frame's — a move or a resize is a frame of its own), the
+    /// client area cropped out of the retained texture on the GPU and read back, then scaled to the
+    /// rung. On the game capture's thread, under the crate's lock on this handler
+    /// ([`WgcWindowCapture::retained`]); the window reads send nothing to the game's process.
+    fn make_retained(&mut self, now: Instant) -> Retained {
+        let Some(retainer) = self.retainer.as_ref() else {
+            return Retained::Unusable(
+                "this capture retains no frame (a bounded consumer's)".into(),
+            );
+        };
+        let (size, region, at, in_hold) = match retainer.last() {
+            LastFrame::Kept {
+                size,
+                region,
+                at,
+                in_hold,
+            } => (size, region, at, in_hold),
+            LastFrame::None => return Retained::Nothing,
+            // Nothing to read until a new frame is retained, and a fresh frame ends the resend.
+            LastFrame::Lost(why) => return Retained::Unusable(format!("nothing retained: {why}")),
+        };
+        let (fw, fh) = size;
+        // The same reading and crop as a live frame's (`frame_crop`): physical pixels whatever
+        // this thread's context, so a still window's crop is its last sent frame's region.
+        let FrameCrop {
+            geometry,
+            own_unread,
+            plan,
+        } = match frame_crop(self.ctx.hwnd, fw, fh) {
+            Ok(read) => read,
+            Err(e) => {
+                return Retained::Failed(format!("the window's rectangles could not be read: {e}"))
+            }
+        };
+        // Not a refusal, as on the live path: the crop goes on without them.
+        self.own_note.note(
+            "game window capture (retained frame)",
+            self.ctx.hwnd,
+            own_unread.as_deref(),
+        );
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(why) => {
+                return Retained::Failed(format!(
+                    "{why} (retained frame {fw}x{fh}, bounds {}, client {}, dpi {})",
+                    geometry.bounds, geometry.client, geometry.dpi
+                ))
+            }
+        };
+        self.note_crop((fw, fh), &geometry, &plan);
+        let crop = plan.crop;
+        let Some(retainer) = self.retainer.as_ref() else {
+            return Retained::Unusable(
+                "this capture retains no frame (a bounded consumer's)".into(),
+            );
+        };
+        let read = match retainer.read(crop, &mut self.scratch) {
+            Ok(read) => read,
+            Err(ReadError::Unusable(why)) => {
+                return Retained::Unusable(format!("read back {crop}: {why}"))
+            }
+            Err(ReadError::Failed(why)) => {
+                return Retained::Failed(format!("read back {crop}: {why}"))
+            }
+        };
+        tracing::debug!(
+            hwnd = %format!("{:#x}", self.ctx.hwnd),
+            crop = %crop,
+            retained_region = %region,
+            frame = %format!("{fw}x{fh}"),
+            gpu_wait_us = read.gpu_wait.as_micros() as u64,
+            busy_polls = read.busy_polls,
+            bytes = self.scratch.len(),
+            "game window capture: the retained frame read back from the GPU"
+        );
+        let target = &self.ctx.target;
+        target.set_source(crop.w, crop.h);
+        let max_h = target.max_h();
+        let mut pixels = Vec::new();
+        let (w, h) = match self.scaler.fit_into(
+            &self.scratch,
+            crop.w,
+            crop.h,
+            u32::MAX / 2,
+            max_h,
+            &mut pixels,
+        ) {
+            Ok(size) => size,
+            Err(e) => return Retained::Failed(format!("scale the retained frame: {e:#}")),
+        };
+        Retained::Frame {
+            frame: Frame {
+                data: pixels,
+                width: w,
+                height: h,
+                timestamp_ms: self.start.elapsed().as_millis() as u64,
+            },
+            geometry: CaptureGeometry {
+                hwnd: self.ctx.hwnd,
+                client: plan.on_screen,
+                source: (crop.w, crop.h),
+            },
+            age: now.saturating_duration_since(at),
+            in_hold,
+        }
+    }
 }
+
+/// How long the game capture's thread waits for the frame handler — busy with a frame on the
+/// capture's own thread — before it gives this try of the resend up: a frame takes milliseconds.
+/// The Director tries again shortly after (`afklink_core::game::RESUME_RETRY_EVERY`). Once the
+/// handler is taken, its read-back polls the GPU for [`crate::retain::MAP_DEADLINE`] at most, so
+/// one try holds this thread for well under a second and the handler's lock for the read-back's
+/// part of that only.
+const HANDLER_WAIT: Duration = Duration::from_millis(500);
 
 impl GraphicsCaptureApiHandler for WindowHandler {
     type Flags = WindowFlags;
     type Error = BoxError;
 
     fn new(ctx: WgcContext<Self::Flags>) -> Result<Self, Self::Error> {
-        // This thread reads the window's rectangles on every frame: physical pixels, like the frame.
+        // Physical pixels for this thread outside a window message. The frame callback runs inside
+        // one, in the dispatcher window's awareness, so each frame's geometry is read through
+        // `frame_crop`, which sets per-monitor v2 for the read itself.
         per_monitor_dpi_for_this_thread("game window capture");
+        let device = ctx.device;
+        let context = ctx.device_context;
         let ctx = ctx.flags.ctx;
         tracing::debug!(
             hwnd = %format!("{:#x}", ctx.hwnd),
             generation = ctx.generation,
+            retains = ctx.gate.retains_frames(),
             "game window capture thread started"
         );
+        // Before the frame pool exists: nothing else uses the device yet.
+        let retainer = ctx
+            .gate
+            .retains_frames()
+            .then(|| Retainer::new(device, context, ctx.hwnd));
         Ok(Self {
             ctx,
+            retainer,
             start: Instant::now(),
             scratch: Vec::new(),
             scaler: Scaler::new(),
@@ -936,6 +1241,31 @@ impl GraphicsCaptureApiHandler for WindowHandler {
         frame: &mut WgcFrame,
         capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        // Before anything else, pacing included: a capture stopped or replaced meanwhile passes
+        // nothing. Every live frame is then retained as the capture's last one, exactly as it
+        // arrived (a GPU copy, `crate::retain`) — the picture a still window is resumed on after
+        // a background hold — on every path out of here: a sent frame by its own crop, a held,
+        // paced out or refused one whole, since its client area is not read (a crop of an earlier
+        // frame would miss a client area moved inside the same frame size, and the whole frame
+        // holds any). During the hold it is dropped here with nothing more spent on it (the
+        // gate and the status count them; the game capture's thread says how many at the hold's
+        // end, the pipeline line every second).
+        let now = Instant::now();
+        let held = match self.ctx.gate.admit_at(self.ctx.generation, now) {
+            Admit::Pass => false,
+            Admit::Held => true,
+            Admit::NotLive => {
+                tracing::trace!("game frame of a capture no longer live; dropped");
+                return Ok(());
+            }
+        };
+        let (fw, fh) = (frame.width(), frame.height());
+        if held {
+            let retained = self.retain(frame, None, now, true);
+            self.ctx.status.note_held_frame(retained);
+            tracing::trace!(retained, "game frame dropped: background hold");
+            return Ok(());
+        }
         let source_target = self.ctx.gate.source_target();
         if match (&self.last_source_target, &source_target) {
             (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
@@ -949,40 +1279,35 @@ impl GraphicsCaptureApiHandler for WindowHandler {
         let target = source_target.as_ref().unwrap_or(target);
         // The same pacing as the monitor's (`wgc::Handler`), before any work on the frame.
         target.note_offered();
-        let now = Instant::now();
         let (decision, due) = pace::admit(now, self.next_due, target.min_frame_interval());
         self.next_due = Some(due);
         if decision == pace::Admission::Early {
             target.note_early();
-            return Ok(());
-        }
-        // Stopped or replaced meanwhile: nothing of this capture passes, so do not spend on it.
-        if !self.ctx.gate.admits(self.ctx.generation) {
-            tracing::trace!("game frame of a capture no longer live; dropped");
+            self.retain(frame, None, now, false);
             return Ok(());
         }
 
-        let (fw, fh) = (frame.width(), frame.height());
-        let read_geometry = if self.ctx.gate.has_target_source() {
-            window_geometry_physical
-        } else {
-            window_geometry
-        };
-        let geometry = match read_geometry(self.ctx.hwnd) {
-            Ok((g, own_unread)) => {
-                // Not a refusal: the crop goes on without them (`window_geometry`).
-                self.own_note
-                    .note("game window capture", self.ctx.hwnd, own_unread.as_deref());
-                g
-            }
+        // Physical pixels whatever context this callback runs in (`frame_crop`), and the same
+        // reading and crop as the retained frame's resend.
+        let FrameCrop {
+            geometry,
+            own_unread,
+            plan,
+        } = match frame_crop(self.ctx.hwnd, fw, fh) {
+            Ok(read) => read,
             Err(e) => {
+                self.retain(frame, None, now, false);
                 self.refuse(format!("the window's rectangles could not be read: {e}"));
                 return Ok(());
             }
         };
-        let plan = match client_crop(fw, fh, &geometry) {
+        // Not a refusal: the crop goes on without them (`window_geometry`).
+        self.own_note
+            .note("game window capture", self.ctx.hwnd, own_unread.as_deref());
+        let plan = match plan {
             Ok(plan) => plan,
             Err(why) => {
+                self.retain(frame, None, now, false);
                 self.refuse(format!(
                     "{why} (frame {fw}x{fh}, bounds {}, client {}, dpi {})",
                     geometry.bounds, geometry.client, geometry.dpi
@@ -993,6 +1318,8 @@ impl GraphicsCaptureApiHandler for WindowHandler {
         self.end_refusal();
         self.note_crop((fw, fh), &geometry, &plan);
         let crop = plan.crop;
+        // This frame's own crop: exactly the part of it that goes out.
+        self.retain(frame, Some(crop), now, false);
         let target = &self.ctx.target;
         let target = source_target.as_ref().unwrap_or(target);
 
@@ -1054,7 +1381,8 @@ impl GraphicsCaptureApiHandler for WindowHandler {
             }
             GateSend::Refused => {
                 tracing::trace!(
-                    "game frame refused: the capture was stopped or replaced meanwhile"
+                    "game frame refused: the capture was stopped or replaced, or the hold began, \
+                     meanwhile (retained all the same)"
                 );
             }
             GateSend::Closed => {
@@ -1089,6 +1417,47 @@ impl WindowCapture for WgcWindowCapture {
         self.control
             .as_ref()
             .is_none_or(CaptureControl::is_finished)
+    }
+
+    /// The retained last frame (`crate::retain`), made on the calling thread — the game
+    /// capture's — under the crate's own lock on the frame handler, which the capture's thread
+    /// holds for each frame: waited for [`HANDLER_WAIT`] at most, then held for the read-back
+    /// (its GPU wait bounded by [`crate::retain::MAP_DEADLINE`]), the crop and the scale. No other
+    /// lock is held here; a failure is the caller's to try again.
+    fn retained(&mut self, now: Instant) -> Retained {
+        let Some(control) = self.control.as_ref() else {
+            return Retained::Unusable("the capture is stopped".into());
+        };
+        let handler = control.callback();
+        let waiting = Instant::now();
+        let Some(mut handler) = handler.try_lock_for(HANDLER_WAIT) else {
+            tracing::debug!(
+                hwnd = %format!("{:#x}", self.hwnd),
+                waited_ms = HANDLER_WAIT.as_millis() as u64,
+                "game window capture: the frame handler stayed busy; the retained frame is not \
+                 made"
+            );
+            return Retained::Failed(format!(
+                "the frame handler stayed busy past {} ms",
+                HANDLER_WAIT.as_millis()
+            ));
+        };
+        let waited_us = waiting.elapsed().as_micros() as u64;
+        let made = handler.make_retained(now);
+        drop(handler);
+        // Once per try of a resend, never per frame.
+        tracing::debug!(
+            hwnd = %format!("{:#x}", self.hwnd),
+            handler_wait_us = waited_us,
+            made = match &made {
+                Retained::Frame { .. } => "frame",
+                Retained::Nothing => "nothing retained",
+                Retained::Failed(_) => "failed",
+                Retained::Unusable(_) => "unusable",
+            },
+            "game window capture: the retained frame made on the game capture's thread"
+        );
+        made
     }
 
     fn stop(mut self: Box<Self>) -> Option<String> {
@@ -1129,8 +1498,13 @@ impl Drop for WgcWindowCapture {
     }
 }
 
-/// Starts WGC window captures of the game's window.
-pub struct WgcWindowBackend;
+/// Starts WGC window captures of the game's window. One per game capturer: it remembers which
+/// kinds of start failure it has probed step by step ([`crate::start_probe`]) since its last start
+/// that succeeded, so a failure repeated on every retry is probed once, not every time.
+#[derive(Default)]
+pub struct WgcWindowBackend {
+    probed: HashSet<String>,
+}
 
 impl WindowCaptureBackend for WgcWindowBackend {
     fn start(&mut self, ctx: WindowCaptureContext) -> anyhow::Result<Box<dyn WindowCapture>> {
@@ -1165,16 +1539,52 @@ impl WindowCaptureBackend for WgcWindowBackend {
             },
         );
         match started {
-            Ok(control) => Ok(Box::new(WgcWindowCapture {
-                control: Some(control),
-                hwnd,
-            })),
+            Ok(control) => {
+                if !self.probed.is_empty() {
+                    tracing::debug!(
+                        hwnd = %format!("{hwnd:#x}"),
+                        probed = self.probed.len(),
+                        "game window capture started again: the start probe may run again on the \
+                         next failure"
+                    );
+                    self.probed.clear();
+                }
+                Ok(Box::new(WgcWindowCapture {
+                    control: Some(control),
+                    hwnd,
+                }))
+            }
             Err(e) => {
                 let exact = lock(&error).take();
-                Err(match exact {
-                    Some(exact) => anyhow::anyhow!("{e}: CreateForWindow: {exact}"),
-                    None => anyhow::anyhow!("{e}"),
-                })
+                match exact {
+                    Some(exact) => Err(anyhow::anyhow!("{e}: CreateForWindow: {exact}")),
+                    None => {
+                        // No item error was recorded: either `CreateForWindow` succeeded and a
+                        // later step failed, or the start failed before the item was made
+                        // (WinRT, the dispatcher queue, the D3D device). Which, the crate's text
+                        // does not say. Once per kind (the error's text names the HRESULT) until a
+                        // start succeeds.
+                        let text = e.to_string();
+                        if self.probed.insert(text.clone()) {
+                            tracing::debug!(
+                                hwnd = %format!("{hwnd:#x}"),
+                                kind = %text,
+                                "game window capture: start failed with no CreateForWindow error \
+                                 recorded (a step after the item, or one before it: WinRT, the \
+                                 dispatcher queue, the D3D device); probing the WGC steps one by \
+                                 one"
+                            );
+                            start_probe::probe(hwnd, ctx.generation, &text);
+                        } else {
+                            tracing::debug!(
+                                hwnd = %format!("{hwnd:#x}"),
+                                "game window capture: the same start failure again; already \
+                                 probed"
+                            );
+                        }
+                        Err(anyhow::anyhow!("{e}"))
+                    }
+                }
             }
         }
     }

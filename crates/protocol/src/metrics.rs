@@ -751,16 +751,31 @@ pub enum AgentEventKind {
         key: PcSettingKey,
         value: PcSettingValue,
     },
+    /// An episode of the PC's input on another Windows desktop ended (`crate::secure_desktop`), in
+    /// a session or not; the event's `at` is the episode's start. `desktop`: the most specific kind
+    /// the episode saw; `duration_ms`: from leaving the ordinary desktop to coming back to it, at
+    /// most [`crate::SECURE_DESKTOP_DURATION_MAX_MS`]; `session_id`: a session live during it;
+    /// `game_only`: the game-only mode was on when it started. Only to a server whose
+    /// `agent_ready` said `secure_desktop`.
+    SecureDesktopEnded {
+        desktop: crate::SecureDesktopKind,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game_only: Option<bool>,
+    },
 }
 
 impl AgentEventKind {
     /// Every kind's wire word, in the contract's order (`AGENT_EVENT_KINDS`).
-    pub const KINDS: [&'static str; 5] = [
+    pub const KINDS: [&'static str; 6] = [
         "agent_started",
         "agent_crashed",
         "update_finished",
         "driver_install_finished",
         "pc_setting_changed",
+        "secure_desktop_ended",
     ];
 
     /// This event's wire word (`kind`).
@@ -771,6 +786,7 @@ impl AgentEventKind {
             Self::UpdateFinished { .. } => "update_finished",
             Self::DriverInstallFinished { .. } => "driver_install_finished",
             Self::PcSettingChanged { .. } => "pc_setting_changed",
+            Self::SecureDesktopEnded { .. } => "secure_desktop_ended",
         }
     }
 }
@@ -854,6 +870,21 @@ impl AgentEvent {
                     if !is_short_id(id) {
                         return err("value");
                     }
+                }
+            }
+            AgentEventKind::SecureDesktopEnded {
+                duration_ms,
+                session_id,
+                ..
+            } => {
+                if *duration_ms > crate::SECURE_DESKTOP_DURATION_MAX_MS {
+                    return err("duration_ms");
+                }
+                if session_id
+                    .as_deref()
+                    .is_some_and(|id| !crate::diagnostics::is_uuid(id))
+                {
+                    return err("session_id");
                 }
             }
         }
@@ -1250,6 +1281,32 @@ mod tests {
         };
         assert_eq!(driver.check().map_err(|e| e.field), Err("code"));
         assert_eq!(driver.event.kind(), "driver_install_finished");
+        let ended = |duration_ms, session_id: Option<&str>| AgentEvent {
+            at: 1_789_600_400_000,
+            event: AgentEventKind::SecureDesktopEnded {
+                desktop: crate::SecureDesktopKind::Uac,
+                duration_ms,
+                session_id: session_id.map(str::to_string),
+                game_only: None,
+            },
+        };
+        let sid = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+        assert_eq!(ended(47_310, Some(sid)).check(), Ok(()));
+        assert_eq!(
+            ended(crate::SECURE_DESKTOP_DURATION_MAX_MS, None).check(),
+            Ok(())
+        );
+        assert_eq!(
+            ended(crate::SECURE_DESKTOP_DURATION_MAX_MS + 1, None)
+                .check()
+                .map_err(|e| e.field),
+            Err("duration_ms")
+        );
+        assert_eq!(
+            ended(1, Some("s1")).check().map_err(|e| e.field),
+            Err("session_id")
+        );
+        assert_eq!(ended(1, None).event.kind(), "secure_desktop_ended");
     }
 
     /// One field the contract would refuse costs that field: the rest of the detail goes.

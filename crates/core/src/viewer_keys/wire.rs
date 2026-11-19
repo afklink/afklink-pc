@@ -21,6 +21,10 @@ pub const ENDORSE_DOMAIN: &str = "AFKLINK-ENDORSE-V1";
 pub const INVITE_DOMAIN: &str = "AFKLINK-INVITE-V1";
 /// `grant` (spec §7), signed by an owner's device key; it carries the PC's grant token.
 pub const GRANT_DOMAIN: &str = "AFKLINK-GRANT-V2";
+/// «ПК в пати» (party spec §2.2), signed by the PC owner's device key.
+pub const PARTY_JOIN_DOMAIN: &str = "AFKLINK-PARTY-JOIN-V1";
+/// A party leader's grant to a member (party spec §2.3), signed by the leader's device key.
+pub const PARTY_GRANT_DOMAIN: &str = "AFKLINK-PARTY-GRANT-V1";
 
 /// The length of `nonce_pc` (spec §1.2).
 pub const NONCE_PC_LEN: usize = 16;
@@ -223,19 +227,66 @@ pub struct GrantFields<'a> {
 
 /// `g` of a `grant` (spec §7); the role is always `"guest"`.
 pub fn grant_message(g: &GrantFields<'_>) -> Vec<u8> {
+    grant_bytes(GRANT_DOMAIN, g, g.inv_id.map_or(&[][..], |i| &i[..]))
+}
+
+/// `pg` of a party leader's grant (party spec §2.3): `g` field for field, with its own domain and
+/// `party_id` (never empty) in field 7, where `g` has the invitation's id; `g.inv_id` is not read.
+/// `g.by` is the leader's key.
+pub fn party_grant_message(g: &GrantFields<'_>, party_id: &[u8; GROUND_ID_BYTES]) -> Vec<u8> {
+    grant_bytes(PARTY_GRANT_DOMAIN, g, party_id)
+}
+
+fn grant_bytes(domain: &str, g: &GrantFields<'_>, seventh: &[u8]) -> Vec<u8> {
     lp(&[
-        GRANT_DOMAIN.as_bytes(),
+        domain.as_bytes(),
         g.device_id.as_bytes(),
         g.key_id.as_bytes(),
         decimal(g.telegram_user_id).as_bytes(),
         g.name.unwrap_or_default().as_bytes(),
         g.username.unwrap_or_default().as_bytes(),
         b"guest",
-        g.inv_id.map_or(&[][..], |i| &i[..]),
+        seventh,
         g.grant_id,
         g.grant_token.as_bytes(),
         &u64_be(g.issued_at),
         g.by.as_bytes(),
+    ])
+}
+
+/// The fields of `j` (party spec §2.2), as «ПК в пати» carries them.
+#[derive(Debug, Clone, Copy)]
+pub struct PartyJoinFields<'a> {
+    pub device_id: &'a str,
+    pub party_id: &'a [u8; GROUND_ID_BYTES],
+    pub party: &'a str,
+    pub leader_telegram_user_id: i64,
+    /// `null` is `LP("")`.
+    pub leader_name: Option<&'a str>,
+    /// `null` is `LP("")`.
+    pub leader_username: Option<&'a str>,
+    /// `key_id(leader.spki)`: the PC derives it, the statement carries only the SPKI.
+    pub leader_key_id: &'a KeyId,
+    pub grant_token: &'a GrantToken,
+    pub issued_at: u64,
+    /// The owner's key that signed.
+    pub by: &'a KeyId,
+}
+
+/// `j` of «ПК в пати» (party spec §2.2).
+pub fn party_join_message(j: &PartyJoinFields<'_>) -> Vec<u8> {
+    lp(&[
+        PARTY_JOIN_DOMAIN.as_bytes(),
+        j.device_id.as_bytes(),
+        j.party_id,
+        j.party.as_bytes(),
+        decimal(j.leader_telegram_user_id).as_bytes(),
+        j.leader_name.unwrap_or_default().as_bytes(),
+        j.leader_username.unwrap_or_default().as_bytes(),
+        j.leader_key_id.as_bytes(),
+        j.grant_token.as_bytes(),
+        &u64_be(j.issued_at),
+        j.by.as_bytes(),
     ])
 }
 

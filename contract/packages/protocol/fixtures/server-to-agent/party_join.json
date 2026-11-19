@@ -1,0 +1,19 @@
+{
+  "type": "party_join",
+  "join": {
+    "v": 1,
+    "device_id": "a3f1c2d4-5b6e-4f7a-8c9d-0e1f2a3b4c5d",
+    "party_id": "Rk9vZEJ1ZGR5UGFydHkxMg",
+    "party": "Орлы",
+    "leader": {
+      "telegram_user_id": 24680,
+      "name": "Друг",
+      "username": "friend",
+      "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+    },
+    "grant_token": "AQEBAQEBAQEBAQEBAQEBAQ",
+    "issued_at": 1789600000000,
+    "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+    "sig": "XnT7JOapScGCAddTFV7ApQRB5yHfojn8y3oBM6ci3dvRnjekyZkca88H1WkZS5AtQddm8z-Ss6JU7DDsdOY-Fw"
+  }
+}

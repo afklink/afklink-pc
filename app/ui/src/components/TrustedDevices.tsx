@@ -1,15 +1,17 @@
 import { type Locale, pluralRu, type TranslationKey } from "@afklink/i18n/pc";
-import { KeyRound, Send, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
+import { KeyRound, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { useLanguage, useT } from "../i18n";
 import { dayKey, dayTitle, timeText } from "../lib/journal";
+import { devicesParty, partyQuestionGone } from "../lib/party";
 import { cn } from "../lib/utils";
 import {
   attemptAllow,
   attemptHide,
   confirmTrustedDevice,
   getTrusted,
+  leaveParty,
   removePerson,
   removeTrustedDevice,
   repairTrusted,
@@ -20,6 +22,7 @@ import {
   type TrustedDeviceRefDto,
   type TrustedDto,
   type TrustedError,
+  type TrustedPartyDto,
   type TrustedPersonDto,
   type TrustedRepair,
   type TrustedSource,
@@ -34,9 +37,9 @@ import { Switch } from "./ui/switch";
  * «Доверенные устройства» — device keys milestone 1 (docs/design/viewer-device-keys.md §3.2, §9.1,
  * §10, §16 1b, §18), on the window's IPC (`get_trusted` and the commands beside it in `tauri.ts`).
  *
- * Presented as layers: the Telegram account is the base — always on, no switch;
- * «Доверенные устройства» is an extra layer over it. Off is neutral grey, never red, amber or a
- * warning sign (off is not "unprotected": the base still holds); on is the brand's lime. Amber only
+ * Presented as a layer over the Telegram account, which always holds and has no row of its own here
+ * («Вход: Telegram-аккаунт» on the main screen). Off is neutral grey, never red, amber or a warning
+ * sign (off is not "unprotected": the account still holds); on is the brand's lime. Amber only
  * for what cannot connect while the mode is on: a person with no confirmed device, an unconfirmed
  * device, a damaged list.
  *
@@ -209,6 +212,7 @@ const SOURCES: Record<TrustedSource, TranslationKey> = {
   owner: "app.trustedSourceOwner",
   migrated: "app.trustedSourceMigrated",
   restored: "app.trustedSourceRestored",
+  party: "app.trustedSourceParty",
 };
 
 /**
@@ -216,14 +220,18 @@ const SOURCES: Record<TrustedSource, TranslationKey> = {
  * so it keeps its own capital. `by`: the device that confirmed it — null when it is no longer in
  * the list; that, or a device whose name is unknown, says «Подтверждено с другого устройства»
  * (`app.trustedSourceEndorsedUnknown`). Undefined where nothing says (the journal's entries): an
- * endorsed device then has no source line rather than an unknown one.
+ * endorsed device then has no source line rather than an unknown one. «Принято в пати "{party}"» for a
+ * party's member, with the party's name — none when it is not known (no line rather than an empty
+ * name).
  */
 export function sourceText(
   t: T,
   source: TrustedSource | null | undefined,
   by?: TrustedDeviceRefDto | null,
+  party?: string | null,
 ): string | null {
   if (!source) return null;
+  if (source === "party") return party ? t(SOURCES.party, { party }) : null;
   if (source === "endorsed") {
     if (by === undefined) return null;
     if (by === null || deviceWords(by).key === "app.trustedDeviceUnknown") {
@@ -232,6 +240,23 @@ export function sourceText(
     return t(SOURCES.endorsed, { device: deviceName(t, by) });
   }
   return t(SOURCES[source]);
+}
+
+/** A party's name by its id, as the list says it (null: the PC is not in it). */
+export function partyName(
+  parties: readonly TrustedPartyDto[] | undefined,
+  partyId: string | null | undefined,
+): string | null {
+  return parties?.find((p) => p.party_id === partyId)?.party ?? null;
+}
+
+/** «Принято в пати "Орлы"» for a member's device, the other sources as `sourceText` says them. */
+export function deviceSource(
+  t: T,
+  d: TrustedDeviceDto,
+  parties: readonly TrustedPartyDto[] | undefined,
+): string | null {
+  return sourceText(t, d.source, d.by, partyName(parties, d.party_id));
 }
 
 /** The day and the month in words, with the year when it is not this one. */
@@ -593,7 +618,8 @@ export type TrustedCommand =
       role: "owner" | "guest";
     }
   | { command: "repair_trusted"; action: "restore"; token: string }
-  | { command: "repair_trusted"; action: "reset" };
+  | { command: "repair_trusted"; action: "reset" }
+  | { command: "leave_party"; partyId: string };
 
 /**
  * The question's action pressed: the command it sends, or why it is held — mode-on, confirm and
@@ -650,6 +676,11 @@ export function commandFor(
       return {
         command: { command: "repair_trusted", action: "reset" },
         what: "repair_trusted(reset)",
+      };
+    case "party":
+      return {
+        command: { command: "leave_party", partyId: a.partyId },
+        what: `leave_party ${a.partyId.slice(0, 8)}`,
       };
   }
 }
@@ -716,6 +747,8 @@ function send(c: TrustedCommand): Promise<unknown> {
       return attemptAllow(c.userId, c.keyId, c.token, c.secondStep, c.role);
     case "repair_trusted":
       return c.action === "restore" ? repairTrusted("restore", c.token) : repairTrusted("reset");
+    case "leave_party":
+      return leaveParty(c.partyId);
   }
 }
 
@@ -793,8 +826,8 @@ function useModeNeedsLog(needs: ReturnType<typeof modeNeeds>) {
 }
 
 /**
- * «Telegram-аккаунт» (the base, always on: no switch) over «Доверенные устройства» (the switch,
- * asked first in a dialog). The switch waits while the list is damaged or a session locks changes;
+ * The «Доверенные устройства» card: one row with the mode's mark, its note and the switch (asked
+ * first in a dialog). The switch waits while the list is damaged or a session locks changes;
  * it is not offered at all while turning it on would shut the owner out (`modeNeeds`).
  */
 export function TrustedLayers({
@@ -815,15 +848,6 @@ export function TrustedLayers({
   return (
     <div className={cn("overflow-hidden rounded-card border border-line bg-panel", className)}>
       <div className="flex items-start gap-3 px-4 py-3">
-        <LayerMark on>
-          <Send />
-        </LayerMark>
-        <div className="min-w-0 flex-1">
-          <p className="text-body text-ink">{t("app.trustedBaseTitle")}</p>
-          <p className="mt-0.5 text-balance text-hint text-muted">{t("app.trustedBaseAbout")}</p>
-        </div>
-      </div>
-      <div className="flex items-start gap-3 border-t border-line px-4 py-3">
         <LayerMark on={on}>
           <KeyRound />
         </LayerMark>
@@ -832,7 +856,8 @@ export function TrustedLayers({
             {t("app.trustedTitle")}
           </label>
           <p id={modeAbout} className="mt-0.5 text-balance text-hint text-muted">
-            {on ? t("app.trustedAboutOn") : t("app.trustedAboutOff")}
+            {/* One note in both states: what the mode does, not whether it is on. */}
+            {t("app.trustedAboutOn")}
           </p>
           {needs === null ? null : (
             <p className="mt-0.5 text-balance text-hint text-attention">{t(needs)}</p>
@@ -957,19 +982,26 @@ export function TrustedDamaged({
 export function TrustLine({
   devices,
   mode,
+  also,
   className,
 }: {
   devices: TrustedDeviceDto[];
   mode: boolean;
+  /** Said after the count (a party's card: «также в пати "…"»). */
+  also?: string | undefined;
   className?: string;
 }) {
   const t = useT();
   const { locale } = useLanguage();
   const confirmed = confirmedOf(devices).length;
   if (confirmed > 0) {
+    const count = t(plural(locale, confirmed, COUNT), { count: confirmed });
+    // With a party's «также в пати "…"» the line wraps: the party's name is what it says.
     return (
-      <span className={cn("block truncate text-hint text-faint", className)}>
-        {t(plural(locale, confirmed, COUNT), { count: confirmed })}
+      <span
+        className={cn("block text-hint text-faint", also ? "text-pretty" : "truncate", className)}
+      >
+        {also ? `${count} · ${also}` : count}
       </span>
     );
   }
@@ -978,6 +1010,7 @@ export function TrustLine({
       className={cn("block truncate text-hint", mode ? "text-attention" : "text-faint", className)}
     >
       {mode ? t("app.trustedNeeded") : t("app.trustedNoneYet")}
+      {also ? <span className="text-faint">{` · ${also}`}</span> : null}
     </span>
   );
 }
@@ -1005,6 +1038,7 @@ export function PersonDevices({
   mode,
   locked,
   review = false,
+  parties,
   onRemove,
   onConfirm,
   onAddDevice,
@@ -1012,6 +1046,8 @@ export function PersonDevices({
   devices: TrustedDeviceDto[];
   mode: boolean;
   locked: boolean;
+  /** The PC's parties (`TrustedDto.parties`): a member's device names its party. */
+  parties?: readonly TrustedPartyDto[] | undefined;
   /**
    * The review before the mode goes on: each key's first 8 characters too, and the removal's
    * button is «Удалить» (its question is the same «Удалить из доверенных?»).
@@ -1048,7 +1084,7 @@ export function PersonDevices({
   return (
     <ul className="mb-2 overflow-hidden rounded-inner border border-line bg-ground/40">
       {devices.map((d) => {
-        const source = sourceText(t, d.source, d.by);
+        const source = deviceSource(t, d, parties);
         const added = dateText(locale, d.added_at, now);
         return (
           <li key={d.key_id} className="border-t border-line px-3 py-2 first:border-t-0">
@@ -1141,7 +1177,14 @@ export type Asking =
       token: string | null;
       spent: boolean;
     }
-  | { kind: "person"; userId: number; user: string; count: number }
+  | {
+      kind: "person";
+      userId: number;
+      user: string;
+      count: number;
+      /** A party guest's: the party their devices came by, which the note names; null otherwise. */
+      party: string | null;
+    }
   | {
       kind: "allow";
       userId: number;
@@ -1167,7 +1210,9 @@ export type Asking =
     }
   | { kind: "attempts"; userId: number; user: string }
   | { kind: "restore"; token: string | null; spent: boolean }
-  | { kind: "reset" };
+  | { kind: "reset" }
+  /** «Убрать ПК из пати» (party spec §6): the party by its id and its name as the card shows it. */
+  | { kind: "party"; partyId: string; party: string };
 
 /**
  * Why a question that needs a clean window (mode-on, confirm, allow, restore) is held now, or `null`: no token was
@@ -1283,6 +1328,8 @@ export function useTrustedQuestions(
   /** «Скрыть» on an attempt: sent at once. */
   pressHide: (userId: number, attempt: TrustedAttemptDto) => void;
   askRemoveAttempts: (userId: number) => void;
+  /** «Убрать ПК из пати» on a party's card: asked first. */
+  askLeaveParty: (partyId: string, party: string) => void;
   /** What the last presses on attempts left to say, by attempt (`AttemptNote`). */
   attemptNotes: AttemptNote[];
   /** A command runs: the one-press actions wait. */
@@ -1395,6 +1442,18 @@ export function useTrustedQuestions(
     // biome-ignore lint/suspicious/noConsole: once per question overtaken by the list
     console.debug(
       `[access] ${asking.kind} question closed: key ${asking.device.key_short} is ${now === undefined ? "no longer in the list" : "confirmed already"}`,
+    );
+    setAsking(null);
+    setFailure(null);
+  }, [asking, trusted, sending]);
+
+  // The party the question is about is gone from the list (left by the server's word meanwhile):
+  // nothing left to ask.
+  useEffect(() => {
+    if (asking?.kind !== "party" || sending || !partyQuestionGone(trusted, asking.partyId)) return;
+    // biome-ignore lint/suspicious/noConsole: once per question overtaken by the list
+    console.debug(
+      `[access] party question closed: party ${asking.partyId.slice(0, 8)} is no longer in the list`,
     );
     setAsking(null);
     setFailure(null);
@@ -1519,10 +1578,12 @@ export function useTrustedQuestions(
   };
 
   const askRemovePerson = (userId: number) => {
-    const count = devicesOf(trusted, userId)?.length ?? 0;
+    const devices = devicesOf(trusted, userId);
+    const count = devices?.length ?? 0;
+    const party = devicesParty(trusted, devices);
     open(
-      { kind: "person", userId, user: nameOf(userId), count },
-      `«Удалить все устройства» pressed on #${userId} (${count} device(s))`,
+      { kind: "person", userId, user: nameOf(userId), count, party },
+      `«Удалить все устройства» pressed on #${userId} (${count} device(s)${party === null ? "" : ", a party guest: the party's note"})`,
     );
   };
 
@@ -1615,6 +1676,14 @@ export function useTrustedQuestions(
       { kind: "attempts", userId, user: nameOf(userId) },
       `«Удалить попытки» pressed on #${userId} (${personOf(trusted, userId)?.attempts?.length ?? 0} attempt(s), no device)`,
     );
+
+  const askLeaveParty = (partyId: string, party: string) => {
+    const keys = trusted?.people.flatMap((p) => p.devices).filter((d) => d.party_id === partyId);
+    open(
+      { kind: "party", partyId, party },
+      `«Убрать ПК из пати» pressed on party ${partyId.slice(0, 8)} (${keys?.length ?? 0} key(s) of it here)`,
+    );
+  };
 
   const askRestore = () =>
     open(
@@ -1811,6 +1880,7 @@ export function useTrustedQuestions(
     pressAllow,
     pressHide,
     askRemoveAttempts,
+    askLeaveParty,
     attemptNotes,
     busy: sending,
     full: trusted?.full === true,
@@ -1920,6 +1990,7 @@ function questionDialog(
       return (
         <ConfirmDialog
           asking={asking}
+          parties={trusted?.parties}
           attempt={attemptsOf(trusted, asking.userId)[0]?.at ?? null}
           hold={hold}
           {...props}
@@ -1944,6 +2015,8 @@ function questionDialog(
       return <RestoreDialog hold={hold} {...props} />;
     case "reset":
       return <ResetDialog trusted={trusted} {...props} />;
+    case "party":
+      return <PartyLeaveDialog asking={asking} {...props} />;
   }
 }
 
@@ -2141,6 +2214,7 @@ function ReviewSections({
           mode
           locked={locked}
           review
+          parties={trusted?.parties}
           onRemove={(d) => review.onRemove(p.id, d)}
           onConfirm={(d) => review.onConfirm(p.id, d)}
           onAddDevice={() => undefined}
@@ -2272,14 +2346,18 @@ export function untrustLines(
   const mode = trusted?.trusted_mode ?? false;
   const values = { user: who.user, device: deviceName(t, d) };
   const own = allowGivesOwner(trusted, who.userId);
+  // A party's device: the note names the party, and «Убрать ПК из пати» closes the PC to them.
+  const party = d.source === "party" ? partyName(trusted?.parties, d.party_id) : null;
   const lines = !mode
     ? [t("app.trustedUntrustNoteObserve", values)]
     : own
       ? [t("app.trustedUntrustNoteOwn", values)]
-      : [
-          t("app.trustedUntrustNote", values),
-          ...(who.unbind ? [t("app.trustedUntrustCutOff")] : []),
-        ];
+      : party !== null
+        ? [t("app.trustedUntrustNoteParty", { ...values, party })]
+        : [
+            t("app.trustedUntrustNote", values),
+            ...(who.unbind ? [t("app.trustedUntrustCutOff")] : []),
+          ];
   // The sessions end at once in both modes (the agent's sweep ends every session a removed key
   // signed): said whenever one is live.
   if (d.in_session) lines.push(t("app.trustedUntrustLive"));
@@ -2354,11 +2432,13 @@ function RemoveDialog({
  */
 function ConfirmDialog({
   asking,
+  parties,
   attempt,
   hold,
   ...props
 }: {
   asking: Extract<Asking, { kind: "confirm" }>;
+  parties: readonly TrustedPartyDto[] | undefined;
   /** The latest attempt from another device (unix ms), or null: none. */
   attempt: number | null;
   /** «Подтвердить» held, with this line (`windowHold`). */
@@ -2369,7 +2449,7 @@ function ConfirmDialog({
   const now = Date.now();
   const d = asking.device;
   const name = deviceName(t, d);
-  const source = sourceText(t, d.source, d.by);
+  const source = deviceSource(t, d, parties);
   const details = (
     <div className="rounded-inner border border-line bg-ground/40 px-3 py-2">
       <p className="truncate text-body text-ink" title={name}>
@@ -2416,7 +2496,31 @@ function attemptsOf(trusted: TrustedDto | null, id: number): { at: number }[] {
   return trusted?.people.find((p) => p.telegram_user_id === id)?.attempts ?? [];
 }
 
-/** «Удалить все устройства?» for a person with no access left. */
+/**
+ * «Убрать ПК из пати "Орлы"?»: what happens to the party's guests here, «Убрать» in red. Held, as
+ * every trust question, while a session other than a confirmed owner's is on (`locked`).
+ */
+function PartyLeaveDialog({
+  asking,
+  ...props
+}: { asking: Extract<Asking, { kind: "party" }> } & QuestionProps) {
+  const t = useT();
+  return (
+    <Question
+      title={t("app.partyLeaveTitle", { party: asking.party })}
+      lines={[t("app.partyLeaveNote")]}
+      action={t("app.partyLeaveAction")}
+      actionVariant="destructive"
+      {...props}
+    />
+  );
+}
+
+/**
+ * «Удалить все устройства?» for a person with no access left, or a party guest's under a party's
+ * card — then the note says they will not come back through the party
+ * (`app.trustedRemovePersonNoteParty`).
+ */
 function RemovePersonDialog({
   asking,
   ...props
@@ -2425,7 +2529,11 @@ function RemovePersonDialog({
   return (
     <Question
       title={t("app.trustedRemovePersonTitle")}
-      lines={[t("app.trustedRemovePersonNote", { user: asking.user, count: asking.count })]}
+      lines={[
+        asking.party === null
+          ? t("app.trustedRemovePersonNote", { user: asking.user, count: asking.count })
+          : t("app.trustedRemovePersonNoteParty", { user: asking.user, party: asking.party }),
+      ]}
       action={t("app.trustedRemovePersonAction")}
       actionVariant="destructive"
       {...props}

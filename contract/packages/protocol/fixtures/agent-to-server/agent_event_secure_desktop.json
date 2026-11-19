@@ -1,0 +1,9 @@
+{
+  "type": "agent_event",
+  "kind": "secure_desktop_ended",
+  "at": 1789600400000,
+  "desktop": "uac",
+  "duration_ms": 47310,
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "game_only": true
+}

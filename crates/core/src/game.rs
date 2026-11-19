@@ -74,6 +74,31 @@ pub const BLACK_SOURCE: (u32, u32) = (1280, 720);
 /// frame after frame looks the same from here.
 pub const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(3);
 
+/// After a background hold the window capture kept running through, its next frame is the one the
+/// viewer resumes on (a keyframe: the pipeline asks for it). A game draws many a second, so one
+/// comes at once; none this long after the release is a still window — WGC sends a window's frame
+/// only when it changes — and the capture's last frame, retained exactly as it arrived
+/// ([`WindowCapture::retained`]), is sent again instead. The capture itself is never stopped or started again for want of a frame:
+/// a restart of a window capture that was stopped can fail with `0x800703EE`
+/// (`ERROR_FILE_INVALID`) on every later start, after `CreateForWindow` succeeds. Well under the pipeline's own wait for the
+/// first frame after a hold ([`crate::pipeline::HOLD_FIRST_FRAME_WITHIN`], a second), and long
+/// enough for a game whose rendering Windows throttles while it is in the background (a few frames
+/// a second) to send a fresh one first.
+pub const RESUME_FIRST_FRAME_WITHIN: Duration = Duration::from_millis(300);
+
+/// The retained frame could not be made after a hold — the frame handler busy with a frame of its
+/// own, the GPU still busy with the read-back's copy, a read-back failing: tried again this long
+/// after the failed try ended, for the same hold, while it stays due (no new hold, no fresh frame
+/// passed, the capture still live). A transient failure must not cost a still window its picture
+/// for good; one that cannot pass ([`Retained::Unusable`]) is not tried again.
+pub const RESUME_RETRY_EVERY: Duration = Duration::from_millis(100);
+/// Tries of the retained frame after one hold, the first included, and no try begun later than
+/// [`RESUME_RETRY_FOR`] after the first began: about two seconds in all, each try bounded itself
+/// (the handler's wait and the read-back's deadline, `afklink_capture::game`: under a second), so
+/// the last one ends within about three.
+pub const RESUME_TRIES: u32 = 8;
+pub const RESUME_RETRY_FOR: Duration = Duration::from_secs(2);
+
 /// The pause before the window capture is started again after it failed, doubling to
 /// [`RETRY_MAX`], and back to this once a capture has run for [`RETRY_RESET_AFTER`].
 const RETRY_MIN: Duration = Duration::from_secs(1);
@@ -1328,6 +1353,19 @@ pub struct GameStatus {
     snap: Mutex<GameSnapshot>,
     /// Wakes the heartbeat on a change, so a minimize reaches the viewer at once.
     changed: Notify,
+    /// The window's frames that arrived during background holds this session (WGC activity), and
+    /// those of them retained — copied as the capture's last frame ([`WindowCapture::retained`]),
+    /// a GPU copy on Windows, which can fail where an arrival cannot: what a hold costs while the
+    /// window capture runs through it, for the pipeline line ([`Self::held_frames`]).
+    held_arrived: AtomicU64,
+    held_retained: AtomicU64,
+    /// Every GPU copy of a live frame into the retained texture submitted this session, held or
+    /// not, and the bytes each writes (the client area's of a sent frame, the whole frame's of any
+    /// other): the retention's standing cost, counted rather than claimed — a count of work queued
+    /// on the GPU, not GPU time. The pipeline line shows both per second
+    /// ([`Self::retain_copies`]).
+    retain_copies: AtomicU64,
+    retain_bytes: AtomicU64,
 }
 
 impl Default for GameStatus {
@@ -1341,7 +1379,45 @@ impl GameStatus {
         Self {
             snap: Mutex::new(GameSnapshot::idle()),
             changed: Notify::new(),
+            held_arrived: AtomicU64::new(0),
+            held_retained: AtomicU64::new(0),
+            retain_copies: AtomicU64::new(0),
+            retain_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// One copy of a frame into the retained texture submitted to the GPU, `bytes` to be written
+    /// (the frame handler's, for every live frame it retains). Two relaxed counters, no lock.
+    pub fn note_retain_copy(&self, bytes: u64) {
+        self.retain_copies.fetch_add(1, Ordering::Relaxed);
+        self.retain_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// The copies into the retained texture submitted this session and the bytes they write
+    /// ([`Self::note_retain_copy`]); the pipeline line shows them per second.
+    pub fn retain_copies(&self) -> (u64, u64) {
+        (
+            self.retain_copies.load(Ordering::Relaxed),
+            self.retain_bytes.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A frame of the window arrived during a background hold (the frame handler's); `retained`
+    /// when it was copied as the capture's last frame. Two relaxed counters, no lock.
+    pub fn note_held_frame(&self, retained: bool) {
+        self.held_arrived.fetch_add(1, Ordering::Relaxed);
+        if retained {
+            self.held_retained.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The window's frames that arrived during background holds this session, and those retained
+    /// ([`Self::note_held_frame`]); the pipeline line shows them per second.
+    pub fn held_frames(&self) -> (u64, u64) {
+        (
+            self.held_arrived.load(Ordering::Relaxed),
+            self.held_retained.load(Ordering::Relaxed),
+        )
     }
 
     /// The session enters or leaves game mode. Either way the window starts out unknown.
@@ -1521,16 +1597,50 @@ impl GameStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateSend {
     Sent,
-    /// Not this frame's turn: a window frame from a capture that is no longer the live one, or a
-    /// black frame while a capture is live.
+    /// Not this frame's turn: a window frame from a capture that is no longer the live one, any
+    /// frame during the background hold ([`FrameGate::hold`]), or a black frame while a capture is
+    /// live.
     Refused,
     /// The consumer is gone (the session ended).
     Closed,
 }
 
+/// Whether a window capture's frame would pass the gate now ([`FrameGate::admit`]), asked by the
+/// frame handler before it spends anything on the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    Pass,
+    /// The live capture's frame, during the background hold: retained as the capture's last
+    /// frame, like every live frame, and otherwise dropped unread (and counted).
+    Held,
+    /// A capture that is no longer the live one.
+    NotLive,
+}
+
 /// The one door frames go through to the encoder in game mode: either the live window capture's or
 /// black ones, never both, and never a frame of a capture that was stopped or replaced — its frames
-/// carry the generation it was started with.
+/// carry the generation it was started with. During the background hold ([`Self::hold`]) nothing
+/// passes at all, and the live capture stays live.
+///
+/// ## The retained frame is the capture's, not the gate's
+///
+/// The picture the viewer resumes on after a hold when the window sends no fresh frame (a still
+/// window — WGC sends a window's frame only when it changes) is the capture's own last frame,
+/// every live frame retained exactly as it arrived ([`WindowCapture::retained`]: on Windows a GPU
+/// copy into one texture, read back only for a resend). The gate holds no picture: it checks a
+/// resend against the hold's record and passes it in its lock ([`Self::resend`]), and no copy of a
+/// frame is ever made under its lock.
+///
+/// ## The hold's record
+///
+/// Each hold has an epoch, counted up as it begins, and the gate writes down, in the same lock as
+/// the transition itself, what the game capture's thread acts on later: when the hold began and
+/// ended, which capture was live then and how many frames it had passed at the release (the
+/// baseline its first fresh frame is told by). However late that thread looks ([`Self::hold_view`]),
+/// it sees every hold that began, a hold that began and ended between two of its looks included,
+/// and a frame that passed after the release is never taken for one from before it. A decision of
+/// that thread's that a hold begun since would undo — a resend, giving up on a capture — is checked
+/// against the record in the lock that acts on it ([`Self::resend`], [`Self::close_unheld`]).
 pub struct FrameGate {
     inner: Mutex<GateInner>,
     target_source: Option<TargetSource>,
@@ -1542,6 +1652,64 @@ struct GateInner {
     live: Option<u64>,
     last_generation: u64,
     live_frames: u64,
+    hold: HoldState,
+}
+
+/// The background hold in force or the last one, as [`FrameGate::hold`] recorded it.
+#[derive(Default)]
+struct HoldState {
+    /// No frame passes, live or black.
+    held: bool,
+    /// Holds begun on this gate (the one in force or the last one is this one).
+    epoch: u64,
+    since: Option<Instant>,
+    /// The capture live when it began, and the frames it had passed by then.
+    live_at_hold: Option<u64>,
+    frames_at_hold: u64,
+    /// The live capture's frames that arrived during it (WGC activity, each retained by the
+    /// capture and dropped here), and when the last arrived.
+    arrived: u64,
+    last_arrival: Option<Instant>,
+    released: Option<HoldRelease>,
+}
+
+/// The end of a background hold, as the gate recorded it at the release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldRelease {
+    pub epoch: u64,
+    pub at: Instant,
+    /// The capture live at the release, and the frames it had passed by then.
+    pub live: Option<u64>,
+    pub frames: u64,
+}
+
+/// The background hold as the gate has it now ([`FrameGate::hold_view`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldView {
+    pub held: bool,
+    /// The hold in force or the last one; 0 before the first.
+    pub epoch: u64,
+    pub since: Option<Instant>,
+    pub live_at_hold: Option<u64>,
+    pub frames_at_hold: u64,
+    /// The live capture's frames that arrived during it (dropped here, retained by the capture).
+    pub arrived: u64,
+    /// How long ago the last of them arrived (`None`: none did — a still window, or no capture).
+    pub last_arrival_ago: Option<Duration>,
+    /// Its end, once it has ended.
+    pub released: Option<HoldRelease>,
+}
+
+/// What [`FrameGate::resend`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resend {
+    /// The capture's retained frame went out again, at this size.
+    Sent { size: (u32, u32) },
+    /// Not due any more, and why: a new hold began, the capture is no longer live, or a fresh frame
+    /// passed meanwhile.
+    Superseded(&'static str),
+    /// The consumer is gone (the session ended).
+    Closed,
 }
 
 /// A frame for a [`FrameGate::bounded`] consumer: timestamped at the window callback boundary,
@@ -1771,8 +1939,66 @@ impl FrameGate {
                 live: None,
                 last_generation: 0,
                 live_frames: 0,
+                hold: HoldState::default(),
             }),
         }
+    }
+
+    /// The background hold, on (`held`) or off, at `now` (the caller's clock, which the game
+    /// capture's thread steps on too). Held, no frame passes — neither the live capture's nor a
+    /// black one — from the moment this returns, while the live capture stays live (its generation
+    /// passes again once the hold is off). Each hold gets the next epoch, and its start and end are
+    /// recorded with the live capture and its frame count in this same lock ([`Self`], «The
+    /// hold's record»). False when the gate already was so (nothing changed).
+    pub fn hold(&self, held: bool, now: Instant) -> bool {
+        let mut inner = lock(&self.inner);
+        if inner.hold.held == held {
+            return false;
+        }
+        let (live, frames) = (inner.live, inner.live_frames);
+        let hold = &mut inner.hold;
+        if held {
+            *hold = HoldState {
+                held: true,
+                epoch: hold.epoch + 1,
+                since: Some(now),
+                live_at_hold: live,
+                frames_at_hold: frames,
+                ..HoldState::default()
+            };
+        } else {
+            hold.held = false;
+            hold.released = Some(HoldRelease {
+                epoch: hold.epoch,
+                at: now,
+                live,
+                frames,
+            });
+        }
+        true
+    }
+
+    /// The background hold as the gate has it now ([`HoldView`]).
+    pub fn hold_view(&self, now: Instant) -> HoldView {
+        let inner = lock(&self.inner);
+        let h = &inner.hold;
+        HoldView {
+            held: h.held,
+            epoch: h.epoch,
+            since: h.since,
+            live_at_hold: h.live_at_hold,
+            frames_at_hold: h.frames_at_hold,
+            arrived: h.arrived,
+            last_arrival_ago: h.last_arrival.map(|at| now.saturating_duration_since(at)),
+            released: h.released,
+        }
+    }
+
+    /// Whether the captures behind this gate retain their last frame for a resend after a hold
+    /// ([`WindowCapture::retained`]): only behind the agent's own frame channel ([`Self::new`]); a
+    /// [`Self::bounded`] consumer is never held. No lock.
+    pub fn retains_frames(&self) -> bool {
+        self.target_source.is_none()
     }
 
     /// A new window capture takes over: its generation, which its frames carry.
@@ -1790,17 +2016,51 @@ impl FrameGate {
         lock(&self.inner).live.take()
     }
 
+    /// The first-frame watchdog's decision to give up on `generation`, made in the gate's lock
+    /// against what is true now: no hold in force and none begun since the thread's last look
+    /// (`epoch`), the capture still live, and still nothing of it passed. Then it is closed here,
+    /// as [`Self::close`] — the capture itself is stopped by the caller, outside this lock. Err:
+    /// why it is not given up on after all.
+    pub fn close_unheld(&self, generation: u64, epoch: u64) -> Result<(), &'static str> {
+        let mut inner = lock(&self.inner);
+        if inner.hold.held || inner.hold.epoch != epoch {
+            return Err("a background hold began");
+        }
+        if inner.live != Some(generation) {
+            return Err("the capture is no longer live");
+        }
+        if inner.live_frames != 0 {
+            return Err("a frame of it passed meanwhile");
+        }
+        inner.live = None;
+        Ok(())
+    }
+
     pub fn is_live(&self) -> bool {
         lock(&self.inner).live.is_some()
     }
 
     /// Whether a frame of `generation` would pass — for the frame handler, before it spends
-    /// anything on the frame.
-    pub fn admits(&self, generation: u64) -> bool {
-        lock(&self.inner).live == Some(generation)
+    /// anything on the frame (pacing included). A live frame refused by the hold is counted here.
+    pub fn admit(&self, generation: u64) -> Admit {
+        self.admit_at(generation, Instant::now())
     }
 
-    /// Frames the live capture has passed so far.
+    /// [`Self::admit`] at `now`.
+    pub fn admit_at(&self, generation: u64, now: Instant) -> Admit {
+        let mut inner = lock(&self.inner);
+        if inner.live != Some(generation) {
+            return Admit::NotLive;
+        }
+        if !inner.hold.held {
+            return Admit::Pass;
+        }
+        inner.hold.arrived += 1;
+        inner.hold.last_arrival = Some(now);
+        Admit::Held
+    }
+
+    /// Frames the live capture has passed so far (a resend included).
     pub fn live_frames(&self) -> u64 {
         lock(&self.inner).live_frames
     }
@@ -1825,6 +2085,12 @@ impl FrameGate {
         if inner.live != Some(generation) {
             return GateSend::Refused;
         }
+        // Admitted before the hold began, and done with after: dropped like the hold's own (the
+        // capture retained it when it arrived).
+        if inner.hold.held {
+            inner.hold.arrived += 1;
+            return GateSend::Refused;
+        }
         let sent = Self::send(&mut inner, frame, target);
         if sent == GateSend::Sent {
             inner.live_frames += 1;
@@ -1832,14 +2098,79 @@ impl FrameGate {
         sent
     }
 
-    /// A black frame: only while no capture is live.
+    /// Whether a resend after hold `epoch` is still due — the check [`Self::resend`] makes again
+    /// when it sends, here before the capture spends a read-back on the frame.
+    pub fn resend_due(&self, epoch: u64, generation: u64, frames: u64) -> Result<(), &'static str> {
+        Self::due(&lock(&self.inner), epoch, generation, frames)
+    }
+
+    fn due(
+        inner: &GateInner,
+        epoch: u64,
+        generation: u64,
+        frames: u64,
+    ) -> Result<(), &'static str> {
+        if inner.hold.held || inner.hold.epoch != epoch {
+            return Err("a new background hold began");
+        }
+        if inner.live != Some(generation) {
+            return Err("the capture is no longer live");
+        }
+        if inner.live_frames != frames {
+            return Err("a fresh frame passed meanwhile");
+        }
+        Ok(())
+    }
+
+    /// After hold `epoch` ended with `generation` live at `frames` passed and no fresh frame has
+    /// come: send `frame` — the capture's retained frame, read back and made like a live one by
+    /// its caller ([`WindowCapture::retained`]) — as the keyframe the viewer resumes on, checked
+    /// in the same lock against what is true now: the hold still `epoch` and over, the capture
+    /// still live, nothing passed since. The frame is moved, never copied, and one refused is
+    /// freed after the lock.
+    ///
+    /// `on_sent` runs once the frame is sent, still in this lock: where the resent picture is
+    /// ([`GameStatus::set_geometry`]) is published there, so it can never land after a newer live
+    /// frame's. A live frame passes only in this lock and publishes its own geometry after it, so
+    /// one that passes after the resend publishes after it too, and one that passed before makes
+    /// the resend not due. `on_sent` must not wait on anything (the status's own short lock and a
+    /// notify are all it takes).
+    pub fn resend(
+        &self,
+        epoch: u64,
+        generation: u64,
+        frames: u64,
+        frame: Frame,
+        on_sent: impl FnOnce(),
+    ) -> Resend {
+        let size = (frame.width, frame.height);
+        let (done, refused) = {
+            let mut inner = lock(&self.inner);
+            match Self::due(&inner, epoch, generation, frames) {
+                Err(why) => (Resend::Superseded(why), Some(frame)),
+                Ok(()) => match Self::send(&mut inner, frame, None) {
+                    GateSend::Sent => {
+                        inner.live_frames += 1;
+                        on_sent();
+                        (Resend::Sent { size }, None)
+                    }
+                    GateSend::Closed => (Resend::Closed, None),
+                    GateSend::Refused => (Resend::Superseded("refused"), None),
+                },
+            }
+        };
+        drop(refused);
+        done
+    }
+
+    /// A black frame: only while no capture is live, and never during the hold.
     pub fn send_black(&self, frame: Frame) -> GateSend {
         if self.target_source.is_some() {
             tracing::trace!(target: crate::EMBED_LOG_TARGET, "frame gate with a target source refused a synthetic frame");
             return GateSend::Refused;
         }
         let mut inner = lock(&self.inner);
-        if inner.live.is_some() {
+        if inner.live.is_some() || inner.hold.held {
             return GateSend::Refused;
         }
         Self::send(&mut inner, frame, None)
@@ -1908,8 +2239,44 @@ pub struct WindowCaptureContext {
 pub trait WindowCapture: Send {
     /// It ended by itself: the window closed, a frame could not be read.
     fn finished(&mut self) -> bool;
-    /// Stop it and collect it; why it ended, when it ended by itself.
+    /// Stop it and collect it; why it ended, when it ended by itself. Its retained frame goes
+    /// with it.
     fn stop(self: Box<Self>) -> Option<String>;
+    /// Its last frame, made now like a live frame — cropped to the client area and scaled to the
+    /// rung — for a resend after a background hold that a still window sent nothing fresh after
+    /// (`Director::recover`, on the game capture's thread: once per hold, and a few times more
+    /// when it fails — [`RESUME_TRIES`] at most).
+    ///
+    /// Every frame of the live capture that arrives (passed, paced out, or dropped by the hold)
+    /// is retained exactly, as the newest one, by the capture: the gate drops a held frame, but
+    /// the capture has kept it, so the picture resumed on is never older than the window's last
+    /// update. On Windows that is a GPU copy of each frame into one texture — a sent frame's
+    /// client area, any other frame whole; the read-back, crop and scale happen only here
+    /// (`afklink_capture::game`), the GPU polled for a bounded time. `now` is the caller's clock,
+    /// for the age in the log.
+    fn retained(&mut self, now: Instant) -> Retained;
+}
+
+/// What [`WindowCapture::retained`] made.
+#[derive(Debug)]
+pub enum Retained {
+    /// The last frame, made like a live one: where the picture is (for the status once it is sent
+    /// — [`GameStatus::set_geometry`]), how old the frame is and whether it arrived during a hold.
+    Frame {
+        frame: Frame,
+        geometry: CaptureGeometry,
+        age: Duration,
+        in_hold: bool,
+    },
+    /// No frame has arrived since the capture started.
+    Nothing,
+    /// One is retained but could not be made this time (the handler or the GPU busy, a read-back
+    /// failing), and why: a later try may do better.
+    Failed(String),
+    /// None can be made of what is retained, and why — the window's client area is not inside
+    /// the region kept of its last frame, the frame's format is not read back, the capture keeps
+    /// no frame at all: no try of this frame can pass, and the resend is given up at once.
+    Unusable(String),
 }
 
 /// Starts window captures: WGC on Windows (`afklink_capture::game`), a script in tests.
@@ -1923,17 +2290,20 @@ pub trait WindowCaptureBackend: Send {
 ///
 /// One thread (`game-capture`) polls the finder every [`FINDER_POLL`], keeps a window capture on
 /// the game's window while it is shown — started again on a new window (a relaunch) and after it
-/// fails — and sends a black frame every [`BLACK_EVERY`] whenever no capture is live. It never ends
-/// by itself: every failure ends in black frames. [`Capturer::check`] reports only the thread
-/// itself dying (a panic), which the pipeline supervisor answers with a new game capturer.
+/// fails — and sends a black frame every [`BLACK_EVERY`] whenever no capture is live. During the
+/// background hold nothing goes out, and a capture that is live keeps running ([`Capturer::hold`]
+/// below). It never ends by itself: every failure ends in black frames. [`Capturer::check`]
+/// reports only the thread itself dying (a panic), which the pipeline supervisor answers with a
+/// new game capturer.
 pub struct GameCapturer {
     binding: Option<GameBinding>,
     status: Arc<GameStatus>,
     parts: Option<(Box<dyn WindowSource>, Box<dyn WindowCaptureBackend>)>,
     running: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
-    /// The background hold (`crate::bg_hold`), as the pipeline supervisor set it with
-    /// [`Capturer::hold`]: read by the thread on every step.
-    held: Arc<AtomicBool>,
+    /// The gate the thread's frames go through, from [`Capturer::start`] on. The background hold
+    /// (`crate::bg_hold`) is set on it in the supervisor's own call ([`Capturer::hold`]), so nothing
+    /// passes from the moment `hold(true)` returns; the thread reads the hold's record from it.
+    gate: Option<Arc<FrameGate>>,
 }
 
 impl GameCapturer {
@@ -1947,8 +2317,26 @@ impl GameCapturer {
             status: request.status.clone(),
             parts: Some((source, backend)),
             running: None,
-            held: Arc::new(AtomicBool::new(false)),
+            gate: None,
         }
+    }
+}
+
+/// The background hold as [`Capturer::hold`] sets it: on the gate, synchronously — no frame passes
+/// once a hold is on, and frames pass again at once once it is off; the gate records the
+/// transition for the capturer's thread, which acts on the rest at its next step. A repeated hold
+/// or a release with no hold changes nothing, and is said.
+fn set_hold(gate: &FrameGate, held: bool, now: Instant) {
+    if !gate.hold(held, now) {
+        tracing::debug!(
+            held,
+            "game capture: {}",
+            if held {
+                "hold asked while already held; nothing changes"
+            } else {
+                "release asked with no hold in force; nothing changes"
+            }
+        );
     }
 }
 
@@ -1959,14 +2347,15 @@ impl Capturer for GameCapturer {
             .take()
             .ok_or_else(|| anyhow::anyhow!("a game capturer is started once"))?;
         let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(FrameGate::new(sink));
+        self.gate = Some(gate.clone());
         let director = Director::new(
             self.binding.clone(),
             source,
             backend,
-            Arc::new(FrameGate::new(sink)),
+            gate,
             self.status.clone(),
             target,
-            self.held.clone(),
         );
         let thread_stop = stop.clone();
         let thread = std::thread::Builder::new()
@@ -2009,11 +2398,19 @@ impl Capturer for GameCapturer {
         }
     }
 
-    /// The background hold: the thread stops the window capture and its black frames and goes on
-    /// watching the game's window — its state, its process, where its client area is — which the
-    /// heartbeat's `game` and the input's scope read through the hold. Released, it captures again
-    /// at once. False when its thread is not running (never started, or ended): the supervisor
-    /// then replaces it as it replaces any capturer that cannot hold.
+    /// The background hold: nothing goes out — no window frame, no black frame — from the moment
+    /// this returns. A window capture that is live keeps running through the hold and its frames
+    /// are dropped as they arrive (each retained by the capture as its last frame, a GPU copy, and
+    /// nothing more spent on it): a restart of a window capture that was stopped can
+    /// fail with `0x800703EE` (`ERROR_FILE_INVALID`) on every later start. The
+    /// thread goes on watching the game's window — its state, its process, where its client area
+    /// is — which the heartbeat's `game` and the input's scope read through the hold, and still
+    /// stops the capture when the window goes away or changes. Released, frames pass again at
+    /// once: the kept capture's next frame — or, a still window sending none, the capture's
+    /// retained last frame ([`WindowCapture::retained`]) — or, with none live, a capture started
+    /// at once (or a black frame). False when its thread is not running (never started, or ended):
+    /// the supervisor then replaces it as it replaces any capturer that cannot hold. Never blocks:
+    /// one short lock of the gate, which nothing holds across a wait.
     fn hold(&mut self, held: bool) -> bool {
         let Some((_, thread)) = self.running.as_ref() else {
             tracing::debug!(
@@ -2026,7 +2423,12 @@ impl Capturer for GameCapturer {
             tracing::debug!(held, "game capture: hold refused: its thread has ended");
             return false;
         }
-        self.held.store(held, Ordering::SeqCst);
+        let Some(gate) = &self.gate else {
+            // Not reached: the thread runs only after `start` set the gate.
+            tracing::debug!(held, "game capture: hold refused: no frame gate");
+            return false;
+        };
+        set_hold(gate, held, Instant::now());
         thread.thread().unpark();
         true
     }
@@ -2052,6 +2454,34 @@ struct LiveCapture {
     hwnd: usize,
     generation: u64,
     started: Instant,
+    /// Since when its first frame is waited for ([`FIRST_FRAME_WITHIN`]): its start, and the end
+    /// of a hold it ran through — the wait never counts a hold.
+    first_frame_from: Instant,
+}
+
+/// A background hold the thread is acting on: its epoch on the gate, and when it began.
+struct Holding {
+    epoch: u64,
+    since: Instant,
+}
+
+/// A hold over with its window capture kept: waiting for that capture's next frame, and for
+/// [`RESUME_FIRST_FRAME_WITHIN`] at most before the retained frame is sent again.
+struct Resuming {
+    /// The hold it follows, as the gate counts them: the recovery is due only while that one is
+    /// the last hold and over ([`FrameGate::resend`]).
+    epoch: u64,
+    /// The release, as the gate recorded it.
+    since: Instant,
+    generation: u64,
+    /// The capture's frames passed at the release, so the first one after it is told.
+    frames_before: u64,
+    held_ms: u64,
+    /// Tries of the retained frame so far ([`Director::recover`]), when the first began, and when
+    /// the next is due after one failed ([`RESUME_RETRY_EVERY`]).
+    tries: u32,
+    first_try: Option<Instant>,
+    next_try: Option<Instant>,
 }
 
 /// The game capturer's thread, as steps on a clock of the caller's (tests drive it directly).
@@ -2073,17 +2503,19 @@ struct Director {
     /// The geometry could not be read on the last poll (said once per episode).
     geometry_failing: bool,
     consumer_gone: bool,
-    /// The background hold as the supervisor set it ([`Capturer::hold`]), and as this thread last
-    /// acted on it: while held, no window capture and no black frame — only the finder.
-    held: Arc<AtomicBool>,
-    holding: Option<Instant>,
+    /// The last hold epoch this thread has acted on ([`FrameGate::hold_view`]).
+    seen_epoch: u64,
+    /// The background hold as this thread acts on it: while held, no capture is started and no
+    /// black frame goes out; a capture live when it began keeps running (the gate drops its frames,
+    /// the capture retains the newest), and the finder goes on.
+    holding: Option<Holding>,
+    resuming: Option<Resuming>,
+    /// The time now, read when a try of the retained frame ends ([`Self::recover`]), which can
+    /// take well over the step's own time: `Instant::now`, or the test's clock.
+    clock: Box<dyn Fn() -> Instant + Send>,
 }
 
 impl Director {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the capturer's parts, handed to its thread"
-    )]
     fn new(
         binding: Option<GameBinding>,
         source: Box<dyn WindowSource>,
@@ -2091,7 +2523,6 @@ impl Director {
         gate: Arc<FrameGate>,
         status: Arc<GameStatus>,
         target: Arc<QualityTarget>,
-        held: Arc<AtomicBool>,
     ) -> Self {
         Self {
             finder: GameFinder::new(binding),
@@ -2108,47 +2539,188 @@ impl Director {
             retry_gap: RETRY_MIN,
             geometry_failing: false,
             consumer_gone: false,
-            held,
+            seen_epoch: 0,
             holding: None,
+            resuming: None,
+            clock: Box::new(Instant::now),
         }
     }
 
-    /// Act on a change of the background hold. Held: the window capture stops and so do black
-    /// frames; the finder goes on, so the window's state, its process and its client area stay
-    /// current for the heartbeat and for input. Released: the next step polls at once and starts
-    /// the window capture (or sends a black frame at once when the window cannot be shown).
+    /// Act on what the background hold did since the last step. The gate itself was held or
+    /// released in the supervisor's own call ([`set_hold`]) and recorded each transition with
+    /// its epoch, time and frame count ([`FrameGate`], «The hold's record»); this is the thread's
+    /// part, read from that record — so a hold that began and ended between two steps is acted on
+    /// all the same, and the baseline of the first fresh frame is the gate's, taken at the release.
+    ///
+    /// Held: a window capture that is live keeps running — the gate drops its frames as they
+    /// arrive, the capture retaining each as its last frame — and black frames stop; the finder
+    /// goes on, so the window's state, its process and its client area stay current for the
+    /// heartbeat and for input, and a window that goes away or changes still stops the capture
+    /// (none is started until the release). Released: with the capture kept, its next frame is the
+    /// viewer's, or the retained frame once [`RESUME_FIRST_FRAME_WITHIN`] passes without one
+    /// ([`Self::watch`]); without, the next step polls at once and starts the window capture with
+    /// no pause (or sends a black frame at once when the window cannot be shown).
     fn follow_hold(&mut self, now: Instant) {
-        let held = self.held.load(Ordering::SeqCst);
-        match (held, self.holding) {
-            (true, None) => {
-                self.holding = Some(now);
-                self.stop_live(now, "background hold");
-                if let Some((since, why, frames)) = self.black.take() {
-                    tracing::debug!(
-                        black_frames = frames,
-                        black_ms = now.saturating_duration_since(since).as_millis() as u64,
-                        began_with = %why,
-                        "game capture: black frames stop: background hold"
-                    );
+        let view = self.gate.hold_view(now);
+        if view.epoch != self.seen_epoch {
+            let missed = view.epoch.saturating_sub(self.seen_epoch).saturating_sub(1);
+            if let Some(old) = self.holding.take() {
+                // Its release and the next hold's start both came between two steps: the newer
+                // hold is the one in force, and nothing of the older one is due any more.
+                tracing::debug!(
+                    epoch = old.epoch,
+                    next_epoch = view.epoch,
+                    held_ms = now.saturating_duration_since(old.since).as_millis() as u64,
+                    "game capture: background hold over and the next one already begun, both \
+                     between two steps; acting on the newer one"
+                );
+            }
+            self.seen_epoch = view.epoch;
+            self.begin_hold(now, &view, missed);
+        }
+        if self.holding.is_some() && !view.held {
+            self.end_hold(now, &view);
+        }
+    }
+
+    /// A hold began (the gate's record in `view`); `missed` holds began and ended before it
+    /// unseen (only their count is known).
+    fn begin_hold(&mut self, now: Instant, view: &HoldView, missed: u64) {
+        let since = view.since.unwrap_or(now);
+        self.holding = Some(Holding {
+            epoch: view.epoch,
+            since,
+        });
+        if let Some(resuming) = self.resuming.take() {
+            tracing::debug!(
+                epoch = resuming.epoch,
+                waited_ms = since.saturating_duration_since(resuming.since).as_millis() as u64,
+                "game capture: a new background hold began before the first frame after the last \
+                 one; that one's recovery is cancelled"
+            );
+        }
+        if let Some((black_since, why, frames)) = self.black.take() {
+            tracing::debug!(
+                black_frames = frames,
+                black_ms = now.saturating_duration_since(black_since).as_millis() as u64,
+                began_with = %why,
+                "game capture: black frames stop for the background hold"
+            );
+        }
+        self.next_black = None;
+        let state = self.finder.state().map_or("-", GameWindowState::as_str);
+        let seen_after_ms = now.saturating_duration_since(since).as_millis() as u64;
+        match &self.live {
+            Some(live) => tracing::debug!(
+                epoch = view.epoch,
+                missed,
+                seen_after_ms,
+                hwnd = %format!("{:#x}", live.hwnd),
+                generation = live.generation,
+                live_at_hold = ?view.live_at_hold,
+                frames = view.frames_at_hold,
+                ran_ms = since.saturating_duration_since(live.started).as_millis() as u64,
+                state,
+                kept = true,
+                "game capture: background hold — the window capture keeps running; its frames \
+                 are dropped as they arrive, the newest retained by the capture as the picture \
+                 to resume on; no frame and no black frame goes out; the finder keeps watching \
+                 the game's window"
+            ),
+            None => tracing::debug!(
+                epoch = view.epoch,
+                missed,
+                seen_after_ms,
+                state,
+                kept = false,
+                poll_ms = FINDER_POLL.as_millis() as u64,
+                "game capture: background hold — no window capture is live, none is started and \
+                 no black frame goes out until it ends; the finder keeps watching the game's window"
+            ),
+        }
+    }
+
+    /// The hold this thread acts on is over (the gate's record in `view`).
+    fn end_hold(&mut self, now: Instant, view: &HoldView) {
+        let Some(hold) = self.holding.take() else {
+            return;
+        };
+        let release = view
+            .released
+            .filter(|r| r.epoch == hold.epoch)
+            .unwrap_or_else(|| {
+                // Not reached: a gate not held has recorded the release of its last hold.
+                tracing::debug!(
+                    epoch = hold.epoch,
+                    "game capture: the hold is over but its release is not recorded; taken as now"
+                );
+                HoldRelease {
+                    epoch: hold.epoch,
+                    at: now,
+                    live: self.live.as_ref().map(|l| l.generation),
+                    frames: self.gate.live_frames(),
                 }
-                self.next_black = None;
+            });
+        let held_ms = release.at.saturating_duration_since(hold.since).as_millis() as u64;
+        let seen_after_ms = now.saturating_duration_since(release.at).as_millis() as u64;
+        let state = self.finder.state().map_or("-", GameWindowState::as_str);
+        let last_arrival_ago_ms = view
+            .last_arrival_ago
+            .map_or_else(|| "-".to_string(), |d| d.as_millis().to_string());
+        match self.live.as_mut() {
+            Some(live) if release.live == Some(live.generation) => {
+                // A capture that has passed nothing yet waits for its first frame from here: the
+                // hold's time is not its.
+                live.first_frame_from = live.first_frame_from.max(release.at);
+                self.resuming = Some(Resuming {
+                    epoch: hold.epoch,
+                    since: release.at,
+                    generation: live.generation,
+                    frames_before: release.frames,
+                    held_ms,
+                    tries: 0,
+                    first_try: None,
+                    next_try: None,
+                });
                 tracing::debug!(
-                    state = self.finder.state().map_or("-", GameWindowState::as_str),
-                    poll_ms = FINDER_POLL.as_millis() as u64,
-                    "game capture: background hold — no window capture and no black frames; the \
-                     finder keeps watching the game's window"
+                    epoch = hold.epoch,
+                    held_ms,
+                    seen_after_ms,
+                    arrived = view.arrived,
+                    last_arrival_ago_ms = %last_arrival_ago_ms,
+                    hwnd = %format!("{:#x}", live.hwnd),
+                    generation = live.generation,
+                    frames = release.frames,
+                    state,
+                    kept = true,
+                    resume_within_ms = RESUME_FIRST_FRAME_WITHIN.as_millis() as u64,
+                    "game capture: background hold over — the window capture kept running \
+                     through it; its next frame goes out at once, or its retained last frame if \
+                     none comes in time"
                 );
             }
-            (false, Some(since)) => {
-                self.holding = None;
+            _ => {
+                // No pause either way: a hold is not a failure, and the pause before the next try
+                // after one has run out in most holds anyway.
                 self.next_poll = None;
+                let pause_cut_ms = self
+                    .retry_at
+                    .take()
+                    .map(|at| at.saturating_duration_since(now).as_millis() as u64);
                 tracing::debug!(
-                    held_ms = now.saturating_duration_since(since).as_millis() as u64,
-                    state = self.finder.state().map_or("-", GameWindowState::as_str),
-                    "game capture: background hold over — capturing again at once"
+                    epoch = hold.epoch,
+                    held_ms,
+                    seen_after_ms,
+                    arrived = view.arrived,
+                    state,
+                    kept = false,
+                    live_at_hold = ?view.live_at_hold,
+                    live_at_release = ?release.live,
+                    retry_pause_cut_ms = ?pause_cut_ms,
+                    "game capture: background hold over — no window capture is live (none was, \
+                     or it stopped during the hold); capturing again at once"
                 );
             }
-            _ => {}
         }
     }
 
@@ -2191,6 +2763,13 @@ impl Director {
         if let Some(due) = self.next_black {
             wake = wake.min(due);
         }
+        if let Some(resuming) = &self.resuming {
+            wake = wake.min(
+                resuming
+                    .next_try
+                    .unwrap_or(resuming.since + RESUME_FIRST_FRAME_WITHIN),
+            );
+        }
         wake
     }
 
@@ -2201,13 +2780,8 @@ impl Director {
                 self.status.set_state(GameWindowState::Shown);
                 // Whose window it is, for input: a press lands only on a window of this process.
                 self.status.set_window(window.hwnd, window.pid);
-                if self.holding.is_some() {
-                    // Held: nothing is captured, but where the window is stays current for input
-                    // (only for the window last captured; a new one has no geometry until it is).
-                    self.refresh_geometry(window.hwnd);
-                    return;
-                }
                 if let Some(live) = &self.live {
+                    // Held or not: a capture kept through a hold runs on, its frames dropped.
                     if live.hwnd == window.hwnd {
                         self.refresh_geometry(window.hwnd);
                         return;
@@ -2219,6 +2793,15 @@ impl Director {
                     self.stop_live(now, &why);
                     // A new window is not a failure: no pause before capturing it.
                     self.retry_at = None;
+                }
+                if self.holding.is_some() {
+                    // Held: no capture is started, but where the window is stays current for input
+                    // (only for the window last captured; a new one has no geometry until it is).
+                    tracing::trace!(
+                        "game capture: held; the window is captured once the hold ends"
+                    );
+                    self.refresh_geometry(window.hwnd);
+                    return;
                 }
                 if self.retry_at.is_some_and(|at| now < at) {
                     tracing::trace!("game capture: waiting out the pause before trying again");
@@ -2266,6 +2849,7 @@ impl Director {
                     hwnd: window.hwnd,
                     generation,
                     started: now,
+                    first_frame_from: now,
                 });
                 self.go_live(now);
             }
@@ -2288,6 +2872,12 @@ impl Director {
         let Some(live) = self.live.take() else {
             return;
         };
+        if self.resuming.take().is_some() {
+            tracing::debug!(
+                "game capture: the capture kept through the hold stops before its first frame \
+                 after it"
+            );
+        }
         self.gate.close();
         let frames = self.gate.live_frames();
         let ended = live.capture.stop();
@@ -2301,7 +2891,16 @@ impl Director {
         );
     }
 
-    /// The live capture: did it end by itself, and has it delivered?
+    /// The live capture: did it end by itself, and has it delivered? During a hold only the
+    /// first: its frames are dropped, so none passing says nothing. Right after a hold it kept
+    /// running through, whether its next frame came ([`RESUME_FIRST_FRAME_WITHIN`]) — and if none
+    /// did, its retained last frame is sent again ([`Self::recover`]). A capture that is live and
+    /// has not ended is never stopped for want of a fresh frame after a hold; only one with no
+    /// usable frame at all — none passed, a resent one included — for [`FIRST_FRAME_WITHIN`]
+    /// since it started, holds not counted, is: frames that merely arrived (WGC activity) and
+    /// could not be made into a picture do not count. That decision is made in the gate's lock
+    /// against the hold ([`FrameGate::close_unheld`]): a hold that began since this step's look at
+    /// it keeps the capture.
     fn watch(&mut self, now: Instant) {
         let Some(live) = self.live.as_mut() else {
             return;
@@ -2311,38 +2910,295 @@ impl Director {
         if live.capture.finished() {
             let hwnd = live.hwnd;
             self.gate.close();
+            let resuming = self.resuming.take().is_some();
             let reason = self
                 .live
                 .take()
                 .and_then(|l| l.capture.stop())
                 .unwrap_or_else(|| "no reason given".to_string());
+            let held = self.holding.is_some();
             tracing::warn!(
                 hwnd = %format!("{hwnd:#x}"),
                 frames,
                 ran_ms = ran.as_millis() as u64,
                 retry_in_ms = self.retry_gap.as_millis() as u64,
-                "game capture: the window capture ended by itself ({reason}); black frames until \
-                 it is back"
+                held,
+                resuming,
+                "game capture: the window capture ended by itself ({reason}); {}",
+                if held {
+                    "nothing goes out during the background hold; captured again once it ends"
+                } else {
+                    "black frames until it is back"
+                }
             );
             self.schedule_retry(now);
-            self.go_black(now, "the window capture ended");
-        } else if frames == 0 && ran >= FIRST_FRAME_WITHIN {
-            let hwnd = live.hwnd;
-            tracing::warn!(
-                hwnd = %format!("{hwnd:#x}"),
-                waited_ms = ran.as_millis() as u64,
-                retry_in_ms = self.retry_gap.as_millis() as u64,
-                "game capture: no frame of the window since its capture started (every frame \
-                 refused, or none delivered); starting it again"
-            );
-            self.stop_live(now, "no frame since it started");
-            self.schedule_retry(now);
-            self.go_black(now, "the window capture delivered nothing");
+            if !held {
+                self.go_black(now, "the window capture ended");
+            }
+        } else if self.holding.is_some() {
+            tracing::trace!("game capture: held; the capture's delivery is not judged");
+        } else if let Some(resuming) = &self.resuming {
+            let waited = now.saturating_duration_since(resuming.since);
+            if resuming.generation != live.generation {
+                // Not reached: a capture stopped or replaced ends the wait (`stop_live`).
+                tracing::debug!(
+                    "game capture: the capture after the hold is another one; its wait is dropped"
+                );
+                self.resuming = None;
+            } else if frames > resuming.frames_before {
+                tracing::debug!(
+                    epoch = resuming.epoch,
+                    first_frame_ms = waited.as_millis() as u64,
+                    held_ms = resuming.held_ms,
+                    hwnd = %format!("{:#x}", live.hwnd),
+                    generation = live.generation,
+                    "game capture: the first frame after the background hold went out (the capture \
+                     kept through it)"
+                );
+                self.resuming = None;
+            } else if waited >= RESUME_FIRST_FRAME_WITHIN
+                && resuming.next_try.is_none_or(|at| now >= at)
+            {
+                self.recover(now);
+            }
+        } else if frames == 0
+            && now.saturating_duration_since(live.first_frame_from) >= FIRST_FRAME_WITHIN
+        {
+            let (hwnd, generation) = (live.hwnd, live.generation);
+            let waited_ms = now
+                .saturating_duration_since(live.first_frame_from)
+                .as_millis() as u64;
+            // Closed in the gate's lock only while no hold has begun since `follow_hold` looked
+            // and nothing passed meanwhile; the capture is stopped after, outside it.
+            match self.gate.close_unheld(generation, self.seen_epoch) {
+                Ok(()) => {
+                    tracing::warn!(
+                        hwnd = %format!("{hwnd:#x}"),
+                        generation,
+                        waited_ms,
+                        ran_ms = ran.as_millis() as u64,
+                        retry_in_ms = self.retry_gap.as_millis() as u64,
+                        "game capture: no usable frame of the window since its capture started, \
+                         holds not counted (every frame refused, none delivered, or a retained \
+                         one that could not be made); starting it again"
+                    );
+                    self.stop_live(now, "no frame since it started");
+                    self.schedule_retry(now);
+                    self.go_black(now, "the window capture delivered nothing");
+                }
+                Err(why) => tracing::debug!(
+                    hwnd = %format!("{hwnd:#x}"),
+                    generation,
+                    waited_ms,
+                    epoch = self.seen_epoch,
+                    why,
+                    "game capture: the first-frame watchdog keeps the capture after all"
+                ),
+            }
         } else if frames > 0 && ran >= RETRY_RESET_AFTER && self.retry_gap != RETRY_MIN {
             tracing::debug!(
                 "game capture: the window capture has run well; the pause after a failure is reset"
             );
             self.retry_gap = RETRY_MIN;
+        }
+    }
+
+    /// No fresh frame of the capture kept through the hold within [`RESUME_FIRST_FRAME_WITHIN`]
+    /// of the release: a still window. The capture's retained last frame goes out again — the
+    /// keyframe the pipeline asked for at the release. Asked of the gate first (a hold begun since,
+    /// another capture or a fresh frame cancels it), then made by the capture on this thread
+    /// ([`WindowCapture::retained`]: on Windows a read-back of one GPU texture, no gate lock held),
+    /// then sent in the gate's lock after the same check again ([`FrameGate::resend`]), where
+    /// the picture's place is published too. The capture is not touched either way.
+    ///
+    /// A retained frame that could not be made (the handler busy, the GPU busy, a read-back
+    /// failing) is tried again [`RESUME_RETRY_EVERY`] after that try ended — a try can hold this
+    /// thread most of a second — for the same hold: [`RESUME_TRIES`] tries at most, none begun
+    /// past [`RESUME_RETRY_FOR`] after the first began, checked when the next is scheduled and
+    /// again as it begins (a late step). While it stays due: a new hold ([`Self::begin_hold`]), a
+    /// fresh frame ([`Self::watch`]), the capture ending or stopping, or the gate's own check ends
+    /// the wait. One that cannot be made at all ([`Retained::Unusable`]) is given up at once.
+    fn recover(&mut self, now: Instant) {
+        if self.resuming.is_none() {
+            return;
+        }
+        // The time this try would begin, read now: the step's `now` is stale by whatever the step
+        // did before (the finder's poll, the window's geometry).
+        let started = (self.clock)().max(now);
+        let Some(resuming) = self.resuming.as_mut() else {
+            return;
+        };
+        if let Some(first_try) = resuming.first_try {
+            let late = started.saturating_duration_since(first_try);
+            if late > RESUME_RETRY_FOR {
+                tracing::warn!(
+                    epoch = resuming.epoch,
+                    tries = resuming.tries,
+                    since_first_ms = late.as_millis() as u64,
+                    budget_ms = RESUME_RETRY_FOR.as_millis() as u64,
+                    due_late_ms = resuming
+                        .next_try
+                        .map(|at| started.saturating_duration_since(at).as_millis() as u64),
+                    step_lag_ms = started.saturating_duration_since(now).as_millis() as u64,
+                    "game capture: the retry of the retained frame after the background hold \
+                     came due past its budget (this thread was late); not begun, the resend is \
+                     given up and the capture is kept as it is (its next frame goes out)"
+                );
+                self.resuming = None;
+                return;
+            }
+        }
+        resuming.tries += 1;
+        resuming.next_try = None;
+        let first_try = *resuming.first_try.get_or_insert(started);
+        let (epoch, frames, held_ms, tries) = (
+            resuming.epoch,
+            resuming.frames_before,
+            resuming.held_ms,
+            resuming.tries,
+        );
+        let waited_ms = now.saturating_duration_since(resuming.since).as_millis() as u64;
+        let Some(live) = self.live.as_mut() else {
+            // Not reached: `watch` recovers only a live capture.
+            self.resuming = None;
+            return;
+        };
+        let (hwnd, generation) = (live.hwnd, live.generation);
+        if let Err(why) = self.gate.resend_due(epoch, generation, frames) {
+            tracing::debug!(
+                epoch,
+                waited_ms,
+                tries,
+                why,
+                "game capture: the retained frame is not sent again after the background hold"
+            );
+            self.resuming = None;
+            return;
+        }
+        let making = (self.clock)().max(started);
+        let retained = live.capture.retained(now);
+        // When the try ended: the next is counted from here, not from the step's `now` — the try
+        // itself can take most of a second (the handler's wait, then the GPU's).
+        let done = (self.clock)().max(making);
+        let made_us = done.saturating_duration_since(making).as_micros() as u64;
+        let failed = match retained {
+            Retained::Frame {
+                frame,
+                geometry,
+                age,
+                in_hold,
+            } => {
+                self.resuming = None;
+                let status = &self.status;
+                // Where the picture is, as a passed frame says it — in the gate's lock that sends
+                // it, so a newer live frame's place is never overwritten by this older one's.
+                match self.gate.resend(epoch, generation, frames, frame, || {
+                    status.set_geometry(geometry);
+                }) {
+                    Resend::Sent { size } => tracing::debug!(
+                        epoch,
+                        waited_ms,
+                        held_ms,
+                        tries,
+                        hwnd = %format!("{hwnd:#x}"),
+                        generation,
+                        retained_age_ms = age.as_millis() as u64,
+                        arrived = if in_hold { "during the hold" } else { "before the hold" },
+                        size = %format!("{}x{}", size.0, size.1),
+                        source = %format!("{}x{}", geometry.source.0, geometry.source.1),
+                        made_us,
+                        "game capture: no fresh frame after the background hold (a still window: \
+                         WGC sends only changes); the capture's last frame went out again as the \
+                         picture to resume on; the capture is kept as it is"
+                    ),
+                    Resend::Superseded(why) => tracing::debug!(
+                        epoch,
+                        waited_ms,
+                        tries,
+                        why,
+                        made_us,
+                        "game capture: the retained frame is not sent again after the background \
+                         hold (decided after it was made)"
+                    ),
+                    Resend::Closed => {
+                        tracing::debug!("game capture: the frame consumer is gone; stopping");
+                        self.consumer_gone = true;
+                    }
+                }
+                return;
+            }
+            Retained::Nothing => {
+                self.resuming = None;
+                tracing::debug!(
+                    epoch,
+                    waited_ms,
+                    tries,
+                    hwnd = %format!("{hwnd:#x}"),
+                    generation,
+                    "game capture: no fresh frame after the background hold and nothing retained \
+                     (no frame of this capture has arrived since it started); the capture is kept \
+                     as it is, its first frame goes out, and the first-frame watchdog counts from \
+                     the release"
+                );
+                return;
+            }
+            Retained::Unusable(why) => {
+                self.resuming = None;
+                tracing::warn!(
+                    epoch,
+                    waited_ms,
+                    tries,
+                    hwnd = %format!("{hwnd:#x}"),
+                    generation,
+                    made_us,
+                    "game capture: no fresh frame after the background hold, and no picture can \
+                     be made of the retained last frame: {why}; not tried again (no try of this \
+                     frame can pass); the capture is kept as it is and its next frame goes out"
+                );
+                return;
+            }
+            Retained::Failed(why) => why,
+        };
+        let next = done + RESUME_RETRY_EVERY;
+        let again =
+            tries < RESUME_TRIES && next.saturating_duration_since(first_try) <= RESUME_RETRY_FOR;
+        if again {
+            if let Some(resuming) = self.resuming.as_mut() {
+                resuming.next_try = Some(next);
+            }
+            tracing::debug!(
+                epoch,
+                waited_ms,
+                tries,
+                max_tries = RESUME_TRIES,
+                retry_in_ms = RESUME_RETRY_EVERY.as_millis() as u64,
+                hwnd = %format!("{hwnd:#x}"),
+                generation,
+                made_us,
+                "game capture: no fresh frame after the background hold, and the retained last \
+                 frame could not be made this time: {failed}; trying again for the same hold \
+                 (a fresh frame, a new hold or the capture ending cancels it)"
+            );
+        } else {
+            self.resuming = None;
+            tracing::warn!(
+                epoch,
+                waited_ms,
+                tries,
+                tried_ms = done.saturating_duration_since(first_try).as_millis() as u64,
+                ended_by = if tries >= RESUME_TRIES {
+                    "the tries"
+                } else {
+                    "the time budget (the next try would begin past it)"
+                },
+                hwnd = %format!("{hwnd:#x}"),
+                generation,
+                made_us,
+                "game capture: no fresh frame after the background hold, and the retained last \
+                 frame could not be made after every try: {failed}; the capture is kept as it is \
+                 and its next frame goes out (the first-frame watchdog counts from the release \
+                 if none has passed)"
+            );
         }
     }
 
@@ -2419,7 +3275,9 @@ impl Director {
                 tracing::trace!(w, h, "game capture: black frame");
             }
             GateSend::Refused => {
-                tracing::trace!("game capture: black frame refused: a capture is live");
+                tracing::trace!(
+                    "game capture: black frame refused: a capture is live, or the hold is on"
+                );
             }
             GateSend::Closed => {
                 tracing::debug!("game capture: the frame consumer is gone; stopping");
@@ -2527,39 +3385,105 @@ pub(crate) mod fakes {
         pub(crate) running: Option<Running>,
         /// The running capture "ended by itself".
         pub(crate) finished: bool,
+        /// Every start after a capture was stopped fails, for good — as a window capture can
+        /// (`0x800703EE` on every start after a stop).
+        pub(crate) reject_after_stop: bool,
+        /// The running capture's last frame as it arrived — its size, when, and whether during a
+        /// hold — retained the way the WGC handler retains every live frame (a GPU copy there).
+        pub(crate) retained: Option<(u32, u32, Instant, bool)>,
+        /// The retained frame cannot be made this many times more (a read-back or crop failing
+        /// on Windows, the handler busy); `u32::MAX`: never again.
+        pub(crate) retained_fails: u32,
+        /// Tries to make the retained frame, failed ones included.
+        pub(crate) retained_tries: u32,
+        /// No picture can ever be made of the retained frame ([`Retained::Unusable`]: on Windows
+        /// a crop not inside the region kept of the last frame).
+        pub(crate) retained_unusable: bool,
+        /// How long each try takes on the test's clock (on Windows the handler's wait and the
+        /// GPU's can add up to most of a second).
+        pub(crate) retained_takes: Duration,
+        /// Each try's start and end, on the test's clock.
+        pub(crate) retained_log: Vec<(Instant, Instant)>,
+        /// The test's clock as the director reads it: the step's time, moved on by every try's
+        /// [`Self::retained_takes`] and by [`Self::step_work`].
+        pub(crate) clock: Option<Instant>,
+        /// What the step spends before its recovery reads the clock (the finder's poll, the
+        /// window's geometry): added once, at the director's next reading of the clock.
+        pub(crate) step_work: Option<Duration>,
     }
 
     impl BackendWorld {
         /// The running capture delivers one frame of the game's picture at `w`x`h`, the way the
-        /// frame handler does: the picture's size to the rung, the frame through the gate, then
-        /// where the picture is.
-        pub(crate) fn deliver(&self, w: u32, h: u32) -> GateSend {
+        /// frame handler does: asked of the gate first and retained as the capture's last frame
+        /// (during a hold then dropped unread), the picture's size to the rung, the frame through
+        /// the gate, then where the picture is.
+        pub(crate) fn deliver(&mut self, w: u32, h: u32) -> GateSend {
+            self.deliver_at(w, h, Instant::now())
+        }
+
+        /// [`Self::deliver`] at `now`, on the test's clock.
+        pub(crate) fn deliver_at(&mut self, w: u32, h: u32, now: Instant) -> GateSend {
+            match self.arrive_at(w, h, now) {
+                Some(admitted) => self.finish(admitted),
+                None => GateSend::Refused,
+            }
+        }
+
+        /// The first half of a delivery, for a test that interleaves the supervisor in the middle
+        /// of the frame handler's work: the frame arrives, is asked of the gate and retained (every
+        /// live frame, passed or held, as the handler does before any other work). `Some` — its
+        /// size — when it is to be made and sent ([`Self::finish`]); `None` when it is dropped
+        /// here (held, or of a capture that is not live).
+        pub(crate) fn arrive_at(&mut self, w: u32, h: u32, now: Instant) -> Option<(u32, u32)> {
+            let run = self.running.clone()?;
+            let admit = run.gate.admit_at(run.generation, now);
+            if admit == Admit::NotLive {
+                return None;
+            }
+            let held = admit == Admit::Held;
+            self.retained = Some((w, h, now, held));
+            if held {
+                run.status.note_held_frame(true);
+                return None;
+            }
+            Some((w, h))
+        }
+
+        /// The second half: the frame, made, through the gate (which refuses it if a hold began
+        /// meanwhile), and where the picture is once it passed.
+        pub(crate) fn finish(&self, (w, h): (u32, u32)) -> GateSend {
             let Some(run) = self.running.clone() else {
                 return GateSend::Refused;
             };
             run.target.set_source(w, h);
-            let sent = run.gate.send_live(
-                run.generation,
-                Frame {
-                    data: vec![7; w as usize * h as usize * 4],
-                    width: w,
-                    height: h,
-                    timestamp_ms: 0,
-                },
-            );
+            let sent = run.gate.send_live(run.generation, picture(w, h));
             if sent == GateSend::Sent {
-                run.status.set_geometry(CaptureGeometry {
-                    hwnd: run.hwnd,
-                    client: ScreenRect {
-                        left: 0,
-                        top: 0,
-                        right: w as i32,
-                        bottom: h as i32,
-                    },
-                    source: (w, h),
-                });
+                run.status.set_geometry(placed(run.hwnd, w, h));
             }
             sent
+        }
+    }
+
+    /// A frame of the game's picture as the scripted capture makes it.
+    fn picture(w: u32, h: u32) -> Frame {
+        Frame {
+            data: vec![7; w as usize * h as usize * 4],
+            width: w,
+            height: h,
+            timestamp_ms: 0,
+        }
+    }
+
+    fn placed(hwnd: usize, w: u32, h: u32) -> CaptureGeometry {
+        CaptureGeometry {
+            hwnd,
+            client: ScreenRect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            },
+            source: (w, h),
         }
     }
 
@@ -2574,7 +3498,14 @@ pub(crate) mod fakes {
                 w.fail_starts -= 1;
                 anyhow::bail!("CreateForWindow: 0x80070005 Access is denied.");
             }
+            if w.reject_after_stop && w.stopped > 0 {
+                anyhow::bail!(
+                    "Graphics capture error: Windows API error: The operation identifier is not \
+                     valid. (0x800703EE)"
+                );
+            }
             w.started.push((ctx.hwnd, ctx.generation));
+            w.retained = None;
             w.running = Some(Running {
                 gate: ctx.gate,
                 generation: ctx.generation,
@@ -2595,7 +3526,37 @@ pub(crate) mod fakes {
             let mut w = lock(&self.0);
             w.stopped += 1;
             w.running = None;
+            w.retained = None;
             w.finished.then(|| "the capture item closed".to_string())
+        }
+        fn retained(&mut self, now: Instant) -> Retained {
+            let mut w = lock(&self.0);
+            w.retained_tries += 1;
+            let start = w.clock.unwrap_or(now).max(now);
+            let end = start + w.retained_takes;
+            w.clock = Some(end);
+            w.retained_log.push((start, end));
+            let (Some(run), Some((fw, fh, at, in_hold))) = (w.running.clone(), w.retained) else {
+                return Retained::Nothing;
+            };
+            if w.retained_unusable {
+                return Retained::Unusable(
+                    "the crop is not inside the retained region of the frame".into(),
+                );
+            }
+            if w.retained_fails > 0 {
+                if w.retained_fails != u32::MAX {
+                    w.retained_fails -= 1;
+                }
+                return Retained::Failed("the frame handler stayed busy past 500 ms".into());
+            }
+            run.target.set_source(fw, fh);
+            Retained::Frame {
+                frame: picture(fw, fh),
+                geometry: placed(run.hwnd, fw, fh),
+                age: now.saturating_duration_since(at),
+                in_hold,
+            }
         }
     }
 }
@@ -3650,6 +4611,274 @@ mod tests {
     }
 
     #[test]
+    fn a_held_gate_passes_nothing_and_keeps_the_capture_live() {
+        let (tx, rx) = mpsc::channel();
+        let gate = FrameGate::new(tx);
+        assert!(gate.retains_frames());
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let frame = |w: u32| black_frame((w, w), 1080);
+        let live = gate.open();
+        assert_eq!(gate.admit_at(live, at(0)), Admit::Pass);
+        assert!(gate.hold(true, at(10)));
+        assert!(!gate.hold(true, at(20)), "already held");
+        // Every live frame of the hold is held (the capture retains it), however many.
+        for ms in [30, 500, 1_029, 1_030] {
+            assert_eq!(gate.admit_at(live, at(ms)), Admit::Held);
+        }
+        assert_eq!(
+            gate.admit_at(live + 1, at(1_040)),
+            Admit::NotLive,
+            "not counted: not live"
+        );
+        assert_eq!(gate.send_live(live, frame(4)), GateSend::Refused);
+        let view = gate.hold_view(at(1_100));
+        assert!(view.held);
+        assert_eq!((view.epoch, view.since), (1, Some(at(10))));
+        assert_eq!(view.arrived, 5, "the late send counted too");
+        assert_eq!(view.last_arrival_ago, Some(Duration::from_millis(70)));
+        assert_eq!(view.live_at_hold, Some(live));
+        gate.close();
+        assert_eq!(
+            gate.send_black(frame(4)),
+            GateSend::Refused,
+            "no black frame while held"
+        );
+        let live = gate.open();
+        assert!(gate.hold(false, at(2_000)));
+        assert!(!gate.hold(false, at(2_010)), "no hold to release");
+        assert_eq!(
+            gate.hold_view(at(2_000)).released,
+            Some(HoldRelease {
+                epoch: 1,
+                at: at(2_000),
+                live: Some(live),
+                frames: 0,
+            })
+        );
+        assert_eq!(gate.admit_at(live, at(2_020)), Admit::Pass);
+        assert_eq!(gate.send_live(live, frame(4)), GateSend::Sent);
+        assert!(gate.hold(true, at(3_000)));
+        let view = gate.hold_view(at(3_000));
+        assert_eq!((view.epoch, view.arrived), (2, 0), "counted per hold");
+        assert_eq!(view.released, None);
+        assert_eq!(view.frames_at_hold, 1);
+        assert_eq!(rx.try_iter().count(), 1);
+        // A bounded consumer's captures retain nothing: it is never held.
+        let bounded = FrameGate::bounded(
+            Arc::new(LatestFrame::new(true)),
+            Arc::new(|| Some(Arc::new(QualityTarget::default()))),
+        );
+        assert!(!bounded.retains_frames());
+    }
+
+    /// A resend after a hold — the capture's retained frame, made by its caller — passes only for
+    /// the hold it was asked for, while nothing fresher passed, and only for the live capture; the
+    /// gate itself holds no picture, so a closed or shut gate has none to send.
+    #[test]
+    fn a_resend_passes_only_while_it_is_due() {
+        let (tx, rx) = mpsc::channel();
+        let gate = FrameGate::new(tx);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let sized = |w: u32| Frame {
+            data: vec![9; w as usize * 4 * 4],
+            width: w,
+            height: 4,
+            timestamp_ms: 0,
+        };
+        let live = gate.open();
+        for w in [10, 12, 14] {
+            assert_eq!(gate.send_live(live, sized(w)), GateSend::Sent);
+        }
+        assert_eq!(rx.try_iter().count(), 3);
+
+        assert!(gate.hold(true, at(1_000)));
+        assert_eq!(
+            gate.resend_due(1, live, 3),
+            Err("a new background hold began"),
+            "not while held"
+        );
+        assert_eq!(
+            gate.resend(1, live, 3, sized(14), || {}),
+            Resend::Superseded("a new background hold began")
+        );
+        assert!(gate.hold(false, at(2_000)));
+        assert_eq!(
+            gate.resend(0, live, 3, sized(14), || {}),
+            Resend::Superseded("a new background hold began"),
+            "an older hold's recovery"
+        );
+        assert_eq!(
+            gate.resend(1, live + 1, 3, sized(14), || {}),
+            Resend::Superseded("the capture is no longer live")
+        );
+        assert_eq!(
+            gate.resend(1, live, 2, sized(14), || {}),
+            Resend::Superseded("a fresh frame passed meanwhile")
+        );
+        assert_eq!(rx.try_iter().count(), 0, "nothing of those went out");
+        assert_eq!(gate.resend_due(1, live, 3), Ok(()));
+        assert_eq!(
+            gate.resend(1, live, 3, sized(14), || {}),
+            Resend::Sent { size: (14, 4) }
+        );
+        let again: Vec<Frame> = rx.try_iter().collect();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].width, 14);
+        assert_eq!(gate.live_frames(), 4, "counted as passed");
+        assert_eq!(
+            gate.resend(1, live, 3, sized(14), || {}),
+            Resend::Superseded("a fresh frame passed meanwhile"),
+            "once per hold: the resend itself is the frame after the release"
+        );
+
+        // Closed, then shut: no capture is live, so nothing is due — the picture was the closed
+        // capture's, and it went with it.
+        gate.close();
+        assert_eq!(
+            gate.resend(1, live, 4, sized(14), || {}),
+            Resend::Superseded("the capture is no longer live")
+        );
+        let fresh = gate.open();
+        assert!(gate.hold(true, at(3_000)));
+        assert!(gate.hold(false, at(3_100)));
+        gate.shut();
+        assert_eq!(
+            gate.resend(2, fresh, 0, sized(14), || {}),
+            Resend::Superseded("the capture is no longer live")
+        );
+        assert_eq!(rx.try_iter().count(), 0);
+    }
+
+    /// The resend is accepted, and before its sender could publish where its picture is, a live
+    /// frame of a new size passes and publishes its own: the resend's place is published in the
+    /// gate's lock that accepted it, so the live frame — which can pass only once that lock is
+    /// free — publishes after it, and the newer place stands (input coordinates and the picture's
+    /// size never regress to the older frame's).
+    #[test]
+    fn a_resend_never_overwrites_a_newer_live_frames_geometry() {
+        let (tx, rx) = mpsc::channel();
+        let gate = Arc::new(FrameGate::new(tx));
+        let status = Arc::new(GameStatus::new());
+        status.set_active(true);
+        status.set_state(GameWindowState::Shown);
+        let t0 = Instant::now();
+        let sized = |w: u32| Frame {
+            data: vec![9; w as usize * 4 * 4],
+            width: w,
+            height: 4,
+            timestamp_ms: 0,
+        };
+        let placed = |w: u32| CaptureGeometry {
+            hwnd: 0x40666,
+            client: ScreenRect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: 4,
+            },
+            source: (w, 4),
+        };
+        let live = gate.open();
+        assert_eq!(gate.send_live(live, sized(14)), GateSend::Sent);
+        status.set_geometry(placed(14));
+        assert!(gate.hold(true, t0));
+        assert!(gate.hold(false, t0 + Duration::from_secs(1)));
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let resized = {
+            let (gate, status) = (gate.clone(), status.clone());
+            std::thread::spawn(move || {
+                entered_rx.recv().expect("the resend is in the gate's lock");
+                // The frame handler's order: through the gate, then where the picture is.
+                let sent = gate.send_live(live, sized(20));
+                if sent == GateSend::Sent {
+                    status.set_geometry(placed(20));
+                }
+                sent
+            })
+        };
+        let done = gate.resend(1, live, 1, sized(14), || {
+            entered_tx.send(()).expect("the live frame's thread waits");
+            // The live frame tries to pass meanwhile and waits for this lock.
+            std::thread::sleep(Duration::from_millis(50));
+            status.set_geometry(placed(14));
+        });
+        assert_eq!(done, Resend::Sent { size: (14, 4) });
+        assert_eq!(resized.join().expect("no panic"), GateSend::Sent);
+        let snap = status.snapshot();
+        assert_eq!(
+            snap.source,
+            Some((20, 4)),
+            "the newer picture's size stands"
+        );
+        assert_eq!(snap.geometry, Some(placed(20)), "and its place");
+        let widths: Vec<u32> = rx.try_iter().map(|f| f.width).collect();
+        assert_eq!(
+            widths,
+            vec![14, 14, 20],
+            "the resend went out before the newer frame"
+        );
+    }
+
+    /// The first-frame watchdog gives a capture up only in the gate's lock, against the hold: a
+    /// hold that began since the thread's look, or a frame that passed meanwhile, keeps it.
+    #[test]
+    fn the_watchdog_closes_a_capture_only_unheld_and_with_nothing_passed() {
+        let (tx, _rx) = mpsc::channel();
+        let gate = FrameGate::new(tx);
+        let t0 = Instant::now();
+        let live = gate.open();
+        assert!(gate.hold(true, t0));
+        assert_eq!(gate.close_unheld(live, 0), Err("a background hold began"));
+        assert!(gate.hold(false, t0));
+        assert_eq!(
+            gate.close_unheld(live, 0),
+            Err("a background hold began"),
+            "begun and ended since the look at epoch 0"
+        );
+        assert_eq!(
+            gate.close_unheld(live + 1, 1),
+            Err("the capture is no longer live")
+        );
+        assert_eq!(
+            gate.send_live(live, black_frame((4, 4), 1080)),
+            GateSend::Sent
+        );
+        assert_eq!(
+            gate.close_unheld(live, 1),
+            Err("a frame of it passed meanwhile")
+        );
+        let next = gate.open();
+        assert_eq!(gate.close_unheld(next, 1), Ok(()));
+        assert!(!gate.is_live(), "closed in that same lock");
+    }
+
+    /// The hold's record is taken in the gate's lock with the transition: a frame that passes after
+    /// the release, however soon, is after the baseline the game capture's thread reads later.
+    #[test]
+    fn the_release_baseline_is_the_gates_and_a_frame_after_it_is_after_it() {
+        let (tx, _rx) = mpsc::channel();
+        let gate = FrameGate::new(tx);
+        let t0 = Instant::now();
+        let live = gate.open();
+        assert_eq!(
+            gate.send_live(live, black_frame((4, 4), 1080)),
+            GateSend::Sent
+        );
+        gate.hold(true, t0);
+        gate.hold(false, t0);
+        assert_eq!(
+            gate.send_live(live, black_frame((4, 4), 1080)),
+            GateSend::Sent
+        );
+        let view = gate.hold_view(t0);
+        assert_eq!(view.released.map(|r| r.frames), Some(1));
+        assert_eq!(gate.live_frames(), 2);
+    }
+
+    #[test]
     fn black_frames_are_black_and_scaled_like_any_frame() {
         let f = black_frame(BLACK_SOURCE, 1080);
         assert_eq!((f.width, f.height), (1280, 720));
@@ -3668,8 +4897,9 @@ mod tests {
         backend: Arc<Mutex<BackendWorld>>,
         status: Arc<GameStatus>,
         frames: Receiver<Frame>,
-        /// The background hold, as the supervisor would set it through `Capturer::hold`.
-        held: Arc<AtomicBool>,
+        gate: Arc<FrameGate>,
+        /// The last step's time, in ms: when a hold set or a frame delivered between steps happens.
+        last: u64,
     }
 
     impl Rig {
@@ -3679,16 +4909,23 @@ mod tests {
             let status = Arc::new(GameStatus::new());
             status.set_active(true);
             let (tx, frames) = mpsc::channel();
-            let held = Arc::new(AtomicBool::new(false));
-            let director = Director::new(
+            let gate = Arc::new(FrameGate::new(tx));
+            let mut director = Director::new(
                 binding,
                 Box::new(ScriptedSource::new(windows.clone())),
                 Box::new(ScriptedBackend(backend.clone())),
-                Arc::new(FrameGate::new(tx)),
+                gate.clone(),
                 status.clone(),
                 Arc::new(QualityTarget::default()),
-                held.clone(),
             );
+            let world = backend.clone();
+            director.clock = Box::new(move || {
+                let mut w = lock(&world);
+                let at = w.clock.unwrap_or_else(Instant::now);
+                let at = w.step_work.take().map_or(at, |work| at + work);
+                w.clock = Some(at);
+                at
+            });
             Self {
                 t0: Instant::now(),
                 director,
@@ -3696,21 +4933,35 @@ mod tests {
                 backend,
                 status,
                 frames,
-                held,
+                gate,
+                last: 0,
             }
+        }
+
+        /// The background hold on or off, as `Capturer::hold` sets it: the gate at once (at the
+        /// last step's time), the thread at its next step.
+        fn hold(&self, held: bool) {
+            set_hold(&self.gate, held, self.at(self.last));
         }
 
         fn at(&self, ms: u64) -> Instant {
             self.t0 + Duration::from_millis(ms)
         }
 
-        /// Step every 50 ms from `from` to `to`, inclusive.
+        /// Step every 50 ms from `from` to `to`, inclusive. A step that took time on the test's
+        /// clock (a try of the retained frame, [`BackendWorld::retained_takes`]) moves the next
+        /// step past its end, as on the thread.
         fn run(&mut self, from: u64, to: u64) {
             let mut ms = from;
             while ms <= to {
                 let now = self.at(ms);
+                lock(&self.backend).clock = Some(now);
                 self.director.step(now);
-                ms += 50;
+                self.last = ms;
+                let ended = lock(&self.backend).clock.map_or(ms, |c| {
+                    c.saturating_duration_since(self.t0).as_millis() as u64
+                });
+                ms = (ms + 50).max(ended);
             }
         }
 
@@ -3718,9 +4969,35 @@ mod tests {
             *lock(&self.windows) = Ok(windows);
         }
 
-        /// The running capture delivers one frame of `w`x`h`.
+        /// The running capture delivers one frame of `w`x`h` (at the last step's time).
         fn deliver(&self, w: u32, h: u32) -> GateSend {
-            lock(&self.backend).deliver(w, h)
+            lock(&self.backend).deliver_at(w, h, self.at(self.last))
+        }
+
+        /// A delivery split in two, for the supervisor to act in its middle: the frame arrives
+        /// (asked of the gate and retained)…
+        fn arrive(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+            lock(&self.backend).arrive_at(w, h, self.at(self.last))
+        }
+
+        /// …and is made and sent.
+        fn finish(&self, admitted: (u32, u32)) -> GateSend {
+            lock(&self.backend).finish(admitted)
+        }
+
+        /// One step's parts at `ms`, for a test that interleaves the supervisor between them.
+        fn follow_hold(&mut self, ms: u64) {
+            self.director.follow_hold(self.at(ms));
+            self.last = ms;
+        }
+
+        fn watch(&mut self, ms: u64) {
+            self.director.watch(self.at(ms));
+            self.last = ms;
+        }
+
+        fn black_received(&self) -> Vec<bool> {
+            self.received().into_iter().map(|f| f.0).collect()
         }
 
         /// What reached the encoder since the last call: (black?, width, height) per frame.
@@ -3808,45 +5085,753 @@ mod tests {
         assert!(r.received().iter().all(|f| !f.0), "live again: no black");
     }
 
-    /// The background hold: the window capture stops and no black frame goes out, while the finder
-    /// keeps the heartbeat's `game` and the input's window current — a minimize, a relaunch, the
-    /// window back. Released, the capture of the window as it is now starts at once.
+    /// A rig with the game's window shown, captured, and one frame of it passed (and retained).
+    fn captured(reject_after_stop: bool) -> Rig {
+        let mut r = Rig::new(Some(binding()));
+        lock(&r.backend).reject_after_stop = reject_after_stop;
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 100);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        r
+    }
+
+    /// The background hold with a window capture live: it keeps running — never stopped, never
+    /// started again — and nothing of it reaches the encoder until the release, when its next
+    /// frame passes at once. Each frame of the hold is retained by the capture, none sent.
     #[test]
-    fn a_hold_stops_the_capture_and_black_frames_and_keeps_watching_the_window() {
+    fn a_hold_keeps_the_live_capture_and_drops_its_frames_until_the_release() {
+        let mut r = captured(false);
+        r.hold(true);
+        // Nothing passes from the moment the hold is set, before the thread's own step: the
+        // frames of the hold are retained by the capture, not sent.
+        assert_eq!(r.deliver(3576, 2268), GateSend::Refused);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Refused);
+        r.run(150, 150);
+        {
+            let w = lock(&r.backend);
+            assert_eq!(
+                w.stopped, 0,
+                "the window capture is not stopped for the hold"
+            );
+            assert!(w.running.is_some());
+        }
+        // Long past every watchdog of the capture's delivery: it is neither given up on nor
+        // started again, and neither its frames nor black ones go out.
+        let mut delivered = Vec::new();
+        for ms in (200..=8_000).step_by(50) {
+            r.run(ms, ms);
+            if ms % 500 == 0 {
+                delivered.push(r.deliver(3576, 2268));
+            }
+        }
+        assert!(r.received().is_empty(), "nothing at all while held");
+        assert!(delivered.iter().all(|&d| d == GateSend::Refused));
+        {
+            let w = lock(&r.backend);
+            assert_eq!(w.started.len(), 1, "one capture all through the hold");
+            assert_eq!(w.stopped, 0);
+        }
+        let view = r.gate.hold_view(r.at(8_000));
+        assert_eq!(view.arrived, 18);
+        assert_eq!(
+            r.status.held_frames(),
+            (18, 18),
+            "for the pipeline line: every one retained"
+        );
+        let snap = r.status.snapshot();
+        assert_eq!(snap.state, GameWindowState::Shown);
+        assert_eq!(snap.window, Some((0x40666, 6888)));
+        assert!(
+            r.status.game_scope().window.is_some(),
+            "input keeps the window it was captured on"
+        );
+
+        // Released: the capture's next frame passes at once, before the thread's own step.
+        r.hold(false);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Sent);
+        r.run(8_050, 8_050);
+        assert!(
+            r.director.resuming.is_none(),
+            "the first frame after it is told"
+        );
+        r.run(8_100, 10_000);
+        assert_eq!(r.received(), vec![(false, 1920, 1080)], "and nothing else");
+        let w = lock(&r.backend);
+        assert_eq!(
+            (w.started.len(), w.stopped),
+            (1, 0),
+            "the same capture after the hold"
+        );
+    }
+
+    /// A still window sends no frame after the release (WGC sends only changes), on a capture that
+    /// cannot be started again once stopped: the frame retained before the hold goes out
+    /// again within the pipeline's wait, and the capture is never stopped — never black.
+    #[test]
+    fn a_still_window_after_a_hold_resumes_on_the_retained_frame_and_keeps_its_capture() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 30_000);
+        r.hold(false);
+        let within = RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(30_050, 30_000 + within - 50);
+        assert!(r.received().is_empty(), "waited for a fresh frame first");
+        r.run(30_000 + within, 30_000 + within);
+        assert_eq!(
+            r.received(),
+            vec![(false, 3576, 2268)],
+            "the retained frame, at once"
+        );
+        assert!(
+            Duration::from_millis(within) < crate::pipeline::HOLD_FIRST_FRAME_WITHIN,
+            "inside the pipeline's own wait"
+        );
+        // A long still minute after: nothing stopped, nothing started, no black frame.
+        r.run(30_000 + within + 50, 90_000);
+        assert!(r.received().is_empty());
+        {
+            let w = lock(&r.backend);
+            assert_eq!((w.started.len(), w.stopped), (1, 0));
+        }
+        // The window draws again: its frames pass on the same capture.
+        assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+
+        // And the next hold of the same still window resumes the same way.
+        r.hold(true);
+        r.run(90_050, 100_000);
+        r.hold(false);
+        r.run(100_050, 101_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        let w = lock(&r.backend);
+        assert_eq!((w.started.len(), w.stopped), (1, 0));
+    }
+
+    /// The window changed during the hold — twice, the second time half a second after the
+    /// first — and was still by its end: the viewer resumes on its very last update, never on an
+    /// older one (no frame of the hold is skipped: each is retained as it arrives).
+    #[test]
+    fn a_window_that_changed_during_the_hold_resumes_on_its_last_frame() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Refused);
+        r.run(1_050, 1_500);
+        assert_eq!(r.deliver(1280, 720), GateSend::Refused);
+        r.run(1_550, 5_000);
+        r.hold(false);
+        r.run(5_050, 6_000);
+        assert_eq!(r.received(), vec![(false, 1280, 720)], "the last one");
+        assert_eq!(lock(&r.backend).stopped, 0);
+    }
+
+    /// The window is resized during the hold (WGC's next frame is of the new size) and is still
+    /// after: the frame resumed on is the resized one, and the picture's size and place follow it.
+    #[test]
+    fn a_window_resized_during_the_hold_resumes_on_the_resized_frame() {
+        let mut r = captured(true);
+        assert_eq!(r.status.snapshot().source, Some((3576, 2268)));
+        r.hold(true);
+        r.run(150, 2_000);
+        assert_eq!(r.deliver(2560, 1440), GateSend::Refused);
+        r.run(2_050, 4_000);
+        r.hold(false);
+        r.run(4_050, 5_000);
+        assert_eq!(r.received(), vec![(false, 2560, 1440)]);
+        assert_eq!(
+            r.status.snapshot().source,
+            Some((2560, 1440)),
+            "where the picture is, from the frame resumed on"
+        );
+    }
+
+    /// A capture started just before the hold that has delivered nothing at all: its first-frame
+    /// watchdog does not run during the hold, there is nothing to send again after it, and the
+    /// capture is kept; the watchdog counts from the release.
+    #[test]
+    fn a_capture_with_no_frame_before_a_hold_is_kept_and_its_watchdog_skips_the_hold() {
+        let mut r = Rig::new(Some(binding()));
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 0);
+        assert_eq!(lock(&r.backend).started.len(), 1);
+        r.hold(true);
+        r.run(50, 10_000);
+        assert_eq!(lock(&r.backend).stopped, 0, "no watchdog during the hold");
+        r.hold(false);
+        r.run(10_050, 12_950);
+        assert!(r.received().is_empty(), "nothing retained, nothing sent");
+        assert_eq!(lock(&r.backend).stopped, 0, "kept after the release");
+        assert!(r.director.resuming.is_none(), "the recovery found nothing");
+        // Three seconds after the release with nothing at all: the capture that never delivered
+        // is given up on, as before any hold.
+        r.run(13_000, 13_000);
+        assert_eq!(lock(&r.backend).stopped, 1);
+        assert_eq!(r.black_received(), vec![true]);
+    }
+
+    /// A capture whose only frames arrived during the hold: what it retained is the picture the
+    /// viewer resumes on, and that usable frame — passed by the resend — keeps it from being
+    /// given up on.
+    #[test]
+    fn a_capture_whose_first_frames_came_during_the_hold_is_never_given_up_on() {
+        let mut r = Rig::new(Some(binding()));
+        lock(&r.backend).reject_after_stop = true;
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 0);
+        r.hold(true);
+        r.run(50, 50);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Refused, "held, retained");
+        r.run(100, 5_000);
+        r.hold(false);
+        r.run(5_050, 20_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        assert_eq!(lock(&r.backend).stopped, 0);
+    }
+
+    /// The hold began and ended between two of the thread's steps, the window still since: the
+    /// gate's record still makes the thread act on it — the frame retained during it goes out.
+    #[test]
+    fn a_hold_and_its_release_between_two_steps_are_both_acted_on() {
+        let mut r = captured(true);
+        r.hold(true);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Refused, "held, retained");
+        r.hold(false);
+        r.run(150, 150);
+        assert!(r.director.resuming.is_some(), "the release is acted on");
+        r.run(200, 3_000);
+        assert_eq!(r.received(), vec![(false, 1920, 1080)]);
+        assert_eq!(lock(&r.backend).stopped, 0);
+        // Two whole holds unseen, then a third in force: the thread acts on the newest.
+        r.hold(true);
+        r.hold(false);
+        r.hold(true);
+        r.hold(false);
+        r.hold(true);
+        r.run(3_050, 3_050);
+        let holding = r.director.holding.as_ref().map(|h| h.epoch);
+        assert_eq!(holding, Some(4));
+        r.hold(false);
+        r.run(3_100, 4_000);
+        assert_eq!(r.received(), vec![(false, 1920, 1080)]);
+    }
+
+    /// The thread saw the hold; then, before its next look, the release came and a fresh frame
+    /// passed at once: that frame is after the release's baseline (the gate's, taken with the
+    /// release), so it is the first frame after the hold, and nothing is sent again.
+    #[test]
+    fn a_frame_that_passes_right_after_the_release_is_never_taken_for_one_before_it() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.follow_hold(1_020);
+        assert!(r.director.holding.is_some());
+        r.hold(false);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Sent);
+        r.run(1_050, 1_050);
+        assert!(r.director.resuming.is_none(), "the fresh frame is told");
+        r.run(1_100, 3_000);
+        assert_eq!(r.received(), vec![(false, 1920, 1080)], "and nothing else");
+    }
+
+    /// A new hold that begins between the thread's look at the hold and its look at the capture,
+    /// while a recovery is due: the recovery checks the gate's epoch in the gate's lock and is
+    /// cancelled; the new hold's own release recovers.
+    #[test]
+    fn a_new_hold_cancels_a_due_recovery() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        r.run(1_050, 1_250);
+        let due = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.follow_hold(due);
+        assert!(r.director.resuming.is_some(), "due");
+        r.hold(true);
+        r.watch(due);
+        assert!(r.received().is_empty(), "cancelled: held again");
+        assert!(r.director.resuming.is_none());
+        r.run(due + 50, 5_000);
+        assert!(r.received().is_empty());
+        r.hold(false);
+        r.run(5_050, 6_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        assert_eq!(lock(&r.backend).stopped, 0);
+    }
+
+    /// A hold that begins while the thread waits for the first frame after the last one: that
+    /// wait ends unsent, and the new hold resumes on its own release.
+    #[test]
+    fn a_hold_that_begins_while_resuming_resumes_on_its_own_release() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        r.run(1_050, 1_100);
+        assert!(r.director.resuming.is_some());
+        r.hold(true);
+        r.run(1_150, 1_150);
+        assert!(r.director.resuming.is_none());
+        r.run(1_200, 4_000);
+        assert!(r.received().is_empty(), "nothing while held");
+        r.hold(false);
+        r.run(4_050, 5_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+    }
+
+    /// The capture ends by itself (the window's item closed) while the thread waits for the first
+    /// frame after a hold: the wait ends, black frames start, and the capture is tried again.
+    #[test]
+    fn a_capture_that_ends_while_resuming_goes_black_and_is_tried_again() {
+        let mut r = captured(false);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        r.run(1_050, 1_100);
+        assert!(r.director.resuming.is_some());
+        lock(&r.backend).finished = true;
+        r.run(1_150, 1_150);
+        assert!(r.director.resuming.is_none());
+        assert_eq!(lock(&r.backend).stopped, 1);
+        r.run(1_200, 2_000);
+        let got = r.black_received();
+        assert!(
+            !got.is_empty() && got.iter().all(|&b| b),
+            "black only: {got:?}"
+        );
+        r.run(2_050, 3_000);
+        assert_eq!(
+            lock(&r.backend).started.len(),
+            2,
+            "tried again after the pause"
+        );
+    }
+
+    /// The retained frame cannot be made on the first try after the release (the frame handler
+    /// busy past its wait, the GPU still busy): the same hold's recovery tries again
+    /// [`RESUME_RETRY_EVERY`] later, and the still window resumes on its retained frame with no
+    /// further frame of its own.
+    #[test]
+    fn a_retained_frame_that_fails_once_is_tried_again_for_the_same_hold() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = 1;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        assert!(r.received().is_empty(), "the first try failed");
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        assert!(
+            r.director.resuming.is_some(),
+            "the recovery is kept for the same hold"
+        );
+        let retry = first + RESUME_RETRY_EVERY.as_millis() as u64;
+        r.run(first + 50, retry - 50);
+        assert_eq!(lock(&r.backend).retained_tries, 1, "not before its time");
+        r.run(retry, retry);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)], "the second try");
+        assert!(r.director.resuming.is_none());
+        r.run(retry + 50, 10_000);
+        assert!(r.received().is_empty(), "once");
+        let w = lock(&r.backend);
+        assert_eq!((w.retained_tries, w.started.len(), w.stopped), (2, 1, 0));
+    }
+
+    /// The retained frame can never be made: the recovery stops after its tries, within about
+    /// two seconds of the first, and the capture is kept.
+    #[test]
+    fn a_retained_frame_that_keeps_failing_is_given_up_after_its_tries() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = u32::MAX;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        let last = first + RESUME_RETRY_FOR.as_millis() as u64;
+        r.run(1_050, last);
+        assert!(r.director.resuming.is_none(), "given up");
+        let tries = lock(&r.backend).retained_tries;
+        assert!(
+            (2..=RESUME_TRIES).contains(&tries),
+            "bounded by the tries and the time: {tries}"
+        );
+        r.run(last + 50, 20_000);
+        assert_eq!(lock(&r.backend).retained_tries, tries, "no try after");
+        assert!(r.received().is_empty());
+        let w = lock(&r.backend);
+        assert_eq!((w.started.len(), w.stopped), (1, 0), "the capture is kept");
+    }
+
+    /// No picture can be made of the retained frame at all (on Windows: the client area moved out
+    /// of the region kept of the last frame): given up after the first try, with no retry, and the
+    /// capture is kept.
+    #[test]
+    fn a_retained_frame_that_cannot_be_made_is_not_tried_again() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_unusable = true;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        assert!(r.director.resuming.is_none(), "given up at once");
+        r.run(first + 50, 10_000);
+        assert_eq!(lock(&r.backend).retained_tries, 1, "no further try");
+        assert!(r.received().is_empty());
+        let w = lock(&r.backend);
+        assert_eq!((w.started.len(), w.stopped), (1, 0), "the capture is kept");
+    }
+
+    /// Each failing try takes 700 ms (the handler's wait and the GPU's): the next is due
+    /// [`RESUME_RETRY_EVERY`] after the last one ended, not after it began, and none begins past
+    /// [`RESUME_RETRY_FOR`] after the first began.
+    #[test]
+    fn slow_failing_tries_are_spaced_from_their_end_and_kept_within_the_budget() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        {
+            let mut w = lock(&r.backend);
+            w.retained_fails = u32::MAX;
+            w.retained_takes = Duration::from_millis(700);
+        }
+        r.run(1_050, 10_000);
+        assert!(r.director.resuming.is_none(), "given up");
+        assert!(r.received().is_empty());
+        let w = lock(&r.backend);
+        let log = &w.retained_log;
+        assert!(log.len() >= 2, "tried again: {log:?}");
+        let first = log[0].0;
+        assert_eq!(
+            first,
+            r.at(1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64),
+            "the first try when the fresh frame was due"
+        );
+        for (i, pair) in log.windows(2).enumerate() {
+            let ((_, ended), (began, _)) = (pair[0], pair[1]);
+            assert!(
+                began.saturating_duration_since(ended) >= RESUME_RETRY_EVERY,
+                "try {} began {} ms after try {} ended",
+                i + 2,
+                began.saturating_duration_since(ended).as_millis(),
+                i + 1
+            );
+        }
+        for (i, (began, _)) in log.iter().enumerate() {
+            assert!(
+                began.saturating_duration_since(first) <= RESUME_RETRY_FOR,
+                "try {} began {} ms after the first",
+                i + 1,
+                began.saturating_duration_since(first).as_millis()
+            );
+        }
+        // 1300–2000, 2100–2800, 2900–3600; a fourth would begin at 3700, past 3300.
+        assert_eq!(log.len(), 3, "{log:?}");
+        assert_eq!((w.started.len(), w.stopped), (1, 0), "the capture is kept");
+    }
+
+    /// The thread steps late, past the budget, when a retry was due: the retry is not begun.
+    #[test]
+    fn a_retry_that_comes_due_past_the_budget_is_not_begun() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = u32::MAX;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        assert!(r.director.resuming.is_some(), "a retry is due");
+        let late = first + RESUME_RETRY_FOR.as_millis() as u64 + 100;
+        r.run(late, late);
+        assert!(r.director.resuming.is_none(), "given up");
+        assert_eq!(lock(&r.backend).retained_tries, 1, "not begun");
+        r.run(late + 50, 10_000);
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        assert!(r.received().is_empty());
+    }
+
+    /// A step begins within the budget, but its own work before the recovery (the finder's poll,
+    /// the window's geometry) takes it past: the retry is not begun — the deadline is checked on
+    /// the clock as the try would begin, not on the step's time.
+    #[test]
+    fn a_retry_pushed_past_the_budget_by_its_own_step_is_not_begun() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = u32::MAX;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        let step = first + RESUME_RETRY_FOR.as_millis() as u64 - 100;
+        lock(&r.backend).step_work = Some(Duration::from_millis(250));
+        r.run(step, step);
+        assert!(r.director.resuming.is_none(), "given up");
+        assert_eq!(
+            lock(&r.backend).retained_tries,
+            1,
+            "not begun past the budget"
+        );
+        r.run(step + 300, 10_000);
+        assert_eq!(lock(&r.backend).retained_tries, 1);
+        assert!(r.received().is_empty());
+    }
+
+    /// A fresh frame passes while a retry is due: the retry is cancelled, and only the fresh frame
+    /// goes out.
+    #[test]
+    fn a_fresh_frame_cancels_a_retry_of_the_retained_frame() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = 1;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Sent);
+        r.run(first + 50, 5_000);
+        assert_eq!(
+            r.received(),
+            vec![(false, 1920, 1080)],
+            "the fresh frame only"
+        );
+        assert!(r.director.resuming.is_none());
+        assert_eq!(lock(&r.backend).retained_tries, 1, "no retry");
+    }
+
+    /// A new hold begins while a retry is due: the retry is cancelled, and the new hold's own
+    /// release recovers.
+    #[test]
+    fn a_new_hold_cancels_a_retry_of_the_retained_frame() {
+        let mut r = captured(true);
+        r.hold(true);
+        r.run(150, 1_000);
+        r.hold(false);
+        lock(&r.backend).retained_fails = 1;
+        let first = 1_000 + RESUME_FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(1_050, first);
+        r.hold(true);
+        r.run(first + 50, 4_000);
+        assert!(r.received().is_empty(), "nothing while held");
+        assert_eq!(lock(&r.backend).retained_tries, 1, "no retry while held");
+        r.hold(false);
+        r.run(4_050, 5_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        assert_eq!(lock(&r.backend).retained_tries, 2);
+    }
+
+    /// The first-frame watchdog is due — a capture with nothing passed for three seconds — and the
+    /// thread has looked at the hold (none) when the supervisor holds: the watchdog decides in the
+    /// gate's lock, against the hold, so the capture is kept through it and, its window drawing
+    /// once during the hold and then still, resumes on that frame and is never stopped.
+    #[test]
+    fn a_hold_between_the_threads_look_and_the_watchdog_keeps_the_capture() {
+        let mut r = Rig::new(Some(binding()));
+        lock(&r.backend).reject_after_stop = true;
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 0);
+        assert_eq!(lock(&r.backend).started.len(), 1);
+        let due = FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(50, due - 50);
+        assert_eq!(lock(&r.backend).stopped, 0, "not due yet");
+        r.follow_hold(due);
+        assert!(r.director.holding.is_none(), "no hold at the look");
+        r.hold(true);
+        r.watch(due);
+        assert_eq!(
+            lock(&r.backend).stopped,
+            0,
+            "kept: a hold began since the look"
+        );
+        assert!(r.gate.is_live());
+        r.run(due + 50, due + 1_000);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Refused, "held, retained");
+        r.run(due + 1_050, 10_000);
+        assert!(r.received().is_empty());
+        r.hold(false);
+        r.run(10_050, 20_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        let w = lock(&r.backend);
+        assert_eq!((w.started.len(), w.stopped), (1, 0));
+    }
+
+    /// The capture's first frame passed the gate's first look before the hold and was handed to
+    /// it, made, after the hold began: the gate refuses it — but the capture retained it as it
+    /// arrived, so the still window resumes on it after the release, and that frame passed keeps
+    /// the watchdog off the capture for good.
+    #[test]
+    fn a_first_frame_refused_as_the_hold_began_is_the_one_resumed_on() {
+        let mut r = Rig::new(Some(binding()));
+        lock(&r.backend).reject_after_stop = true;
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 0);
+        let admitted = r.arrive(3576, 2268).expect("before the hold: to be sent");
+        r.hold(true);
+        assert_eq!(
+            r.finish(admitted),
+            GateSend::Refused,
+            "the hold began meanwhile"
+        );
+        r.run(50, 5_000);
+        assert!(r.received().is_empty());
+        r.hold(false);
+        r.run(5_050, 20_000);
+        assert_eq!(r.received(), vec![(false, 3576, 2268)]);
+        let w = lock(&r.backend);
+        assert_eq!((w.started.len(), w.stopped), (1, 0));
+    }
+
+    /// A frame in flight across a whole hold — through the gate's first look before it, sent after
+    /// its release — is the newest picture: it is the first frame after that hold, and a second,
+    /// quiet hold of the then still window resumes on it, never on the one before it.
+    #[test]
+    fn a_frame_in_flight_across_a_hold_is_the_one_the_next_quiet_hold_resumes_on() {
+        let mut r = captured(true);
+        r.run(150, 1_000);
+        let admitted = r.arrive(1920, 1080).expect("not held yet");
+        r.hold(true);
+        r.hold(false);
+        assert_eq!(
+            r.finish(admitted),
+            GateSend::Sent,
+            "released by the time it is sent"
+        );
+        r.run(1_050, 2_000);
+        assert_eq!(
+            r.received(),
+            vec![(false, 1920, 1080)],
+            "the fresh frame after the hold, and no resend"
+        );
+        r.hold(true);
+        r.run(2_050, 5_000);
+        r.hold(false);
+        r.run(5_050, 6_000);
+        assert_eq!(r.received(), vec![(false, 1920, 1080)], "the newest again");
+        assert_eq!(lock(&r.backend).stopped, 0);
+    }
+
+    /// Frames that arrived during the hold but whose retained copy cannot be made into a picture
+    /// (a read-back failing on Windows) are WGC activity, not delivery: they keep no capture that
+    /// has never passed a frame, and three seconds after the release the watchdog gives it up, as
+    /// it would before any hold.
+    #[test]
+    fn held_frames_that_cannot_be_made_do_not_keep_a_capture_that_never_delivered() {
+        let mut r = Rig::new(Some(binding()));
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 0);
+        r.hold(true);
+        r.run(50, 50);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Refused);
+        assert_eq!(r.status.held_frames(), (1, 1));
+        lock(&r.backend).retained_fails = u32::MAX;
+        r.run(100, 5_000);
+        r.hold(false);
+        let watchdog = 5_000 + FIRST_FRAME_WITHIN.as_millis() as u64;
+        r.run(5_050, watchdog - 50);
+        assert!(r.received().is_empty(), "the resend failed: nothing sent");
+        assert_eq!(lock(&r.backend).stopped, 0);
+        r.run(watchdog, watchdog);
+        assert_eq!(
+            lock(&r.backend).stopped,
+            1,
+            "given up on, as before any hold"
+        );
+        assert_eq!(r.black_received(), vec![true]);
+    }
+
+    /// The retained frame is the capture's: one stopped (the window minimized) takes it along, so
+    /// a new capture on the restored window that has delivered nothing has nothing to resume on
+    /// after a hold — never the old capture's picture.
+    #[test]
+    fn a_stopped_capture_takes_its_retained_frame_with_it() {
+        let mut r = captured(false);
+        r.show(vec![WindowInfo {
+            minimized: true,
+            ..game_window(0x40666, 6888)
+        }]);
+        r.run(150, 1_000);
+        {
+            let w = lock(&r.backend);
+            assert_eq!(w.stopped, 1);
+            assert!(w.retained.is_none());
+        }
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(1_050, 1_500);
+        assert_eq!(lock(&r.backend).started.len(), 2);
+        r.received();
+        r.hold(true);
+        r.run(1_550, 2_500);
+        r.hold(false);
+        r.run(2_550, 3_500);
+        assert!(r.received().is_empty(), "nothing of the old capture");
+        assert_eq!(lock(&r.backend).stopped, 1);
+    }
+
+    /// The capturer finishing (`Capturer::stop`) stops the capture, which takes its retained frame
+    /// along, and shuts the gate: nothing is due to be sent again.
+    #[test]
+    fn a_finished_capturer_forgets_the_retained_frame() {
+        let mut r = captured(false);
+        r.hold(true);
+        r.run(150, 500);
+        assert_eq!(r.deliver(1920, 1080), GateSend::Refused);
+        assert!(lock(&r.backend).retained.is_some());
+        r.director.finish("stopped");
+        {
+            let w = lock(&r.backend);
+            assert!(w.running.is_none() && w.retained.is_none());
+            assert_eq!(w.stopped, 1);
+        }
+        r.hold(false);
+        assert_eq!(
+            r.gate.resend(1, 1, 1, black_frame((4, 4), 1080), || {}),
+            Resend::Superseded("the capture is no longer live")
+        );
+        assert!(r.received().is_empty());
+    }
+
+    /// During a hold with its capture kept, the window still decides: minimized, it stops; a new
+    /// window (a relaunch) stops it too; nothing is started and no black frame goes out until the
+    /// release, which captures the window as it is then, at once.
+    #[test]
+    fn window_changes_during_a_hold_stop_the_kept_capture_and_start_none() {
         let mut r = Rig::new(Some(binding()));
         r.show(vec![game_window(0x40666, 6888)]);
         r.run(0, 100);
         assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
         r.received();
 
-        r.held.store(true, Ordering::SeqCst);
+        r.hold(true);
         r.run(150, 150);
-        {
-            let w = lock(&r.backend);
-            assert_eq!(w.stopped, 1, "the window capture stops at once");
-            assert!(w.running.is_none());
-        }
-        // Minimized during the hold: the state follows, and no black frame goes out.
+        // Minimized during the hold: the capture stops, the state follows, no black frame.
         r.show(vec![WindowInfo {
             minimized: true,
             ..game_window(0x40666, 6888)
         }]);
-        r.run(200, 5_000);
+        r.run(200, 2_000);
+        {
+            let w = lock(&r.backend);
+            assert_eq!(w.stopped, 1, "minimized: the kept capture stops");
+            assert!(w.running.is_none());
+        }
         assert_eq!(r.status.snapshot().state, GameWindowState::Minimized);
-        assert!(r.received().is_empty(), "nothing at all while held");
-        // Relaunched and shown again during the hold: the new window and its process are known, but
-        // nothing is captured and input has no window until it is.
+        // Relaunched and shown again during the hold: the new window and its process are known,
+        // but nothing is captured and input has no window until it is.
         r.show(vec![game_window(0x50777, 7001)]);
-        r.run(5_050, 10_000);
+        r.run(2_050, 5_000);
         let snap = r.status.snapshot();
         assert_eq!(snap.state, GameWindowState::Shown);
         assert_eq!(snap.window, Some((0x50777, 7001)));
         assert_eq!(r.status.game_scope().window, None);
         assert_eq!(lock(&r.backend).started.len(), 1, "no capture while held");
-        assert!(r.received().is_empty());
+        assert!(r.received().is_empty(), "nothing at all while held");
 
-        r.held.store(false, Ordering::SeqCst);
-        r.run(10_050, 10_050);
+        r.hold(false);
+        r.run(5_050, 5_050);
         assert_eq!(
             lock(&r.backend).started.last().map(|&(hwnd, _)| hwnd),
             Some(0x50777),
@@ -3855,14 +5840,97 @@ mod tests {
         assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
         assert_eq!(r.received(), vec![(false, 3576, 2268)]);
 
+        // Held again, and the game relaunched straight into a new window: the kept capture stops,
+        // the new one waits for the release.
+        r.hold(true);
+        r.run(5_100, 5_100);
+        r.show(vec![game_window(0x60888, 7002)]);
+        r.run(5_150, 6_000);
+        {
+            let w = lock(&r.backend);
+            assert_eq!(w.stopped, 2, "a new window stops the kept capture");
+            assert_eq!(w.started.len(), 2, "and none is started while held");
+        }
+        assert!(r.received().is_empty());
+        r.hold(false);
+        r.run(6_050, 6_050);
+        assert_eq!(
+            lock(&r.backend).started.last().map(|&(hwnd, _)| hwnd),
+            Some(0x60888)
+        );
+    }
+
+    /// A kept capture that ends by itself during the hold (the item closed) sends no black frame;
+    /// the release captures again at once.
+    #[test]
+    fn a_kept_capture_that_ends_during_a_hold_goes_out_nothing_until_the_release() {
+        let mut r = Rig::new(Some(binding()));
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 100);
+        assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
+        r.received();
+        r.hold(true);
+        r.run(150, 150);
+        lock(&r.backend).finished = true;
+        r.run(200, 3_000);
+        assert_eq!(lock(&r.backend).stopped, 1);
+        assert!(r.received().is_empty(), "no black frame while held");
+        assert_eq!(lock(&r.backend).started.len(), 1);
+        r.hold(false);
+        r.run(3_050, 3_050);
+        assert_eq!(
+            lock(&r.backend).started.len(),
+            2,
+            "started again at once on the release"
+        );
+    }
+
+    /// The background hold with no capture live (black frames, a start that keeps failing): as
+    /// before — none is started and no black frame goes out while it lasts, and the release
+    /// captures at once, the pause after a failure cut short, or sends a black frame at once.
+    #[test]
+    fn a_hold_with_no_live_capture_starts_none_and_sends_nothing_until_the_release() {
+        let mut r = Rig::new(Some(binding()));
+        lock(&r.backend).fail_starts = 1;
+        r.show(vec![game_window(0x40666, 6888)]);
+        r.run(0, 100);
+        assert!(lock(&r.backend).started.is_empty(), "the start failed");
+        r.received();
+        r.hold(true);
+        r.run(150, 150);
+        r.run(200, 5_000);
+        assert!(r.received().is_empty(), "nothing at all while held");
+        assert!(lock(&r.backend).started.is_empty(), "no retry while held");
+        r.hold(false);
+        r.run(5_050, 5_050);
+        assert_eq!(lock(&r.backend).started, vec![(0x40666, 2)], "at once");
+        assert_eq!(r.deliver(3576, 2268), GateSend::Sent);
+        r.received();
+
+        // A failure just before a short hold: the release does not wait out the pause.
+        lock(&r.backend).finished = true;
+        r.run(5_100, 5_100);
+        assert_eq!(r.received().first().map(|f| f.0), Some(true), "black");
+        r.hold(true);
+        r.run(5_150, 5_300);
+        r.hold(false);
+        r.run(5_350, 5_350);
+        assert_eq!(
+            lock(&r.backend).started.len(),
+            2,
+            "the pause after the failure is cut short by the release"
+        );
+
         // Held and released with the window gone: black at once on the release.
-        r.held.store(true, Ordering::SeqCst);
         r.show(vec![]);
-        r.run(10_100, 12_000);
+        r.run(5_400, 5_700);
+        r.received();
+        r.hold(true);
+        r.run(5_750, 7_000);
         assert!(r.received().is_empty());
         assert_eq!(r.status.snapshot().state, GameWindowState::Absent);
-        r.held.store(false, Ordering::SeqCst);
-        r.run(12_050, 12_050);
+        r.hold(false);
+        r.run(7_050, 7_050);
         let got = r.received();
         assert_eq!(got.len(), 1, "one black frame at once: {got:?}");
         assert!(got[0].0);
@@ -3978,6 +6046,17 @@ mod tests {
             .expect("a black frame at once");
         assert!(first.data.iter().all(|&b| b == 0));
         assert!(capturer.check().is_ok());
+        // Held: nothing from the moment the call returns — not even the next black frame.
+        assert!(capturer.hold(true));
+        rx.try_iter().count();
+        assert!(
+            rx.recv_timeout(BLACK_EVERY + Duration::from_millis(300))
+                .is_err(),
+            "nothing while held"
+        );
+        // Released: a black frame at once.
+        assert!(capturer.hold(false));
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
         assert!(
             capturer
                 .start(mpsc::channel().0, Arc::new(QualityTarget::default()))

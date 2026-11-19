@@ -19,7 +19,8 @@
 //! | [`ENCODE_ERRORS_BEFORE_RESTART`] encode errors in a row, or one panic | the encoder is broken | recreate it (`encoder_error`); end the session after [`MAX_ENCODER_FAILURES`] |
 //! | an encode or a restart has not returned for [`BUSY_STALL_AFTER`] | stuck in a call nothing here can interrupt | report `stalled`; end the session at [`BUSY_FATAL_AFTER`] |
 //! | no frames and no input | a still screen | nothing |
-//! | the session's background hold is published (`crate::bg_hold`) | the viewer's page is hidden past its grace: no video on purpose | stop the capture (the game capturer, which can hold, keeps watching its window), and no check, no stall evidence, no mode change while it lasts; on its end start the capture again in the mode in force then, the next frame a keyframe — `ok` throughout, not a restart |
+//! | the PC's input is on a secure desktop (`crate::secure_desktop`: a UAC prompt, the lock screen) | the capture sees only the ordinary desktop and the viewer's moves reach nothing | no stall evidence while it lasts (the moves are set aside), so no `capture_stalled` restart; `ok` and `still` — the heartbeat's `secure_desktop` says why |
+//! | the session's background hold is published (`crate::bg_hold`) | the viewer's page is hidden past its grace: no video on purpose | stop the capture (the game capturer, which can hold, delivers nothing, keeps a live window capture running and keeps watching its window), and no check, no stall evidence, no mode change while it lasts; on its end start the capture again in the mode in force then (or release the game capturer), the next frame a keyframe — `ok` throughout, not a restart |
 //!
 //! After every recovery the next frame is a keyframe, because the viewer's decoder has no reference
 //! to predict the first frame of a new capture from.
@@ -122,9 +123,14 @@ pub const STILL_AFTER_MS: u64 = 1_000;
 ///
 /// A fresh WGC capture delivers the screen as it is on start — 31 ms after it in measured logs,
 /// the start itself 83-430 ms for the monitor and about 10 ms for a game's window — and a
-/// game capture with no window to show sends a black frame at once. A second is several times
-/// either. Not a failure on its own (the capture is then taken as running, as after a restart's
-/// settle), but the viewer is looking at the picture from before the hold until a frame comes.
+/// game capture with no window to show sends a black frame at once; one that kept its window
+/// capture through the hold sends the window's next frame, or — a still window sends none — the
+/// frame it retained, after [`crate::game::RESUME_FIRST_FRAME_WITHIN`] (300 ms), never starting
+/// the capture again for it. A second is several times each. Not a failure on its own (the capture
+/// is then taken as running, as after a restart's settle), but the viewer is looking at the picture
+/// from before the hold until a frame comes: the cases left are a kept capture that has received
+/// no frame at all yet, and one whose retained frame could not be read back, which then have
+/// nothing to send until the window draws.
 pub const HOLD_FIRST_FRAME_WITHIN: Duration = Duration::from_secs(1);
 
 /// The delay before the next capture attempt after `failures` hard failures in a row.
@@ -499,6 +505,9 @@ impl PipelineHealth {
                 // session's published flag. `still` above is true through a hold — healthy, and
                 // nothing captured for longer than a still screen's second — and this says why.
                 bg_hold: false,
+                // Nor which desktop has the input: the heartbeat task sets it from the PC's
+                // secure-desktop watch (`crate::secure_desktop`).
+                secure_desktop: None,
             },
             verdict,
         )
@@ -599,6 +608,11 @@ pub struct Supervisor {
     /// Frames refused since the capture mode changed under the running capture (see
     /// [`Self::admits_frame`]): counted for one line when the capture is replaced.
     refused_frames: u64,
+    /// Which desktop has the PC's input (`crate::secure_desktop`): while it is a secure one, the
+    /// pointer's moves reach nothing and no frame comes, and that is no stalled capture.
+    secure: crate::secure_desktop::View,
+    /// The last secure desktop this supervisor set the pointer's evidence aside for, for the log.
+    secure_seen: Option<afklink_protocol::SecureDesktopKind>,
 }
 
 impl Supervisor {
@@ -640,7 +654,16 @@ impl Supervisor {
             encode_errors_in_row: 0,
             fatal: None,
             refused_frames: 0,
+            secure: crate::secure_desktop::view(),
+            secure_seen: None,
         }
+    }
+
+    /// Read the secure desktop from `view` rather than the process's watcher (tests).
+    #[cfg(test)]
+    pub(crate) fn with_secure_view(mut self, view: crate::secure_desktop::View) -> Self {
+        self.secure = view;
+        self
     }
 
     /// Whether a frame just received may go on to the encoder: only while the capture mode it was
@@ -785,7 +808,32 @@ impl Supervisor {
             }
         }
 
-        if matches!(self.capture, Capture::Running) {
+        // The PC's input on a secure desktop (a UAC prompt, the lock screen): the capture sees only
+        // the ordinary desktop, so no frame comes, and the viewer's moves reach nothing — no number
+        // of restarts changes that, and the heartbeat says why the picture stands. The pointer's
+        // evidence is set aside while it lasts, and none of it counts once it is over.
+        let secure = self.secure.current();
+        if secure != self.secure_seen {
+            tracing::debug!(
+                secure_desktop = secure.map_or("none", afklink_protocol::SecureDesktopKind::as_str),
+                unanswered_moves = self.unanswered.is_some(),
+                "pipeline: {}",
+                if secure.is_some() {
+                    "the input is on a secure desktop; pointer moves without a frame are no stall \
+                     while it lasts"
+                } else {
+                    "the input is back on the ordinary desktop; pointer moves count again"
+                }
+            );
+            self.secure_seen = secure;
+            self.forget_input_evidence();
+        }
+        if secure.is_some() {
+            if self.unanswered.is_some() {
+                tracing::trace!("pointer moves without a frame ignored: secure desktop");
+                self.forget_input_evidence();
+            }
+        } else if matches!(self.capture, Capture::Running) {
             if self.capture_source.answers_pointer_moves() {
                 self.check_input_stall(now, frames);
             } else if self.unanswered.is_some() {
@@ -893,8 +941,9 @@ impl Supervisor {
                 .map_or_else(|| "-".to_string(), |v| v.to_string()),
             "background hold: {}",
             if watching {
-                "the game capture stops its window capture and black frames and keeps watching \
-                 the window; no check, no stall evidence and no mode change until the hold ends"
+                "the game capture delivers nothing (a live window capture keeps running, its \
+                 frames dropped; no black frames) and keeps watching the window; no check, no \
+                 stall evidence and no mode change until the hold ends"
             } else {
                 "capture stopped; no check, no stall evidence and no mode change until the hold \
                  ends"
@@ -1566,6 +1615,11 @@ mod tests {
     /// A session whose capture the owner set to `mode`; its first capturer made the way
     /// `start_session` makes it.
     fn rig_in(mode: crate::game::CaptureMode) -> Rig {
+        rig_watching(mode, crate::secure_desktop::View::detached())
+    }
+
+    /// The same, reading the secure desktop from `secure`.
+    fn rig_watching(mode: crate::game::CaptureMode, secure: crate::secure_desktop::View) -> Rig {
         let t0 = Instant::now();
         let capture = Arc::new(Mutex::new(CaptureWorld::default()));
         let encode = Arc::new(Mutex::new(EncoderWorld::default()));
@@ -1587,7 +1641,8 @@ mod tests {
             target.clone(),
             kf.clone(),
             t0,
-        );
+        )
+        .with_secure_view(secure);
         Rig {
             t0,
             sup,
@@ -2012,6 +2067,40 @@ mod tests {
             r.sup.fatal_reason(),
             None,
             "a stall never ends the session by itself"
+        );
+    }
+
+    /// The PC's input on a secure desktop (a UAC prompt): the viewer's moves reach nothing and no
+    /// frame comes for twelve seconds — no restart, `ok` and `still` throughout, never `stalled`.
+    /// Back on the ordinary desktop, moves with no frame are evidence again, counted from then.
+    #[test]
+    fn a_secure_desktop_is_no_stall() {
+        let state = crate::secure_desktop::SecureDesktop::new(|| false);
+        let mut r = rig_watching(crate::game::CaptureMode::Monitor, state.view());
+        r.frame(0);
+        // Moves before the watcher saw it: set aside as it does.
+        move_to(&r, 0.05);
+        r.poll(100);
+        state.observe(r.at(150), 1, Some(afklink_protocol::SecureDesktopKind::Uac));
+        for (i, ms) in (200..=12_000).step_by(200).enumerate() {
+            move_to(&r, 0.1 + i as f64 * 0.01);
+            r.poll(ms);
+            let (hb, _) = r.health.heartbeat(r.at(ms), 0, 1080, 30);
+            assert_eq!(hb.state, PipelineState::Ok, "at {ms}");
+        }
+        assert_eq!(lock(&r.capture).created, 1, "never restarted");
+        let (hb, _) = r.health.heartbeat(r.at(12_000), 0, 1080, 30);
+        assert!(hb.still && hb.state == PipelineState::Ok, "{hb:?}");
+
+        state.observe(r.at(12_100), 2, None);
+        for (i, ms) in (12_200..=16_000).step_by(200).enumerate() {
+            move_to(&r, 0.6 + i as f64 * 0.01);
+            r.poll(ms);
+        }
+        assert_eq!(
+            lock(&r.capture).created,
+            2,
+            "a stall again once the input is back and frames still do not come"
         );
     }
 

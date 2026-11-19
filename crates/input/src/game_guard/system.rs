@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-    WindowFromPoint, GA_ROOT,
+    GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+    SetForegroundWindow, WindowFromPoint, GA_ROOT, SM_CXSCREEN, SM_CYSCREEN,
 };
 
 use super::{GuardHost, WindowAt};
@@ -50,6 +50,11 @@ impl GuardHost for SystemGuard<'_> {
 
     fn describe(&mut self, window: usize) -> ForegroundInfo {
         SystemCursor.describe_foreground(window)
+    }
+
+    fn screen(&mut self) -> (i32, i32) {
+        // SAFETY: plain metric queries; no pointers involved.
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
     fn set_foreground(&mut self, window: usize) -> Result<bool, String> {

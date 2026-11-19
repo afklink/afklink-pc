@@ -122,6 +122,14 @@
         },
         "bg_hold": {
           "type": "boolean"
+        },
+        "secure_desktop": {
+          "type": "string",
+          "enum": [
+            "uac",
+            "lock",
+            "other"
+          ]
         }
       },
       "required": [
@@ -303,7 +311,8 @@
             "endorse",
             "grant",
             "recover",
-            "first_use"
+            "first_use",
+            "party"
           ]
         },
         "mode": {

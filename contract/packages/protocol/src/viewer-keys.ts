@@ -191,8 +191,11 @@ export type DevicePlatform = (typeof DEVICE_PLATFORMS)[number];
  */
 export const DEVICE_DESC_PATTERN = /^[a-z0-9_]{1,24}$/;
 
-/** The bases a proof may carry (`proof.admit[].kind`); an unknown kind is skipped, never an error. */
-export const KEY_ADMIT_KINDS = ["endorse", "grant", "recover", "first_use"] as const;
+/**
+ * The bases a proof may carry (`proof.admit[].kind`); an unknown kind is skipped, never an error.
+ * `party`: a party leader's grant to a member (docs/design/party-protocol.md §2.3, §5).
+ */
+export const KEY_ADMIT_KINDS = ["endorse", "grant", "recover", "first_use", "party"] as const;
 export type KeyAdmitKind = (typeof KEY_ADMIT_KINDS)[number];
 
 /** What added a key (`ks.admit`, `summary.key_admit`): a base, or «Разрешить» at the PC. */

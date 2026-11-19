@@ -25,15 +25,25 @@ windows-capture = { workspace = true }
 # `QueryFullProcessImageNameW` through a limited-information handle. `windows-capture` enables the
 # WinRT ones already; they are named here because this crate uses them itself. The capture session's
 # optional properties (`src/session.rs`) add `ApiInformation`, which asks Windows whether each one
-# exists, and `RtlGetVersion` for the build the log names.
+# exists, and `RtlGetVersion` for the build the log names. The start probe (`src/start_probe.rs`, run
+# once when a window capture cannot start) makes the frame pool itself: the WinRT Direct3D device and
+# the pixel format. The game capture's last frame (`src/retain.rs`) is kept on the GPU: a texture of
+# the client area's size and the frame's format, the device's multithread protection (through
+# `ID3D11Multithread` on the immediate context, or `ID3D10Multithread` on the device), and a staging
+# read-back.
 windows = { workspace = true, features = [
     "Foundation",
     "Foundation_Metadata",
     "Graphics",
     "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_SystemInformation",
@@ -50,8 +60,9 @@ windows = { workspace = true, features = [
 # game beyond PROCESS_QUERY_LIMITED_INFORMATION (the OS build from the registry, WerFault's command
 # line through ntdll); PNG pictures of what was captured, and the JSON record. `focus_probe` adds the
 # foreground calls it tries on the game's window, a hidden shell-hook window of its own (console
-# window, module handle), and the session's last-input time (a read; nothing is sent). Test builds
-# only; the agent does not link any of it.
+# window, module handle), and the session's last-input time (a read; nothing is sent). The retained
+# frame's test (`src/retain.rs`) makes a WARP device (`D3D11CreateDevice`). Test builds only; the
+# agent does not link any of it.
 windows = { workspace = true, features = [
     "Foundation",
     "Foundation_Metadata",

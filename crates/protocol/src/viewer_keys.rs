@@ -198,8 +198,9 @@ pub mod ended_detail {
     pub const NONCE_STALE: [&str; 4] = ["no_nonce", "nonce_unknown", "nonce_expired", "nonce_used"];
     /// `key_required`.
     pub const KEY_REQUIRED: [&str; 1] = ["no_proof"];
-    /// `admit_refused`: which check refused the base.
-    pub const ADMIT_REFUSED: [&str; 29] = [
+    /// `admit_refused`: which check refused the base. `party_leader`: a party grant whose party this
+    /// PC holds no delegation of, or whose `by` is not that delegation's leader.
+    pub const ADMIT_REFUSED: [&str; 30] = [
         "key_reg_bad",
         "limit",
         "rpk_conflict",
@@ -229,6 +230,7 @@ pub mod ended_detail {
         "recover_bad_sig",
         "first_use_closed",
         "first_use_bad_sig",
+        "party_leader",
     ];
     /// `proof_invalid`.
     pub const PROOF_INVALID: [&str; 6] = [
@@ -330,16 +332,19 @@ pub enum KeyAdmit {
     Grant,
     Recover,
     FirstUse,
+    /// A party leader's grant to a member (`docs/design/party-protocol.md` §2.3, [`crate::party`]).
+    Party,
 }
 
 impl KeyAdmit {
     /// Every admit, in the contract's order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pair,
         Self::Endorse,
         Self::Grant,
         Self::Recover,
         Self::FirstUse,
+        Self::Party,
     ];
 
     /// The wire word; also `summary.key_admit`.
@@ -350,6 +355,7 @@ impl KeyAdmit {
             Self::Grant => "grant",
             Self::Recover => "recover",
             Self::FirstUse => "first_use",
+            Self::Party => "party",
         }
     }
 
@@ -361,6 +367,7 @@ impl KeyAdmit {
             "grant" => Some(Self::Grant),
             "recover" => Some(Self::Recover),
             "first_use" => Some(Self::FirstUse),
+            "party" => Some(Self::Party),
             _ => None,
         }
     }
@@ -617,7 +624,7 @@ pub fn compact_len_within(value: &Value, cap: usize) -> Option<usize> {
     Some(count.n)
 }
 
-fn check_opaque(value: &Value, max_bytes: usize) -> Result<(), WireLimit> {
+pub(crate) fn check_opaque(value: &Value, max_bytes: usize) -> Result<(), WireLimit> {
     if !value.is_object() {
         return Err(WireLimit::NotObject);
     }

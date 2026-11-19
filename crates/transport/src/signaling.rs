@@ -724,6 +724,13 @@ pub struct Signaling {
     /// `agent_ready.grant_token` (device keys, spec §7 «Токен выдачи»): this connection takes the
     /// PC's `grant_token`. `false` from an older server (the field absent).
     pub grant_token: bool,
+    /// `agent_ready.party` (party spec §4.1): this connection takes the PC's `party_ack` and
+    /// `party_state`. `false` from a server older than parties (the field absent).
+    pub party: bool,
+    /// `agent_ready.secure_desktop`: this connection takes the PC's `secure_desktop_ongoing` and the
+    /// `agent_event` `secure_desktop_ended` (`afklink_core::secure_desktop`). `false` from a server
+    /// older than them (the field absent).
+    pub secure_desktop: bool,
     /// Protocol window the backend reported. Kept so a mismatch is diagnosable
     /// from a log line rather than from a message that silently does nothing.
     pub server_protocol: (u32, u32),
@@ -841,7 +848,7 @@ pub async fn connect_with(
     );
 
     // Step 4: expect agent_ready.
-    let (initial_bindings, server_protocol, nonce_pool, grant_token) =
+    let (initial_bindings, server_protocol, nonce_pool, grant_token, party, secure_desktop) =
         match recv_handshake(&mut ws, "agent_ready", limits.handshake_silence, &mut heard).await? {
             Some(ServerToAgent::AgentReady {
                 bindings,
@@ -849,6 +856,8 @@ pub async fn connect_with(
                 min_supported_protocol,
                 nonce_pool,
                 grant_token,
+                party,
+                secure_desktop,
             }) => {
                 tracing::info!(
                     "backend speaks protocol {min_supported_protocol}..{protocol_version}, \
@@ -886,11 +895,38 @@ pub async fn connect_with(
                         "the server does not take the grant token (an older one); none sent"
                     }
                 );
+                // The same for the party messages (party spec §4.1): only a literal `true`.
+                let party = party == Some(true);
+                tracing::debug!(
+                    party,
+                    "agent_ready: {}",
+                    if party {
+                        "the server takes the party messages; party_ack and party_state go on \
+                         this connection"
+                    } else {
+                        "the server does not take the party messages (an older one); none sent"
+                    }
+                );
+                // And the secure-desktop messages: only a literal `true`.
+                let secure_desktop = secure_desktop == Some(true);
+                tracing::debug!(
+                    secure_desktop,
+                    "agent_ready: {}",
+                    if secure_desktop {
+                        "the server takes the secure-desktop messages; secure_desktop_ongoing and \
+                         the secure_desktop_ended events go on this connection"
+                    } else {
+                        "the server does not take the secure-desktop messages (an older one); none \
+                         sent, and a finished episode's event is dropped rather than sent to it"
+                    }
+                );
                 (
                     bindings,
                     (min_supported_protocol, protocol_version),
                     nonce_pool,
                     grant_token,
+                    party,
+                    secure_desktop,
                 )
             }
             Some(ServerToAgent::Error { code, message }) => {
@@ -1129,6 +1165,8 @@ pub async fn connect_with(
         initial_bindings,
         nonce_pool,
         grant_token,
+        party,
+        secure_desktop,
         server_protocol,
         health,
         peer,

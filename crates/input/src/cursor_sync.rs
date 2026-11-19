@@ -5,11 +5,18 @@
 //! follows depends on the cursor, so the planner decides per event from a fresh `GetCursorInfo`
 //! (microseconds; the viewer's `cp` reports are a round trip late):
 //!
-//! * **camera** — the cursor is hidden, off the captured screen, or unreadable: a game is turning
-//!   its camera. Counts are the fraction times the physical screen, the remainder carried
-//!   ([`crate::RelCarry`]), so camera sensitivity is unchanged.
+//! * **camera** — the cursor is hidden, suppressed or unreadable: a game is turning its camera.
+//!   Counts are the fraction times the physical screen, the remainder carried
+//!   ([`crate::RelCarry`]), so camera sensitivity is unchanged. A visible cursor off the captured
+//!   screen (another monitor) is the camera's too when there is no target to put it on, or when
+//!   the absolute paths cannot reach where it belongs (it is over the game's window on another
+//!   monitor, or the game is wholly off the primary monitor).
 //! * **point** — a target, a visible cursor and no button held by us: one absolute move onto the
 //!   target's pixel (FakerInput's absolute report on HID, `SendInput`'s absolute event otherwise).
+//!   A visible cursor off the captured screen with a target is put onto it the same way, a held
+//!   button included, so it comes into the picture (into the game's client area in game-only
+//!   mode) instead of moving unseen on another monitor; the move after it, inside, is decided
+//!   afresh.
 //! * **exact** — any other visible cursor (a drag, a finger mode without a target): relative counts
 //!   that move it by exactly the intended physical distance, so a game reading the mouse sees motion,
 //!   never a jump. The viewer's `m` always goes as one absolute move; the planner only books it
@@ -243,6 +250,9 @@ const EXTERNAL_MIN_PX: f64 = 4.0;
 const NO_EFFECT_MIN_PX: f64 = 3.0;
 /// Mode changes said at `debug` per [`STATS_EVERY`]; the rest go to `trace`, counted.
 const MODE_LINES_PER_WINDOW: u32 = 8;
+/// Changes of only the reason within one mode (a cursor put back from another monitor stays in point
+/// mode) said at `debug` per [`STATS_EVERY`], on their own budget; the rest go to `trace`, counted.
+const REASON_LINES_PER_WINDOW: u32 = 4;
 
 /// The pointer-speed slider's multiplier with EPP off, for `SPI_GETMOUSESPEED` 1..=20 (Microsoft's
 /// pointer-ballistics table: 1/32, 1/16, 1/8, then eighths to 1 at 10, then quarters to 3.5).
@@ -364,6 +374,14 @@ impl Space {
         })
     }
 
+    /// The pixel is inside it.
+    fn contains(&self, x: i32, y: i32) -> bool {
+        let inside = |p: i32, origin: i32, size: i32| {
+            (i64::from(origin)..i64::from(origin) + i64::from(size)).contains(&i64::from(p))
+        };
+        inside(x, self.left, self.width) && inside(y, self.top, self.height)
+    }
+
     fn describe(space: Option<Self>) -> String {
         match space {
             None => "the primary monitor".to_owned(),
@@ -380,18 +398,19 @@ impl Space {
 /// whole screen when the space lies entirely off it. Never empty for a screen that is not.
 pub(crate) fn target_bounds(space: Option<Space>, width: i32, height: i32) -> (i32, i32, i32, i32) {
     let screen = (0, 0, (width - 1).max(0), (height - 1).max(0));
-    let Some(s) = space else {
-        return screen;
-    };
+    match space {
+        None => screen,
+        Some(s) => space_on_screen(s, width, height).unwrap_or(screen),
+    }
+}
+
+/// The part of the space on the `width`×`height` screen, inclusive; `None` when none of it is.
+fn space_on_screen(s: Space, width: i32, height: i32) -> Option<(i32, i32, i32, i32)> {
     let x0 = s.left.max(0);
     let y0 = s.top.max(0);
-    let x1 = s.left.saturating_add(s.width - 1).min(screen.2);
-    let y1 = s.top.saturating_add(s.height - 1).min(screen.3);
-    if x0 > x1 || y0 > y1 {
-        screen
-    } else {
-        (x0, y0, x1, y1)
-    }
+    let x1 = s.left.saturating_add(s.width - 1).min((width - 1).max(0));
+    let y1 = s.top.saturating_add(s.height - 1).min((height - 1).max(0));
+    (x0 <= x1 && y0 <= y1).then_some((x0, y0, x1, y1))
 }
 
 /// The screen pixel a point of the viewer's picture falls in (`t` in fractions of it, like `m`):
@@ -781,6 +800,9 @@ struct Stats {
     timed_out: u32,
     transitions: u32,
     quiet_transitions: u32,
+    /// Changes of the reason alone, the mode staying ([`REASON_LINES_PER_WINDOW`]).
+    reason_changes: u32,
+    quiet_reason_changes: u32,
     /// Clean samples of what a count did, this window.
     gain: Tally,
     /// `m` — the viewer's absolute position — by the path that carried it.
@@ -891,6 +913,8 @@ pub(crate) struct CursorSync {
     settings_reason: &'static str,
     gain: GainModel,
     mode: Option<Mode>,
+    /// Why the last move took its mode, for the mode line.
+    mode_why: &'static str,
     /// Exact mode's intended position (px); `None`: re-anchored on the next exact move.
     aim: Option<V>,
     /// The target pixel the aim was on the last exact move, when there was one.
@@ -943,6 +967,7 @@ impl CursorSync {
             settings_reason: "first move",
             gain: GainModel::new(&PointerSettings::FALLBACK),
             mode: None,
+            mode_why: "",
             aim: None,
             aim_target: None,
             carry: (0.0, 0.0),
@@ -1295,8 +1320,17 @@ impl CursorSync {
         let target = self.target_of(&event);
         let (width, height) = world.screen();
         let look = world.look();
-        let (mode, why) = decide(&look, width, height, target.is_some(), held);
-        self.note_mode(mode, why, &look, held, target.is_some(), path, now);
+        let (mode, why) = decide(&look, width, height, self.space, target.is_some(), held);
+        self.note_mode(
+            mode,
+            why,
+            &look,
+            (width, height),
+            held,
+            target.is_some(),
+            path,
+            now,
+        );
 
         match (mode, look) {
             (Mode::Point, Ok(look)) => {
@@ -1788,40 +1822,58 @@ impl CursorSync {
         (j, forced)
     }
 
+    /// The decision's line: when the mode or its reason changes (a cursor put back from another
+    /// monitor stays in point mode, but says so). Mode changes and reason-only changes are
+    /// rate-limited and counted apart ([`MODE_LINES_PER_WINDOW`], [`REASON_LINES_PER_WINDOW`]).
     #[allow(clippy::too_many_arguments)]
     fn note_mode(
         &mut self,
         mode: Mode,
         why: &'static str,
         look: &Result<CursorLook, String>,
+        (width, height): (i32, i32),
         held: bool,
         target: bool,
         path: RelPath,
         now: Instant,
     ) {
         let from = self.mode.replace(mode);
-        if from == Some(mode) {
+        let from_why = std::mem::replace(&mut self.mode_why, why);
+        let mode_changed = from != Some(mode);
+        if !mode_changed && from_why == why {
             return;
         }
-        self.stats.transitions += 1;
+        let said = if mode_changed {
+            self.stats.transitions += 1;
+            self.stats.transitions <= MODE_LINES_PER_WINDOW
+        } else {
+            self.stats.reason_changes += 1;
+            self.stats.reason_changes <= REASON_LINES_PER_WINDOW
+        };
+        let from = from.map_or("none", Mode::name);
+        if !said {
+            if mode_changed {
+                self.stats.quiet_transitions += 1;
+            } else {
+                self.stats.quiet_reason_changes += 1;
+            }
+            tracing::trace!(from, to = mode.name(), why, "cursor sync: mode");
+            return;
+        }
         let settings = self.settings.unwrap_or(PointerSettings::FALLBACK);
         let (gain, source) = self.gain.typical();
         let (cursor, visible, suppressed) = match look {
             Ok(l) => (format!("{},{}", l.x, l.y), l.showing, l.suppressed),
             Err(error) => (format!("unreadable: {error}"), false, false),
         };
-        let from = from.map_or("none", Mode::name);
-        if self.stats.transitions > MODE_LINES_PER_WINDOW {
-            self.stats.quiet_transitions += 1;
-            tracing::trace!(from, to = mode.name(), why, "cursor sync: mode");
-            return;
-        }
         tracing::debug!(
             from,
             to = mode.name(),
             why,
             path = path.name(),
             cursor = %cursor,
+            screen = %format!("{width}x{height}"),
+            area = %Space::describe(self.space),
             visible,
             suppressed,
             buttons_held = held,
@@ -2013,6 +2065,8 @@ impl CursorSync {
             timed_out = s.timed_out,
             transitions = s.transitions,
             quiet_transitions = s.quiet_transitions,
+            reason_changes = s.reason_changes,
+            quiet_reason_changes = s.quiet_reason_changes,
             m_hid = s.m_hid,
             m_sendinput = s.m_sendinput,
             order_waits = s.order_waits,
@@ -2049,11 +2103,13 @@ impl CursorSync {
     }
 }
 
-/// Camera, point or exact, and the reason in words.
+/// Camera, point or exact, and the reason in words. `space`: where the viewer's picture is (the
+/// game's client area in game-only mode, `None` for the whole primary monitor).
 fn decide(
     look: &Result<CursorLook, String>,
     width: i32,
     height: i32,
+    space: Option<Space>,
     target: bool,
     held: bool,
 ) -> (Mode, &'static str) {
@@ -2070,7 +2126,32 @@ fn decide(
         return (Mode::Camera, "the cursor is suppressed (touch or pen)");
     }
     if !(0..width).contains(&c.x) || !(0..height).contains(&c.y) {
-        return (Mode::Camera, "the cursor is off the captured screen");
+        // A visible cursor on another monitor, where the viewer cannot see it: with a target it is
+        // put onto the target's pixel (in game-only mode mapped into the game's client area), so
+        // the moves and clicks after it land where the viewer points. A held button too: the move
+        // after it, inside, is exact. The absolute paths reach the primary monitor only, so a cursor
+        // over the game's window on another monitor, or a game wholly off the primary monitor,
+        // stays the camera's.
+        if !target {
+            return (
+                Mode::Camera,
+                "the cursor is off the captured screen and there is no target to put it on",
+            );
+        }
+        return match space {
+            Some(s) if s.contains(c.x, c.y) => (
+                Mode::Camera,
+                "the cursor is over the game off the primary monitor, out of absolute reach",
+            ),
+            Some(s) if space_on_screen(s, width, height).is_none() => (
+                Mode::Camera,
+                "the cursor and the game are off the primary monitor, out of absolute reach",
+            ),
+            _ => (
+                Mode::Point,
+                "the cursor is off the captured screen: placed onto the target",
+            ),
+        };
     }
     match (target, held) {
         (true, false) => (Mode::Point, "a target, and no button held"),

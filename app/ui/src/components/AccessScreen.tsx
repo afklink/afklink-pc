@@ -3,6 +3,14 @@ import { Crown, Link2, Trash2, Unlink } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { useT } from "../i18n";
+import {
+  alsoIn,
+  cardsOf,
+  leaveOffered,
+  partyCards,
+  revokeNotes,
+  revokeStaysLine,
+} from "../lib/party";
 import { cn } from "../lib/utils";
 import {
   type BindingDto,
@@ -16,10 +24,12 @@ import {
   type TrustedAttemptDto,
   type TrustedDeviceDto,
   type TrustedDto,
+  type TrustedPartyDto,
   type TrustedPersonDto,
   unbind,
 } from "../tauri";
 import { formatCountdown, useCountdown } from "../useAgentStatus";
+import { PartyCard } from "./PartyCard";
 import {
   type AttemptNote,
   devicesOf,
@@ -69,6 +79,22 @@ interface Person {
   attempts: TrustedAttemptDto[];
   /** The role of the person's own keys here (`TrustedPersonDto.role`): the owner's attempts ask more. */
   keysOwner: boolean;
+  /** In a party's card: «лидер» after the @handle for the party's leader. */
+  tag?: string;
+  /** «также в пати "…"» after the devices' count: the other parties that hold them here. */
+  also?: string;
+  /**
+   * Under «Отвязать?» of a list's row whom a party of this PC also holds here: they stay a guest
+   * through it (`revokeStaysLine`).
+   */
+  stays?: string;
+  /**
+   * The row under a party's card, of a person bound through parties alone: their devices and
+   * those buttons, and «Удалить все устройства»; with no device yet, a plain row. The binding's own
+   * buttons («Назначить владельцем», «Отвязать») stay off it: a member stays a guest through the
+   * party whatever is done to the binding here — «Убрать ПК из пати» is what closes the PC to them.
+   */
+  partyRow?: boolean;
 }
 
 /** A row before the trusted list's attempts are added to it (`withTrust`). */
@@ -111,6 +137,12 @@ type BarePerson = Omit<Person, "attempts" | "keysOwner">;
  * «Разрешено» (the owner's button was «Разрешить») rather than «Подтверждено»; allowed, the newcomer's
  * binding takes the row's place and the word moves onto it; otherwise the row goes.
  *
+ * The PC's parties (party spec §6) follow the list, a card each (`PartyCard`): whoever is bound
+ * through parties alone stands under each of their cards rather than in the list, with the same
+ * row — its devices and their buttons and «Удалить все устройства», without the binding's
+ * (`partyRow`), or a plain row with no device yet; anyone with a personal reason keeps the list's
+ * row, with «также в пати "…"» when a party holds them here too (`lib/party.ts`).
+ *
  * Focus: on a row's opening it stays on the row; «Отмена» takes it when a confirmation opens; Escape
  * or «Отмена» close the confirmation and give it back to the row; a revoke that went through gives
  * it to the list, since the row may be going away; «Сделать владельцем» and «Отменить запрос» give
@@ -145,14 +177,43 @@ export function AccessScreen({
   onShowCode: () => void;
 }) {
   const t = useT();
-  const [open, setOpen] = useState<number | null>(null);
-  const [confirming, setConfirming] = useState<number | null>(null);
+  /** The open row (and its inline «Отвязать?»), by `rowKey`: a person can be under two parties. */
+  const [open, setOpen] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  /** The open party cards, by party id. */
+  const [openParties, setOpenParties] = useState<ReadonlySet<string>>(new Set());
   const listRef = useRef<HTMLUListElement>(null);
-  const rowButtons = useRef(new Map<number, HTMLButtonElement>());
+  const rowButtons = useRef(new Map<string, HTMLButtonElement>());
 
-  const people = listPeople(bindings, sessions, heldPair, trusted);
-  useRequestLog(people);
-  useWatchLog(people);
+  const everyone = listPeople(bindings, sessions, heldPair, trusted);
+  const cards = partyCards(trusted, bindings);
+  // Who is bound through parties alone stands under their cards, not in the list.
+  const under = new Map(
+    everyone.map((p) => [
+      p.id,
+      cardsOf(
+        cards,
+        bindings.find((b) => b.telegram_user_id === p.id) ?? null,
+        p.devices,
+        p.role === "owner",
+      ),
+    ]),
+  );
+  const people = everyone
+    .filter((p) => (under.get(p.id) ?? []).length === 0)
+    .map((p) => {
+      const also = alsoIn(t, cards, null, p.id);
+      const parties = bindings.find((b) => b.telegram_user_id === p.id)?.parties;
+      const stays = revokeStaysLine(
+        t,
+        cards.map((c) => c.party),
+        parties,
+        p.name,
+      );
+      return { ...p, ...(also ? { also } : {}), ...(stays === null ? {} : { stays }) };
+    });
+  useRequestLog(everyone);
+  useWatchLog(everyone);
   const trustChanged = () => {
     onTrustedChanged?.();
     onChanged();
@@ -160,27 +221,43 @@ export function AccessScreen({
   const questions = useTrustedQuestions(
     trusted,
     {
-      names: new Map(people.map((p) => [p.id, p.name])),
-      bound: people.filter((p) => p.bound).map((p) => p.id),
+      names: new Map(everyone.map((p) => [p.id, p.name])),
+      bound: everyone.filter((p) => p.bound).map((p) => p.id),
+      // A person under the party cards only has no «Отвязать» (`partyRow`): no line names it.
       unbinds: people.filter(unbindShown).map((p) => p.id),
-      owners: people.filter((p) => p.bound && p.role === "owner").map((p) => p.id),
+      owners: everyone.filter((p) => p.bound && p.role === "owner").map((p) => p.id),
     },
     trustChanged,
   );
   const mode = trusted?.trusted_mode ?? false;
   const locked = trusted !== null && !trusted.clean;
 
-  const toggle = (id: number) => {
+  const toggle = (key: string, p: Person) => {
     setConfirming(null);
-    const p = open === id ? null : people.find((x) => x.id === id);
-    if (p?.devices) {
+    if (open !== key && p.devices) {
       const unconfirmed = p.devices.filter((d) => d.unconfirmed).length;
       // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
       console.debug(
-        `[access] row #${id} opened: ${p.devices.length} device(s), ${unconfirmed} unconfirmed, ${p.attempts.length} attempt(s), mode ${mode ? "on" : "off"}${p.noAccess ? ", no access left" : ""}${p.devices.length === 0 && mode && p.bound ? " — «Добавить доверенное устройство» offered" : ""}`,
+        `[access] row #${p.id}${key.startsWith("list:") ? "" : " (under a party)"} opened: ${p.devices.length} device(s), ${unconfirmed} unconfirmed, ${p.attempts.length} attempt(s), mode ${mode ? "on" : "off"}${p.noAccess ? ", no access left" : ""}${p.devices.length === 0 && mode && p.bound ? " — «Добавить доверенное устройство» offered" : ""}`,
       );
     }
-    setOpen((was) => (was === id ? null : id));
+    setOpen((was) => (was === key ? null : key));
+  };
+
+  const toggleParty = (partyId: string) => {
+    const opening = !openParties.has(partyId);
+    const card = cards.find((c) => c.party.party_id === partyId);
+    const shown = everyone.filter((p) => under.get(p.id)?.includes(partyId)).length;
+    // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+    console.debug(
+      `[access] party ${partyId.slice(0, 8)} ${opening ? "opened" : "closed"}: ${card?.guests.length ?? 0} guest(s) here, ${card?.entered ?? 0} with a device of it, ${shown} under the card, ${cards.length} card(s), mode ${mode ? "on" : "off"}`,
+    );
+    setOpenParties((was) => {
+      const next = new Set(was);
+      if (opening) next.add(partyId);
+      else next.delete(partyId);
+      return next;
+    });
   };
 
   const layers =
@@ -188,10 +265,60 @@ export function AccessScreen({
       <TrustedBlock trusted={trusted} questions={questions} mode={mode} locked={locked} />
     );
 
-  const cancel = (id: number) => {
+  const cancel = (key: string) => {
     setConfirming(null);
     // After the confirmation has unmounted.
-    window.requestAnimationFrame(() => rowButtons.current.get(id)?.focus());
+    window.requestAnimationFrame(() => rowButtons.current.get(key)?.focus());
+  };
+
+  /** A person's row, in the list (`scope` "list") or under a party's card (its id). */
+  const row = (p: Person, scope: string) => {
+    const key = rowKey(scope, p.id);
+    return (
+      <PersonRow
+        key={key}
+        person={p}
+        open={open === key}
+        confirming={confirming === key}
+        ownerRequestBusy={ownerRequestBusy}
+        onToggle={() => toggle(key, p)}
+        onRevoke={() => setConfirming(key)}
+        onCancelRevoke={() => cancel(key)}
+        onRevoked={() => {
+          setConfirming(null);
+          listRef.current?.focus();
+          onChanged();
+        }}
+        onChanged={onChanged}
+        // The pressed button gives way to the request's (or back to the pair): focus stays
+        // on the row rather than falling to the page. The newcomer's row is going away once
+        // its request is withdrawn: focus goes to the list, as after a revoke.
+        onSent={() => (p.held ? listRef.current?.focus() : rowButtons.current.get(key)?.focus())}
+        mode={mode}
+        locked={locked}
+        onRemoveDevice={(d) => questions.askRemove(p.id, d)}
+        onConfirmDevice={(d) => questions.askConfirm(p.id, d)}
+        onRemovePerson={() => questions.askRemovePerson(p.id)}
+        notes={questions.attemptNotes.filter((n) => n.userId === p.id)}
+        busy={questions.busy}
+        full={questions.full}
+        parties={trusted?.parties}
+        onAllow={(a) => questions.pressAllow(p.id, a)}
+        onHide={(a) => questions.pressHide(p.id, a)}
+        onRemoveAttempts={() => questions.askRemoveAttempts(p.id)}
+        onAddDevice={() => {
+          // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+          console.debug(
+            `[access] «Добавить доверенное устройство» on #${p.id}: the pairing dialog`,
+          );
+          onShowCode();
+        }}
+        buttonRef={(el) => {
+          if (el) rowButtons.current.set(key, el);
+          else rowButtons.current.delete(key);
+        }}
+      />
+    );
   };
 
   return (
@@ -210,54 +337,36 @@ export function AccessScreen({
           // (`overflow-hidden` lets a flex item shrink below its content); the box scrolls instead.
           className="shrink-0 overflow-hidden rounded-card border border-line bg-panel outline-none"
         >
-          {people.map((p) => (
-            <PersonRow
-              key={p.id}
-              person={p}
-              open={open === p.id}
-              confirming={confirming === p.id}
-              ownerRequestBusy={ownerRequestBusy}
-              onToggle={() => toggle(p.id)}
-              onRevoke={() => setConfirming(p.id)}
-              onCancelRevoke={() => cancel(p.id)}
-              onRevoked={() => {
-                setConfirming(null);
-                listRef.current?.focus();
-                onChanged();
-              }}
-              onChanged={onChanged}
-              // The pressed button gives way to the request's (or back to the pair): focus stays
-              // on the row rather than falling to the page. The newcomer's row is going away once
-              // its request is withdrawn: focus goes to the list, as after a revoke.
-              onSent={() =>
-                p.held ? listRef.current?.focus() : rowButtons.current.get(p.id)?.focus()
-              }
-              mode={mode}
-              locked={locked}
-              onRemoveDevice={(d) => questions.askRemove(p.id, d)}
-              onConfirmDevice={(d) => questions.askConfirm(p.id, d)}
-              onRemovePerson={() => questions.askRemovePerson(p.id)}
-              notes={questions.attemptNotes.filter((n) => n.userId === p.id)}
-              busy={questions.busy}
-              full={questions.full}
-              onAllow={(a) => questions.pressAllow(p.id, a)}
-              onHide={(a) => questions.pressHide(p.id, a)}
-              onRemoveAttempts={() => questions.askRemoveAttempts(p.id)}
-              onAddDevice={() => {
-                // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
-                console.debug(
-                  `[access] «Добавить доверенное устройство» on #${p.id}: the pairing dialog`,
-                );
-                onShowCode();
-              }}
-              buttonRef={(el) => {
-                if (el) rowButtons.current.set(p.id, el);
-                else rowButtons.current.delete(p.id);
-              }}
-            />
-          ))}
+          {people.map((p) => row(p, "list"))}
         </ul>
       ) : null}
+      {cards.map((card) => (
+        <PartyCard
+          key={card.party.party_id}
+          card={card}
+          mode={mode}
+          locked={!leaveOffered(trusted)}
+          named={cards.length > 1}
+          open={openParties.has(card.party.party_id)}
+          onToggle={() => toggleParty(card.party.party_id)}
+          onLeave={() => questions.askLeaveParty(card.party.party_id, card.party.party)}
+          rows={everyone
+            .filter((p) => under.get(p.id)?.includes(card.party.party_id))
+            .map((p) => {
+              const leader = card.party.leader.telegram_user_id === p.id;
+              const also = alsoIn(t, cards, card.party.party_id, p.id);
+              return row(
+                {
+                  ...p,
+                  partyRow: true,
+                  ...(leader ? { tag: t("app.partyLeaderTag") } : {}),
+                  ...(also ? { also } : {}),
+                },
+                card.party.party_id,
+              );
+            })}
+        />
+      ))}
       <div className="mt-auto pt-4">
         <Button variant="secondary" size="block" onClick={onShowCode}>
           <Link2 aria-hidden="true" />
@@ -351,6 +460,7 @@ function PersonRow({
   onAllow,
   onHide,
   onRemoveAttempts,
+  parties,
   buttonRef,
 }: {
   person: Person;
@@ -380,6 +490,8 @@ function PersonRow({
   onAllow: (attempt: TrustedAttemptDto) => void;
   onHide: (attempt: TrustedAttemptDto) => void;
   onRemoveAttempts: () => void;
+  /** The PC's parties: a member's device names its party. */
+  parties: TrustedPartyDto[] | undefined;
   buttonRef: (el: HTMLButtonElement | null) => void;
 }) {
   const owner = p.role === "owner";
@@ -429,9 +541,10 @@ function PersonRow({
               onAllow={onAllow}
               onHide={onHide}
               onRemoveAttempts={onRemoveAttempts}
+              parties={parties}
             />
           )}
-          {keysOnly(p) ? (
+          {keysOnly(p) || p.partyRow ? (
             // Nothing but attempts: their own «Удалить попытки» says it.
             attemptsOnly(p) ? null : (
               <RemovePersonButton locked={locked} onPress={onRemovePerson} />
@@ -440,6 +553,7 @@ function PersonRow({
             <RevokeConfirm
               telegramUserId={p.id}
               owner={owner}
+              stays={p.stays ?? null}
               onCancel={onCancelRevoke}
               onRevoked={onRevoked}
             />
@@ -477,6 +591,7 @@ function RowTrust({
   onAllow,
   onHide,
   onRemoveAttempts,
+  parties,
 }: {
   person: Person;
   mode: boolean;
@@ -490,14 +605,16 @@ function RowTrust({
   onAllow: (attempt: TrustedAttemptDto) => void;
   onHide: (attempt: TrustedAttemptDto) => void;
   onRemoveAttempts: () => void;
+  parties: TrustedPartyDto[] | undefined;
 }) {
   return (
     <>
-      {p.devices !== null && (p.bound || p.devices.length > 0) ? (
+      {p.devices !== null && (p.bound || p.devices.length > 0) && !bareMember(p) ? (
         <PersonDevices
           devices={p.devices}
           mode={mode}
           locked={locked}
+          parties={parties}
           onRemove={onRemoveDevice}
           onConfirm={onConfirmDevice}
           onAddDevice={onAddDevice}
@@ -519,14 +636,24 @@ function RowTrust({
 }
 
 /** What decides a row's buttons. */
-type RowFacts = Pick<Person, "bound" | "noAccess" | "held" | "request">;
+type RowFacts = Pick<Person, "bound" | "noAccess" | "held" | "request"> &
+  Partial<Pick<Person, "partyRow" | "devices" | "attempts">>;
 
 /**
  * Whether a row opens. Nothing to do from a row without a binding — but the newcomer's, while the
- * owner is asked («Отменить запрос»), and one whose devices are still in the trusted list.
+ * owner is asked («Отменить запрос»), and one whose devices are still in the trusted list; nor
+ * from a party member's row with no device here yet (`bareMember`).
  */
 function opens(p: RowFacts): boolean {
-  return p.bound || p.noAccess || (p.held && ownerAsked(p.request));
+  return (p.bound && !bareMember(p)) || p.noAccess || (p.held && ownerAsked(p.request));
+}
+
+/**
+ * A party member's row under a card with no device here yet: a plain row, no device line, nothing
+ * to open (the leader's grant brings their devices; attempts of theirs still open it).
+ */
+function bareMember(p: RowFacts): boolean {
+  return p.partyRow === true && (p.devices?.length ?? 0) === 0 && (p.attempts?.length ?? 0) === 0;
 }
 
 /** Devices in the trusted list and no binding: nothing to revoke, the devices only. */
@@ -585,9 +712,9 @@ function PersonLines({ person: p, mode }: { person: Person; mode: boolean }) {
           <span className="block truncate text-body font-medium text-ink" title={p.name}>
             {p.name}
           </span>
-          {p.handle ? (
+          {p.handle || p.tag ? (
             <span className="block truncate text-hint text-faint" title={p.handle}>
-              {p.handle}
+              {[p.handle, p.tag].filter(Boolean).join(" · ")}
             </span>
           ) : null}
         </span>
@@ -600,8 +727,13 @@ function PersonLines({ person: p, mode }: { person: Person; mode: boolean }) {
         <span className="block text-balance text-hint text-faint pl-5">
           {attemptsOnly(p) ? t("app.trustedOnAttempts") : t("app.trustedNoAccess")}
         </span>
+      ) : p.partyRow && (p.devices?.length ?? 0) === 0 ? (
+        // No device here yet: no «Нужно доверенное устройство» — the leader's grant brings them.
+        p.also ? (
+          <span className="block text-pretty text-hint text-faint pl-5">{p.also}</span>
+        ) : null
       ) : p.devices !== null ? (
-        <TrustLine devices={p.devices} mode={mode} className="pl-5" />
+        <TrustLine devices={p.devices} mode={mode} also={p.also} className="pl-5" />
       ) : null}
     </>
   );
@@ -917,6 +1049,7 @@ export function RevokeConfirm({
   telegramUserId,
   owner = false,
   held = false,
+  stays = null,
   className,
   onCancel,
   onRevoked,
@@ -924,12 +1057,22 @@ export function RevokeConfirm({
   telegramUserId: number;
   owner?: boolean;
   held?: boolean;
+  /** The person stays a guest through a party here: that line (`revokeStaysLine`), or null. */
+  stays?: string | null;
   className?: string;
   onCancel: () => void;
   onRevoked: () => void;
 }) {
   const t = useT();
   const [revoking, setRevoking] = useState(false);
+  const notes = revokeNotes(t, owner, stays);
+  useEffect(() => {
+    if (stays === null) return;
+    // biome-ignore lint/suspicious/noConsole: once per question, what it says
+    console.debug(
+      `[access] «Отвязать?» on #${telegramUserId}: the party line (a guest through a party stays)`,
+    );
+  }, [stays, telegramUserId]);
 
   const revoke = () => {
     if (revoking || held) return;
@@ -943,7 +1086,11 @@ export function RevokeConfirm({
 
   return (
     <div className={className}>
-      {owner ? <p className="mb-2 text-hint text-muted">{t("app.unbindOwnerNote")}</p> : null}
+      {notes.map((line) => (
+        <p key={line} className="mb-2 text-hint text-muted">
+          {line}
+        </p>
+      ))}
       <div className="flex gap-2">
         <Button size="sm" autoFocus className="flex-1" onClick={onCancel}>
           {t("common.cancel")}
@@ -985,6 +1132,11 @@ function WatchDot({ watch }: { watch: Watch }) {
       )}
     />
   );
+}
+
+/** A row's key: the person under the list or under a party's card (a person can be under two). */
+function rowKey(scope: string, id: number): string {
+  return `${scope}:${id}`;
 }
 
 /**

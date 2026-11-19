@@ -12,6 +12,7 @@ use crate::invites::BindingVia;
 use crate::metrics::{
     AgentBuildInfo, AgentEvent, AgentLastExit, AgentSessionEndDetail, AgentSessionSummary,
 };
+use crate::party::{PartyAckOp, PartyAckResult, PartyDelegation};
 use crate::roles::{
     BindingRole, OwnerRequestKind, OwnerRequestReason, OwnerRequestState, OwnerStateKind,
 };
@@ -160,6 +161,24 @@ pub enum AgentToServer {
     GrantToken {
         token: GrantTokenText,
     },
+    /// The PC's answer to a [`ServerToAgent::PartyJoin`] or a [`ServerToAgent::PartyLeave`] (party
+    /// spec §4.2): the first check that failed, or `ok`, sent once the key list's snapshot that holds
+    /// the decision was written. `party_id` echoes the statement's (strict base64url of 16 bytes,
+    /// [`crate::party::is_party_id`]). Only on a connection whose `agent_ready` said `party` — an
+    /// older server answers `bad_message`.
+    PartyAck {
+        party_id: String,
+        op: PartyAckOp,
+        result: PartyAckResult,
+    },
+    /// Every delegation the PC holds (party spec §4.1), the whole truth as its key list's file has
+    /// it, empty too: after this connection's `grant_token` and after every write that changed
+    /// them (after that write's `party_ack`), only on a connection whose `agent_ready` said
+    /// `party`. Never while the key list is damaged: a delegation reported and then gone reads as
+    /// the PC leaving the party. The server checks it ([`crate::party::check_party_state`]).
+    PartyState {
+        parties: Vec<PartyDelegation>,
+    },
     /// Revoke a user's access from the PC side. A guest's goes at once; the owner's is taken by the
     /// server as [`AgentToServer::OwnerRequest`] `unbind_owner` and waits for the owner.
     Unbind {
@@ -224,6 +243,17 @@ pub enum AgentToServer {
     /// [`crate::metrics::AgentEvent`]). Only after `agent_ready`; a server older than the message
     /// answers `error bad_message` and keeps the socket.
     AgentEvent(AgentEvent),
+    /// A secure-desktop episode (`crate::secure_desktop`) has lasted
+    /// [`crate::SECURE_DESKTOP_ONGOING_AFTER_MS`] during the live session `session_id`, and is still
+    /// on: `desktop` as the heartbeat says it now, `at` the episode's start (Unix ms on the PC's
+    /// clock). Once per episode; never held for another connection (the relay drops it), never
+    /// queued. The server's cue for the owner's notice in the bot. Only on a connection
+    /// whose `agent_ready` said `secure_desktop` — an older server answers `bad_message`.
+    SecureDesktopOngoing {
+        session_id: String,
+        desktop: crate::SecureDesktopKind,
+        at: u64,
+    },
 }
 
 /// Why the agent says goodbye (`agent_goodbye.reason`).
@@ -339,6 +369,16 @@ pub enum ServerToAgent {
         /// server; `None` from one older than the grant token (the owner then signs `""`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant_token: Option<bool>,
+        /// The server takes the party messages (party spec §4.1): the agent sends
+        /// [`AgentToServer::PartyAck`] and [`AgentToServer::PartyState`] on this connection, and only
+        /// on one that said so. `Some(true)` from such a server; `None` from one older than parties.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        party: Option<bool>,
+        /// The server takes [`AgentToServer::SecureDesktopOngoing`] and the `agent_event`
+        /// `secure_desktop_ended` (`crate::secure_desktop`): the agent sends them on this connection,
+        /// and only on one that said so. `Some(true)` from such a server; `None` from an older one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_desktop: Option<bool>,
     },
     /// The code to display. `expires_at` is a ceiling, not the expected lifetime.
     PairingCode {
@@ -395,6 +435,11 @@ pub enum ServerToAgent {
         /// [`BindingVia::Other`], read as no `via` at all: the message is never refused for it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<BindingVia>,
+        /// The parties through which this person is a guest of this PC now (`party_id`s), as
+        /// [`crate::BindingInfo::parties`]. Empty (or absent on the wire): none, or a server older
+        /// than the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parties: Vec<String>,
     },
     BindingRemoved {
         telegram_user_id: i64,
@@ -433,6 +478,22 @@ pub enum ServerToAgent {
         username: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         first_name: Option<String>,
+    },
+    /// «ПК в пати» (party spec §2.2, §4): the owner's signed statement naming the party's leader,
+    /// relayed unchanged. Opaque here, like `sdp.proof`: the agent holds it to the limits itself
+    /// ([`crate::party::check_party_statement_wire`]) and parses it in `afklink_core`, answering every
+    /// fault with [`AgentToServer::PartyAck`], never by dropping the frame — but a join with no
+    /// readable `party_id`, which no answer can name (the server relays only a join whose
+    /// `party_id` is readable): that one is logged at `warn` and not answered. Never logged: it
+    /// carries a signature.
+    PartyJoin {
+        join: serde_json::Value,
+    },
+    /// The PC leaves a party (party spec §4.2): the server's word, which only takes away, like
+    /// `binding_removed`. Kept as a string: its form is the agent's to judge. Answered with
+    /// [`AgentToServer::PartyAck`] `op: leave`.
+    PartyLeave {
+        party_id: String,
     },
     /// A bound viewer wants a session. Nothing should start capturing without one.
     SessionRequest {
@@ -512,6 +573,8 @@ impl AgentToServer {
             Self::SessionNonces { .. } => "session_nonces",
             Self::KeyMode { .. } => "key_mode",
             Self::GrantToken { .. } => "grant_token",
+            Self::PartyAck { .. } => "party_ack",
+            Self::PartyState { .. } => "party_state",
             Self::Unbind { .. } => "unbind",
             Self::OwnerRequest { .. } => "owner_request",
             Self::OwnerRequestCancel { .. } => "owner_request_cancel",
@@ -522,6 +585,7 @@ impl AgentToServer {
             Self::Pong => "pong",
             Self::AgentGoodbye { .. } => "agent_goodbye",
             Self::AgentEvent(_) => "agent_event",
+            Self::SecureDesktopOngoing { .. } => "secure_desktop_ongoing",
         }
     }
 
@@ -531,7 +595,8 @@ impl AgentToServer {
             Self::Sdp { session_id, .. }
             | Self::Ice { session_id, .. }
             | Self::SessionEnd { session_id, .. }
-            | Self::SessionStats { session_id, .. } => Some(session_id),
+            | Self::SessionStats { session_id, .. }
+            | Self::SecureDesktopOngoing { session_id, .. } => Some(session_id),
             _ => None,
         }
     }
@@ -557,6 +622,8 @@ impl ServerToAgent {
             Self::BindingRemoved { .. } => "binding_removed",
             Self::OwnerChanged { .. } => "owner_changed",
             Self::OwnerRequestState { .. } => "owner_request_state",
+            Self::PartyJoin { .. } => "party_join",
+            Self::PartyLeave { .. } => "party_leave",
             Self::SessionRequest { .. } => "session_request",
             Self::Sdp { .. } => "sdp",
             Self::Ice { .. } => "ice",
@@ -644,6 +711,12 @@ mod tests {
             AgentToServer::GrantToken {
                 token: GrantTokenText(s()),
             },
+            AgentToServer::PartyAck {
+                party_id: s(),
+                op: PartyAckOp::Leave,
+                result: PartyAckResult::Ok,
+            },
+            AgentToServer::PartyState { parties: vec![] },
             AgentToServer::Unbind {
                 telegram_user_id: 1,
             },
@@ -682,6 +755,11 @@ mod tests {
                     value: crate::metrics::PcSettingValue::Flag(true),
                 },
             }),
+            AgentToServer::SecureDesktopOngoing {
+                session_id: s(),
+                desktop: crate::SecureDesktopKind::Uac,
+                at: 1,
+            },
         ];
         for m in &outgoing {
             let v = serde_json::to_value(m).expect("serialises");
@@ -695,6 +773,8 @@ mod tests {
                 bindings: vec![],
                 nonce_pool: Some(true),
                 grant_token: Some(true),
+                party: Some(true),
+                secure_desktop: Some(true),
             },
             ServerToAgent::PairingCode {
                 code: s(),
@@ -721,6 +801,7 @@ mod tests {
                 first_name: None,
                 role: None,
                 via: Some(BindingVia::Invite),
+                parties: Vec::new(),
             },
             ServerToAgent::BindingRemoved {
                 telegram_user_id: 1,
@@ -738,6 +819,10 @@ mod tests {
                 username: None,
                 first_name: None,
             },
+            ServerToAgent::PartyJoin {
+                join: serde_json::json!({}),
+            },
+            ServerToAgent::PartyLeave { party_id: s() },
             ServerToAgent::SessionRequest {
                 session_id: s(),
                 telegram_user_id: 1,
@@ -1279,5 +1364,120 @@ mod tests {
             serde_json::to_string(&approval).expect("serialises"),
             r#"{"type":"pair_response","request_id":"r","accept":true,"role":"guest","key_id":"k"}"#
         );
+    }
+
+    /// Parties (party spec §4.1, §10): `agent_ready.party` is optional — a server older than parties
+    /// says nothing and gets nothing written back — a join of any shape is carried raw, so a fault in
+    /// it is answered with `party_ack`, never by losing the frame, and what the agent sends is exactly
+    /// the contract's.
+    #[test]
+    fn party_fields_are_optional_and_the_join_raw() {
+        let ready = r#"{"type":"agent_ready","protocol_version":1,"min_supported_protocol":1,"bindings":[],"nonce_pool":true,"grant_token":true}"#;
+        let msg: ServerToAgent = serde_json::from_str(ready).expect("parses");
+        assert!(matches!(msg, ServerToAgent::AgentReady { party: None, .. }));
+        assert_eq!(serde_json::to_string(&msg).expect("serialises"), ready);
+        let with = ready.replace('}', r#","party":true}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerToAgent>(&with).expect("parses"),
+            ServerToAgent::AgentReady {
+                party: Some(true),
+                ..
+            }
+        ));
+
+        for join in [
+            r#"{"party_id":"Rk9vZEJ1ZGR5UGFydHkxMg","v":2,"future":[1,{"x":null}]}"#,
+            r#"{"v":"one"}"#,
+            r"[1,2,3]",
+            r#""a string""#,
+        ] {
+            let text = format!(r#"{{"type":"party_join","join":{join}}}"#);
+            let msg: ServerToAgent = serde_json::from_str(&text).expect("parses whatever the join");
+            assert_eq!(msg.kind(), "party_join");
+            let ServerToAgent::PartyJoin { join: got } = msg else {
+                panic!("a party_join");
+            };
+            let expected: serde_json::Value = serde_json::from_str(join).expect("json");
+            assert_eq!(got, expected, "{text}");
+        }
+        assert!(
+            serde_json::from_str::<ServerToAgent>(r#"{"type":"party_join"}"#).is_err(),
+            "the join is required"
+        );
+        let leave: ServerToAgent =
+            serde_json::from_str(r#"{"type":"party_leave","party_id":"not an id"}"#)
+                .expect("a leave's id is the agent's to judge");
+        assert!(
+            matches!(leave, ServerToAgent::PartyLeave { ref party_id } if party_id == "not an id")
+        );
+
+        let ack = AgentToServer::PartyAck {
+            party_id: "Rk9vZEJ1ZGR5UGFydHkxMg".into(),
+            op: PartyAckOp::Join,
+            result: PartyAckResult::BadSig,
+        };
+        assert_eq!(
+            serde_json::to_string(&ack).expect("serialises"),
+            r#"{"type":"party_ack","party_id":"Rk9vZEJ1ZGR5UGFydHkxMg","op":"join","result":"bad_sig"}"#
+        );
+        assert_eq!(ack.session_id(), None);
+        assert!(!ack.is_final_report());
+        let state = AgentToServer::PartyState { parties: vec![] };
+        assert_eq!(
+            serde_json::to_string(&state).expect("serialises"),
+            r#"{"type":"party_state","parties":[]}"#,
+            "an empty state is a list, never absent"
+        );
+        // A result off the contract's list is not read as another.
+        assert!(serde_json::from_str::<AgentToServer>(
+            r#"{"type":"party_ack","party_id":"p","op":"join","result":"unconfirmed"}"#
+        )
+        .is_err());
+    }
+
+    /// The secure desktop (`crate::secure_desktop`): `agent_ready.secure_desktop` is optional — a
+    /// server older than it says nothing and gets nothing written back — and the cue is exactly the
+    /// contract's, about its session.
+    #[test]
+    fn the_secure_desktop_fields_are_optional_and_the_cue_the_contracts() {
+        let ready = r#"{"type":"agent_ready","protocol_version":1,"min_supported_protocol":1,"bindings":[],"party":true}"#;
+        let msg: ServerToAgent = serde_json::from_str(ready).expect("parses");
+        assert!(matches!(
+            msg,
+            ServerToAgent::AgentReady {
+                secure_desktop: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&msg).expect("serialises"), ready);
+        let with = ready.replace('}', r#","secure_desktop":true}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerToAgent>(&with).expect("parses"),
+            ServerToAgent::AgentReady {
+                secure_desktop: Some(true),
+                ..
+            }
+        ));
+
+        let cue = AgentToServer::SecureDesktopOngoing {
+            session_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+            desktop: crate::SecureDesktopKind::Lock,
+            at: 1_789_600_400_000,
+        };
+        assert_eq!(
+            serde_json::to_string(&cue).expect("serialises"),
+            r#"{"type":"secure_desktop_ongoing","session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","desktop":"lock","at":1789600400000}"#
+        );
+        assert_eq!(cue.kind(), "secure_desktop_ongoing");
+        assert_eq!(
+            cue.session_id(),
+            Some("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        );
+        assert!(!cue.is_final_report());
+        // A kind off the contract's list is not read as another.
+        assert!(serde_json::from_str::<AgentToServer>(
+            r#"{"type":"secure_desktop_ongoing","session_id":"s","desktop":"logon","at":1}"#
+        )
+        .is_err());
     }
 }

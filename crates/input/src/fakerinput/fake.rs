@@ -960,6 +960,10 @@ impl Host for FakeHost {
         world(&self.world).foreground
     }
 
+    fn now(&mut self) -> Instant {
+        world(&self.world).now
+    }
+
     fn sendinput(&self) -> &dyn SendInputPath {
         &self.sendinput
     }

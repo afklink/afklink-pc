@@ -40,6 +40,7 @@ pub mod reconnect;
 mod relay;
 pub mod run_state;
 pub mod scale;
+pub mod secure_desktop;
 pub mod session_log;
 pub mod step_watch;
 pub mod summary;

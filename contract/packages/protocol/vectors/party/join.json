@@ -1,0 +1,792 @@
+{
+  "//": "§2.2 «ПК в пати». j = LP(\"AFKLINK-PARTY-JOIN-V1\") || LP(device_id) || LP(party_id 16) || LP(party UTF-8) || LP(leader.telegram_user_id decimal) || LP(leader.name or \"\") || LP(leader.username or \"\") || LP(key_id(leader.spki) 32) || LP(grant_token 16, or \"\") || LP(issued_at u64 BE ms) || LP(by 32); sig = ECDSA-P256-SHA256 r||s by the PC owner's device key. The PC answers with the first failed check of §4.2 (party_ack.result): malformed (form §2: v 1; party 1-64 code points, no control characters; leader name <= 128, username <= 64 Unicode code points (the unit the released grant schema counts in), null allowed; every text well-formed (no unpaired surrogate; a case with join_text carries the JSON text itself); leader.spki canonical; strict base64url; at most 2048 bytes of compact JSON, unknown fields counted and skipped), device (device_id not pc.device_id), signer (by not an active owner record of pc.keys; in strict mode also not unconfirmed), bad_sig (under the SPKI of by's record), stale (grant_token not pc.grant_token, byte for byte), else ok. pc is the PC's state; a case's pc overrides its fields. j_hex: the bytes the PC rebuilds from the case's JSON, and sig_valid: whether sig is by's signature over them (both absent where the JSON's signed fields were altered after signing). damaged, busy and limit depend on the PC beyond this state: scenarios. Consumers assert both the result (expect) and `why` of every negative case: several cases are built so that a verifier missing one rule reaches a different result, and `why` names the rule that must refuse first.",
+  "pc": {
+    "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+    "mode": "strict",
+    "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+    "keys": [
+      {
+        "name": "A",
+        "key_id": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfUU-LCzvxpooo6h9VNHN4nU3kSG03HW0ZBynC-iuY8bwJW11Mp4cFBbLHRI9ZOwxTE48bldU3NI-8G7O_qYBBw",
+        "role": "owner",
+        "unconfirmed": false,
+        "person": 1001
+      },
+      {
+        "name": "X",
+        "key_id": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0",
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE-HiZfszb7sJKDMdja_IHAE2v5vwRQUIGoqWqkNgcfS43LI6KJ_9AGPjoqs_en1lBGmERTgEhl_ONF1t05zuYMw",
+        "role": "owner",
+        "unconfirmed": true,
+        "person": 1001
+      },
+      {
+        "name": "Z",
+        "key_id": "xPN9jbKGLCsiUOyUebHID8K6P3RraJ_DzWqwRb7V7d0",
+        "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPPyDNVEln3fsu8etkn0gd28bEsbCX5M-pvoDR102h-ynqSpvx3NcLSZY9wdNxWGzktVtipkLO7hSiLL3nw5neQ",
+        "role": "guest",
+        "unconfirmed": false,
+        "person": 555
+      }
+    ]
+  },
+  "owner": {
+    "telegram_user_id": 1001,
+    "first_name": "Вера",
+    "username": "vera"
+  },
+  "cases": [
+    {
+      "name": "main",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "Zf_vFM6uviu1VSCmCo9QECCS_Ks-VwTzfhW-ljNtMvW9Is2lVPuVoq8gluG4PlYMNSEOo1LXFl5S24HrawB1mQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "token_empty",
+      "note": "a PC that never changed its token: both sides empty, LP(\"\")",
+      "pc": {
+        "grant_token": ""
+      },
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "_lOdIS_3pfdZuvRwTMTE2EZdByUK-NxNMWm1_uZTj1wxvtBd5Cg5ZJHVy-8gjR5j3IAiYevxh6-2mTT4M-wsxw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000000000000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "leader_name_username_null",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": null,
+          "username": null,
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "fTI8Vlps2CRQkU3HCWlEvLGzGhfi3B6a0xgqkB_aTQ53p1wKPmxG0lkYNXAByUhqrfbW4c-cJ1mUvnQaetPdaw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b00000003343536000000000000000000000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "party_name_64_code_points",
+      "note": "64 characters counted as Unicode code points (128 UTF-16 units, 256 bytes)",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮🎮",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "ECOUQsC9CL0rUZDU87l-kYPBsg8Xw7yXBKFecjj_Zm4q7jCTdyR-x7FAep2QQz14aocFKxURbQ6Td7zIGLq6KQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000100f09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eaef09f8eae0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "unknown_field_skipped",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "AV8_rL7w4PKC5Ef-G8I29m9k5ye00H-PJkiRCow-HJJlSO4qGrqqHVrOJ-G-YeT1ZKsPM7pOKWVM4XslA784qw",
+        "later": {
+          "nested": [
+            1
+          ]
+        }
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "observe_unconfirmed_owner",
+      "note": "observe mode takes a join from an unconfirmed owner key (§4.2, §5.3)",
+      "pc": {
+        "mode": "observe"
+      },
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0",
+        "sig": "gABWRqI1hCseln0F25zHXk_D8X3VHckMS-56n6az0Ghz0QqFPsoejQ5zibCCRaqX5o1AYh5M58qyutx3ThTdDA"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e80000000020e6e4490628194cd69346990308105b0279cd404181b892c1dc42ae40f1d3e17d",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "strict_unconfirmed_owner",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "5uRJBigZTNaTRpkDCBBbAnnNQEGBuJLB3EKuQPHT4X0",
+        "sig": "rqKRMeN53zOKPeusUr47gGw2ELnDddIDANH5vU2aOLb0FokWQcDUI4gp0pZAlB9b3pmYcoSdUGhjLqyLF5WThQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e80000000020e6e4490628194cd69346990308105b0279cd404181b892c1dc42ae40f1d3e17d",
+      "sig_valid": true,
+      "expect": "signer",
+      "why": "signer_unconfirmed"
+    },
+    {
+      "name": "signed_by_guest",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "xPN9jbKGLCsiUOyUebHID8K6P3RraJ_DzWqwRb7V7d0",
+        "sig": "Refz3Pjvw5UZRc1bXLR8IXygCgUQ4n6AUTXpkzvPByViFQ7D1TeBIbBOlb_0-eRf4Dq86b4pklZglzDXSeLFcQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e80000000020c4f37d8db2862c2b2250ec9479b1c80fc2ba3f746b689fc3cd6ab045bed5eddd",
+      "sig_valid": true,
+      "expect": "signer",
+      "why": "signer_not_owner"
+    },
+    {
+      "name": "by_unknown",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "42Bc_k-wBlOBrLc2ANdhJMSU0uX31vBb309z-s4-aI4",
+        "sig": "1BOBZQ5x6iBj1Ca6M8Y4kP_OPwvhFimaThKi2TX4I6P2ucSzyFhgOHXPnwBBQTVwD-KCjCq7bX5NvobplveUZQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e80000000020e3605cfe4fb0065381acb73600d76124c494d2e5f7d6f05bdf4f73face3e688e",
+      "sig_valid": true,
+      "expect": "signer",
+      "why": "signer_unknown"
+    },
+    {
+      "name": "other_device_id",
+      "join": {
+        "v": 1,
+        "device_id": "c41e9a07-2f5b-4d83-9e16-7b0a5c3d8f21",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "7oWWDdHubCB8It1d1YHRdydrfaqzUvLKyD-eJblFq9Amx63hYf9VY6YBe1UYNklhJlG3BKPOdOZd1UB_1yY9tg"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002463343165396130372d326635622d346438332d396531362d37623061356333643866323100000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "device",
+      "why": "device_id"
+    },
+    {
+      "name": "leader_spki_off_curve",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaA"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "A1XnvU9dhWQtYaI5REjpWc1LJmiNF-Lk8cii5b2MXZuVwNLWKWHYSJTiBUlcaMM8wZszHwrlXt7O_tuFJanjnw"
+      },
+      "expect": "malformed",
+      "why": "leader_spki"
+    },
+    {
+      "name": "leader_spki_other_prefix",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzjwCAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "5CSM7U0-17YxmwMgA9FhPPlWw0UNumoAGcaxo8IzUb0nu-21lj0hj9mfucwa32Mr8Rx3Hvm74AheiDVLnWlusQ"
+      },
+      "expect": "malformed",
+      "why": "leader_spki"
+    },
+    {
+      "name": "boundary_shift_party_leader",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "pvmBOd7nvDyAYosPyUoNlj8x5X0CijFZx_Uwb0_yMarOWmSrhlB6RriUHrSQeBbzcYUgQVn24Fe79qkQka49Pw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": false,
+      "expect": "bad_sig",
+      "why": "signature"
+    },
+    {
+      "name": "keys_domain",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "tZr2RCdo22cX8HJyok7mC7x8dmrZrJu2gD9EoyAzRf7rs1pSb-kSZHX5qGaMiIjmSoAgmpUJWhj3WZjmtpcIRw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": false,
+      "expect": "bad_sig",
+      "why": "signature"
+    },
+    {
+      "name": "signed_by_other_key",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "mAfoNU-qoon65iQad1XQgMOD5oQFWhEO-WLvB5UfkdS_zfpZm8l61VHtXVof6rVAepOhylP-V1Q80ecn2Rcbzw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": false,
+      "expect": "bad_sig",
+      "why": "signature"
+    },
+    {
+      "name": "leader_key_id_of_other_spki",
+      "note": "signed over key_id(Y) while leader.spki is C's: the PC derives key_id from the SPKI",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "cVr0tWDiHEaO7KSEU6Lu-gS8EHp8MMh8gNOmLYrvnwYo7KNcNQt08TJrMR8k5OkVF4HYRBJdjIsuNQRSVyrqRQ"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": false,
+      "expect": "bad_sig",
+      "why": "signature"
+    },
+    {
+      "name": "stale_token",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "NXBRM2FAIMymL3nXnj9MbQ",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "0Kz3K-D_5pIzLYe7GhiZd6e5e8nCCBH8FKIOzzRWUnNB7Jk-YWoyt7PHGACGELJ4z2MwKg3VA3arTBPAIy85Xg"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000001035705133614020cca62f79d79e3f4c6d00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "stale",
+      "why": "token"
+    },
+    {
+      "name": "empty_token_once_the_pc_has_one",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "r2EE4lvXhRM_6Ag6pPWheA2o_4d9Eu6rI-3M3_GGC0pMuqNXWGp8iC8q7v6koMkqPSEU8tzg6t6fsbvQU7tMYw"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000000000000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "stale",
+      "why": "token"
+    },
+    {
+      "name": "bad_sig_and_stale_token",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "NXBRM2FAIMymL3nXnj9MbQ",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "aLpx283UjMsjKof646oSq3CVjod0Z7xI-NA33sDqNCrz_Q4AJ4L4BvAPHK5_y9yLdcEX6vYHeCty0QEKXl8ZpA"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd120000001035705133614020cca62f79d79e3f4c6d00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": false,
+      "expect": "bad_sig",
+      "why": "signature"
+    },
+    {
+      "name": "party_name_empty",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "LXVa_1QcWDPKARqqRjjcGwdISx3-_uGLswCQ9u3TzTDOUkx0HnylhUYOZRFGFQviSzzbn5aYOfZNXPtgEmfebg"
+      },
+      "expect": "malformed",
+      "why": "party"
+    },
+    {
+      "name": "party_name_65",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "xwkWZKyI38WpEg499ka_d_gJAS_Yi-qgT6RdTt2MagoJY8VyyO3-zxSHi1h4_5vCHQc__YmAO0Gt-OGXLN8m_Q"
+      },
+      "expect": "malformed",
+      "why": "party"
+    },
+    {
+      "name": "party_name_control",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы\n",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "h28p9yl8NmzM0_YzQ8dFSN6JTKmOUzf-gmRHUF-_gIAc9mnddV-ShOkJiQURl4mV8EAlZ9y8xYPzzjJp39-81w"
+      },
+      "expect": "malformed",
+      "why": "party"
+    },
+    {
+      "name": "leader_name_129",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "bSyDeT_NyYHmFLK3aU5Ib6Hvpn5q-vJ_CCyVNtPiMX_KNUEtS0MyCdrcmo6bCrN1Lcddhy8Lqw4IlGF3ZEkT_g"
+      },
+      "expect": "malformed",
+      "why": "leader.name"
+    },
+    {
+      "name": "leader_name_128_code_points_non_bmp",
+      "note": "128 non-BMP characters: 128 code points, the bound (256 UTF-16 units, 512 bytes)",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "cGRP4avno3haPPsIGikLvXMCxH5j9dxeKjBHGefjsXmNfn7tDBZdk583h0Tgo4btlOBpHKh2AOi0Ord-ntgICg"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000200f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f988000000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "leader_name_129_code_points_non_bmp",
+      "note": "129 code points: one past the bound",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "oIeuulWJzS8dU2YCnKiz8TEBm3AWN1UTieHvxM3StnNytfX6ThQQSHBj8I-_uZ7c5il-Ur2QH1GHeP9rRZdATA"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000204f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f988000000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "malformed",
+      "why": "leader.name"
+    },
+    {
+      "name": "party_name_lone_surrogate",
+      "note": "join_text holds the JSON text with a lone surrogate escape: a parser that cannot hold it refuses the document, which is malformed too",
+      "join_text": "{\"v\":1,\"device_id\":\"8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64\",\"party_id\":\"oR_737aI4hxGLKjkqe8OpA\",\"party\":\"Орлы\\ud800\",\"leader\":{\"telegram_user_id\":456,\"name\":\"Петя\",\"username\":\"petya\",\"spki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ\"},\"grant_token\":\"5Om8klisKdJ28hb6Y_Sd_Q\",\"issued_at\":1789600000000,\"by\":\"YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI\",\"sig\":\"K0Qq5BAKVG5Tu13rpiUA6kswCkY9hGG9YrfgmqWie5Xy5Z1tnSvOtxsZRvxyuBBaG9ymzoIuuIOoZIqfwXFm3A\"}",
+      "expect": "malformed",
+      "why": "party"
+    },
+    {
+      "name": "leader_id_as_string",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": "456",
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "XCX1W8rnPa9MvdoAMzCqjyiyugW3BKkbk9ZvtLsnPNoMB28D2s_gC8DeARHLl269n1VXmyQ9j8jaWlI2r4yT2w"
+      },
+      "expect": "malformed",
+      "why": "leader.telegram_user_id"
+    },
+    {
+      "name": "party_id_21_chars",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8Op",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "q9uW0pr7Hpo5HJDckGha_81kwuoA8f1JB7tieg6lvoHHDiLuaovEPeXppx3DO28m4RC3Y4yagj8HpE7LZ7LYgg"
+      },
+      "expect": "malformed",
+      "why": "party_id"
+    },
+    {
+      "name": "grant_token_21_chars",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "wrrL9AHkX2tjpS2QCKfAn9PMC_eLdBNzxYViVuCfm148qEYNGIi7sTxPbHid7bOA6cvN8HaUPXzDBdeH15CaAQ"
+      },
+      "expect": "malformed",
+      "why": "grant_token"
+    },
+    {
+      "name": "grant_token_23_chars",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_QA",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "2ouytqQm1Y_yhqmPzghzzrhlNYxwrIwOFmRxfuuwmDSXi6IE84CtxgEeE9kfgcNnPCqvUOtxNelwm5P_gCR63A"
+      },
+      "expect": "malformed",
+      "why": "grant_token"
+    },
+    {
+      "name": "grant_token_null",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": null,
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "GSNDPcejeO3GdbyTKuJqdYaQSCXNSpyTgCB2BUG9LdIrucmPF7YYJLRtRrQAyHsgc_ZtRfGksLk03quvq5q3Sw"
+      },
+      "expect": "malformed",
+      "why": "grant_token"
+    },
+    {
+      "name": "version_2",
+      "join": {
+        "v": 2,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "mvKkz97OWohHR2erJoUbhekbzANFoRWKW2G6bzChSCsoVCCL_h7fVKcScBfSVgRfmhsAL42MTSHIYaubu08HIA"
+      },
+      "expect": "malformed",
+      "why": "v"
+    },
+    {
+      "name": "size_2048_bytes",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "gKn53w2p1V0w0K1QrR-_Rgv9ReItbdo9R-sgmpcb7bx77uvey-XNPRXUowmRNNvqMsDxB-4Mq15y6Mx2Nxdsng",
+        "pad": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "j_hex": "0000001541464b4c494e4b2d50415254592d4a4f494e2d56310000002438643362316634322d366337612d346530392d623564382d32613965376331663362363400000010a11ffbdfb688e21c462ca8e4a9ef0ea400000008d09ed180d0bbd18b0000000334353600000008d09fd0b5d182d18f00000005706574796100000020ff0e7e97c4e6554333a402eae98efc8c858ebc36977611382233c95374e4dd1200000010e4e9bc9258ac29d276f216fa63f49dfd00000008000001a0ac78e8000000002061584d8483b4a0d510ed018d99d15e75c77fae156866f33581ccfc449f5f11c2",
+      "sig_valid": true,
+      "expect": "ok"
+    },
+    {
+      "name": "size_2049_bytes",
+      "join": {
+        "v": 1,
+        "device_id": "8d3b1f42-6c7a-4e09-b5d8-2a9e7c1f3b64",
+        "party_id": "oR_737aI4hxGLKjkqe8OpA",
+        "party": "Орлы",
+        "leader": {
+          "telegram_user_id": 456,
+          "name": "Петя",
+          "username": "petya",
+          "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY0wxrpYBCnRaoPzh3siJCNupLaqEnQ27pZCh5OYMCEbDD6L1okMSyFE-7O8uv0gFntD2utJjUBKYKAS0cbwjaQ"
+        },
+        "grant_token": "5Om8klisKdJ28hb6Y_Sd_Q",
+        "issued_at": 1789600000000,
+        "by": "YVhNhIO0oNUQ7QGNmdFedcd_rhVoZvM1gcz8RJ9fEcI",
+        "sig": "lVttQ2bS0R6vvwZpL0GgfIGztB5UVtS4TgjlPAFJDiZxAN_jRfgFikeEwY0_ANDoWfeDqSlJapy7cZjKt1a2_w",
+        "pad": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "expect": "malformed",
+      "why": "size"
+    }
+  ]
+}
