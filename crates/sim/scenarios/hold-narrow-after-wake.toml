@@ -1,0 +1,34 @@
+# The same hold and wake, but the path after the wake stays at 400 kbps: a fast path before the
+# hold, a narrow one after it (a home Wi-Fi left for weak mobile data).
+#
+# What to read: the estimate sits under a sixteenth of what the session carried, so the opening is
+# run again (`reopen`) at 20, 40 and 80 s spacing; none lifts it, and after the fourth the session's
+# peak learns what the path answered and the reopenings stop. Each costs one opening burst on a
+# path that cannot carry it, so their count is the bound (`tests/hold.rs`).
+name = "hold-narrow-after-wake"
+duration_s = 900
+seed = 11
+
+[content]
+kind = "desktop"
+width = 1920
+height = 1080
+refresh_hz = 60
+
+[[content.phases]]
+kind = "scroll"
+secs = 10.0
+px_per_frame = 40
+
+[link]
+rtt_ms = 220
+
+[link.up]
+schedule = [[0, 14000], [659, 400]]
+queue_ms = 300
+loss = 0.03
+
+[viewer]
+hidden = [[120, 660]]
+asleep_when_hidden = true
+path_moves = [[659.2, "relay"], [659.4, "reflexive"]]

@@ -148,6 +148,10 @@ pub struct Simulation {
     bg: Arc<BgHold>,
     /// The viewer's `vis` not yet sent: (offset from the session's start, hidden), in order.
     vis_events: std::collections::VecDeque<(Duration, bool)>,
+    /// The candidate pair's kind changes not yet told, and the kind now. See
+    /// [`Scenario::path_moves`].
+    path_moves: std::collections::VecDeque<(Duration, afklink_core::quality::PathKind)>,
+    path_kind: afklink_core::quality::PathKind,
     /// The supervisor's view of the hold: the capture stopped, and when it starts again.
     capture_held: bool,
     capture_start_at: Option<Duration>,
@@ -289,6 +293,7 @@ impl Simulation {
             .iter()
             .flat_map(|&(from, to)| [(from, true), (to, false)])
             .collect();
+        let path_moves = scenario.path_moves.iter().copied().collect();
         let keep_screen = !scenario.hidden.is_empty();
         // Asleep from the hide, awake `wake_before_visible` before the page is visible again (never
         // before it fell asleep).
@@ -330,6 +335,8 @@ impl Simulation {
             down_delay_steps,
             bg,
             vis_events,
+            path_moves,
+            path_kind: afklink_core::quality::PathKind::Reflexive,
             capture_held: false,
             capture_start_at: None,
             last_screen: None,
@@ -747,6 +754,7 @@ impl Simulation {
         let now = self.clock.now();
         self.viewer_keyframe_requests(now);
         self.viewer_visibility(now);
+        self.path_moves(now);
         self.delay_steps(now);
         let Some(enc) = self.encode.as_ref() else {
             return Ok(());
@@ -920,6 +928,34 @@ impl Simulation {
             let text = format!(
                 "viewer page {} (scenario vis) at_s=\"{:.1}\"",
                 if hidden { "hidden" } else { "visible" },
+                at.as_secs_f64()
+            );
+            tracing::debug!("{text}");
+            self.log(now, "INFO", "afklink_sim", &text);
+        }
+    }
+
+    /// The scenario's candidate-pair changes that are due, told to the controller before its tick,
+    /// as the agent's control task reads the transport's path gauge. See [`Scenario::path_moves`].
+    fn path_moves(&mut self, now: Duration) {
+        let Some(start) = self.pipeline_start else {
+            return;
+        };
+        while self
+            .path_moves
+            .front()
+            .is_some_and(|(at, _)| start + *at <= now)
+        {
+            let Some((at, kind)) = self.path_moves.pop_front() else {
+                break;
+            };
+            let from = self.path_kind;
+            self.path_kind = kind;
+            self.control.note_path_move(from, kind);
+            let text = format!(
+                "media path changed (scenario) from=\"{}\" to=\"{}\" at_s=\"{:.1}\"",
+                from.as_str(),
+                kind.as_str(),
                 at.as_secs_f64()
             );
             tracing::debug!("{text}");

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use afklink_core::bg_hold::{BgHold, HoldControl, HoldStep};
 use afklink_core::quality::{
     drain_kbps, opening_probe_target_kbps_with, BrakeCause, BrakeEvent, DrainEvent, Feedback,
-    Quality, QualityController, QualityPolicy, QualityTarget, Reanchor, ReanchorTrigger,
+    PathKind, Quality, QualityController, QualityPolicy, QualityTarget, Reanchor, ReanchorTrigger,
     ReceiverReport, Rung, ViewerFrames, TICK,
 };
 
@@ -252,6 +252,13 @@ impl ControlTask {
     #[must_use]
     pub fn controller(&self) -> &QualityController {
         &self.quality
+    }
+
+    /// The media moved to a candidate pair of another kind: as the agent's control task tells the
+    /// controller when the transport's path gauge moves (`agent.rs`, `note_path_move`).
+    pub fn note_path_move(&mut self, from: PathKind, to: PathKind) {
+        self.quality
+            .note_path_move("transport", Some(from), Some(to));
     }
 
     /// The viewer pins a resolution, as the agent applies a pin from the Mini App: the controller
@@ -556,6 +563,11 @@ impl ControlTask {
                     "bwe re-anchor requested: the media moved to a more direct path; str0m's \
                      opening probes run again on it from the live estimate, up to twice the probe \
                      target (probe_cap_kbps)"
+                }
+                Some(ReanchorTrigger::Reopen) => {
+                    "bwe re-anchor requested: the estimate has been stuck far under what this session \
+                     carried while the receiver sees no queue on the path; str0m's opening runs again \
+                     from the estimate, up to twice the probe target (probe_cap_kbps)"
                 }
                 _ => {
                     "bwe re-anchor requested: motion resumed after an application-limited pause, \

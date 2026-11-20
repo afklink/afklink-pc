@@ -1,0 +1,35 @@
+# A nine-minute hold at 1080p@60 on a path with room and 3% background loss (a 220 ms round trip),
+# the page asleep while hidden, and an ICE restart at the wake whose first pair is relayed and the
+# next direct: the media moves relay, then reflexive, as an iPhone's restart does.
+#
+# What to read: the resume keeps the rung, the only re-anchors after it are the hold's own and the
+# path-change re-probe, and nothing is reopened (`reopen`): the estimate never falls under the stuck
+# line on a path that carries the resumed video. A guard against the reopening and the restart's
+# echo rules acting where congestion control is right (`tests/hold.rs`).
+name = "hold-lossy-relay-then-direct"
+duration_s = 900
+seed = 11
+
+[content]
+kind = "desktop"
+width = 1920
+height = 1080
+refresh_hz = 60
+
+[[content.phases]]
+kind = "scroll"
+secs = 10.0
+px_per_frame = 40
+
+[link]
+rtt_ms = 220
+
+[link.up]
+kbps = 14000
+queue_ms = 300
+loss = 0.03
+
+[viewer]
+hidden = [[120, 660]]
+asleep_when_hidden = true
+path_moves = [[659.2, "relay"], [659.4, "reflexive"]]

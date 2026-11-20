@@ -632,3 +632,64 @@ fn ten_minutes_hidden_on_a_jittery_path_restores_the_estimate() {
         h.first_frame_ms
     );
 }
+
+/// A scenario of `scenarios/`, run as the simulator binary runs it.
+fn run_file(name: &str) -> Summary {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scenarios")
+        .join(name);
+    let s = Scenario::load(&path).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    Simulation::new(s).unwrap().run().unwrap().summary
+}
+
+/// The re-anchors after the wake (`scenarios/` sessions wake at 660 s), by trigger.
+fn reanchors_after(s: &Summary, from_s: f64) -> Vec<(f64, &'static str)> {
+    s.reanchors
+        .iter()
+        .filter(|r| r.0 >= from_s)
+        .map(|r| (r.0, r.1))
+        .collect()
+}
+
+/// A long hold on a healthy lossy path, woken by an ICE restart through a relay: the resume keeps
+/// the rung and nothing is reopened (`scenarios/hold-lossy-relay-then-direct.toml`).
+#[test]
+#[ignore = "nine minutes held around a minute of video either side: cargo test -p afklink-sim --release -- --ignored"]
+fn a_long_hold_on_a_lossy_path_resumes_without_a_reopening() {
+    let s = run_file("hold-lossy-relay-then-direct.toml");
+    let after = reanchors_after(&s, 655.0);
+    assert!(
+        after.iter().all(|&(_, t)| t != "reopen"),
+        "nothing reopened on a path that carries the video: {after:?}"
+    );
+    assert!(
+        after.iter().any(|&(_, t)| t == "path-change"),
+        "the relay → reflexive move is re-probed: {after:?}"
+    );
+    let moves: Vec<_> = s.rung_changes.iter().filter(|m| m.0 >= 655.0).collect();
+    assert!(
+        moves.is_empty(),
+        "the rung is kept after the wake: {moves:?}"
+    );
+}
+
+/// The path stays narrow after the wake: four reopenings, spaced 20, 40 and 80 s, then the
+/// session peak learns and they stop (`scenarios/hold-narrow-after-wake.toml`).
+#[test]
+#[ignore = "nine minutes held, then four minutes on a narrow path: cargo test -p afklink-sim --release -- --ignored"]
+fn reopenings_on_a_path_left_narrow_back_off_and_stop() {
+    let s = run_file("hold-narrow-after-wake.toml");
+    let at: Vec<f64> = reanchors_after(&s, 655.0)
+        .into_iter()
+        .filter(|&(_, t)| t == "reopen")
+        .map(|(t, _)| t)
+        .collect();
+    assert_eq!(at.len(), 4, "four reopenings and no more: {at:?}");
+    let gaps: Vec<f64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        gaps.iter()
+            .zip([20.0, 40.0, 80.0])
+            .all(|(&g, min)| g >= min),
+        "spaced by the back-off: {at:?}"
+    );
+}

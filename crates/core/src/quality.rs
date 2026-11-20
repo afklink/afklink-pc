@@ -547,6 +547,50 @@ const EGRESS_WINDOW: usize = 5;
 /// path an interval before this does (`brake_refuses`); this is what applies when we are not.
 const REPORT_FRESH_WITHIN: Duration = Duration::from_secs(3);
 
+/// How far under the session's loaded peak ([`QualityController::session_peak_kbps`]) the estimate
+/// must sit to be stuck: a sixteenth. Recorded on one path with 2-4% background loss: after a
+/// restart the estimate sat at 11-410 kbps for 207 s (a hundredth of the 15-17.9 Mbps it held
+/// under load at 1080p@60, round trip and loss unchanged) and never came back; the same session's
+/// own dip under motion (17944 -> 1561, an eleventh) recovered by itself in 25 s and stays above
+/// the line. See [`ReanchorTrigger::Reopen`].
+const STUCK_DIVISOR: u32 = 16;
+
+/// How long the estimate must stay under the stuck line, in a stretch that follows our own restart
+/// ([`RESTART_COLLAPSE_WITHIN`]), before the opening is run again: three seconds, str0m's smoother
+/// window, so one interval's dip is not read as stuck. The line itself is extreme (a sixteenth of
+/// what the session carried, with the receiver seeing no queue and no brake), and the first
+/// attempt is also held to [`REANCHOR_EVERY`] after the last re-anchor and to [`CLEAN_RTT_FOR`] of
+/// clean round trips. Waiting longer buys nothing those do not, while the ladder steps down every
+/// five seconds on the stuck budget: recorded, a ten-second wait let it reach 360p before the
+/// opening ran, and the climb back took 40-55 s.
+const STUCK_FOR: Duration = Duration::from_secs(3);
+
+/// How soon after a restart of congestion control by this controller the estimate must go under
+/// the stuck line for the stretch to be the restart's own collapse, which a reopening may answer:
+/// eight seconds. The same for every re-anchor (a hold's, a path re-probe, a drain's, a pause's or
+/// an outage's resume, a clean collapse, an idle climb, a reopening): each is str0m's reset, which
+/// rebuilds its estimator from the restart value, so such a collapse has no recovery of its own
+/// left to lose; a re-anchor inside a stretch already under the line counts from itself. Recorded,
+/// the hold's restart at second 0
+/// put the estimate under the line in the third; on the bench the hold's re-anchor went out 3.4 s
+/// after the page was shown and the estimate was under the line one to four seconds after it. A
+/// restart describes the path within [`CLEAN_COLLAPSE_HOLD`] (four seconds: the smoother and a
+/// report); another four, a smoother window and a report interval, cover a fall that a late report
+/// carries. A stretch entered later is the path's: str0m's loss controller returns to its own
+/// delay-based estimate once the reductions stop, and a reopening would reset that away.
+const RESTART_COLLAPSE_WITHIN: Duration = Duration::from_secs(8);
+
+/// The spacing after a reopening, doubled for each further one that did not lift the estimate to
+/// four times the stuck line: 20, 40, then 80 s. Until it is lifted that far the run goes on: the
+/// reopening has reset the estimator, so an estimate between the line and four times it is still
+/// the restart's, not the path's. Four attempts go out, spaced 20, 40 and 80 s, before the session
+/// peak can learn: after [`REOPEN_BACKOFF_MAX`] in a row that did not lift the estimate, and
+/// [`REOPEN_EVERY`] after the fourth, a run the path carried lowers the peak to what they found
+/// ([`QualityController::watch_reopen`]). On a path that really is that narrow four opening bursts
+/// (3x and 6x the restart value) are the whole cost.
+const REOPEN_EVERY: Duration = Duration::from_secs(20);
+const REOPEN_BACKOFF_MAX: u32 = 4;
+
 /// The estimate's fall within one stats interval, as a share of the interval's highest, under which
 /// the control task logs it alongside the receiver's account of the same interval: 70%. str0m's
 /// delay controller cuts to `0.85 x acked`, so a deeper fall is either a cut against an acked rate
@@ -1315,6 +1359,22 @@ pub enum ReanchorTrigger {
     /// [`desired_bitrate_kbps`]). A move the other way, or sideways, changes nothing. See
     /// [`QualityController::note_path_move`].
     PathChange,
+    /// The estimate has been stuck for [`STUCK_FOR`] under a sixteenth of what this session held
+    /// under load ([`STUCK_DIVISOR`]) while the receiver sees no queue on the path, in a stretch
+    /// that began within [`RESTART_COLLAPSE_WITHIN`] of our own restart: str0m's opening is run
+    /// again, as a session start or a reconnect would run it. Only then: str0m's reset is the
+    /// whole estimator rebuilt from the restart value, so after our own restart there is nothing of
+    /// its own to recover, and in a dip of the path's own a reset would throw away the recovery
+    /// its loss controller makes by itself. Restarted at the estimate, or str0m's opening value
+    /// ([`STR0M_OPENING_KBPS`]) if that is more, so its opening probes go at 3x and 6x that (1.8
+    /// and 3.6 Mbps from 600), the probe target the ladder's ceiling for the opening
+    /// ([`PROBE_OPENING`]) as on a new path. A session start on the recorded path went 600 -> 4890
+    /// in 8 s and a restart with the opening probes 4890 -> 16381 in 15 s, at 1.2-6.3% loss;
+    /// nothing else restarts str0m once its loss-limited estimate sits at the acknowledged rate of
+    /// the floor budget. Spaced by [`REOPEN_EVERY`], doubled on each that did not lift the
+    /// estimate; once one has gone out the run goes on until the estimate is past four times the
+    /// line. See [`QualityController::session_peak_kbps`].
+    Reopen,
 }
 
 impl ReanchorTrigger {
@@ -1337,8 +1397,35 @@ impl ReanchorTrigger {
             ReanchorTrigger::IdleClimb => "idle-climb",
             ReanchorTrigger::HoldResume => "hold-resume",
             ReanchorTrigger::PathChange => "path-change",
+            ReanchorTrigger::Reopen => "reopen",
         }
     }
+}
+
+/// What [`QualityController::run_opening`] replaced and set, for its caller's log line.
+#[derive(Debug, Clone, Copy)]
+struct Opening {
+    target_before: u32,
+    target: u32,
+    reach: u32,
+    best_forgotten: u32,
+    capacity_forgotten: u32,
+    informative_forgotten: u32,
+    opening_was: bool,
+    path_ms_was: u64,
+    collapse_held: bool,
+}
+
+/// A stretch of a stuck estimate, judged once when it began ([`QualityController::watch_reopen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StuckStretch {
+    /// Our own restart's collapse: it began within [`RESTART_COLLAPSE_WITHIN`] of a re-anchor, or
+    /// in a reopening run. Otherwise the path's, and never reopened.
+    after_restart: bool,
+    /// How long since the last re-anchor when it began.
+    since_reanchor: Duration,
+    /// How long it has lasted, so a re-anchor inside it is told from one before it.
+    age: Duration,
 }
 
 /// How direct the candidate pair carrying the media is (`afklink_transport::Peer::path_kind`):
@@ -2302,6 +2389,39 @@ pub struct QualityController {
     /// Whether the informative floor was set while the estimate was still str0m's opening value
     /// (our configuration echoed back), forgotten when the estimate moves.
     informative_from_opening: bool,
+    /// Whether withholding evidence in a restart's echo window was said, for one line a restart.
+    /// See [`Self::restart_echoing`].
+    echo_withheld_logged: bool,
+    /// Whether the budget believes the estimate rather than the evidence, because the pacer drains
+    /// at the estimate and the re-anchor that would move it is refused. See
+    /// [`Self::watch_pacer_bound`].
+    pacer_bound: bool,
+    /// Whether a collapse of the path's own that would have bound the budget was said, for one
+    /// line a stretch of refusal and queue.
+    bound_refused_logged: bool,
+    /// The highest estimate this session held on a loaded tick (the link agreeing under load),
+    /// never decayed and not forgotten by a path re-probe: the session's own measure of what it
+    /// can carry, for the stuck line ([`STUCK_DIVISOR`]). After a move to a narrower path it is
+    /// the old path's, which only makes a reopening possible; what a reopening sends is priced
+    /// from the live estimate, never from this.
+    session_peak_kbps: u32,
+    /// How long the estimate has been stuck, since the last reopening went out, the reopenings in
+    /// a row that did not lift it ([`REOPEN_EVERY`]), and the last word on why not (`-` when not
+    /// stuck), logged when it changes. See [`Self::watch_reopen`].
+    stuck_for: Duration,
+    /// The current stuck stretch, judged when it began or when a re-anchor went out inside it:
+    /// whether it is our own restart's ([`RESTART_COLLAPSE_WITHIN`]) or the path's. `None` while
+    /// not stuck.
+    stuck_stretch: Option<StuckStretch>,
+    since_reopen: Duration,
+    reopen_backoff: u32,
+    /// The most the estimate reached since the first reopening of the current run: what the path
+    /// answered, for the session peak once the run gives up.
+    reopen_best_kbps: u32,
+    /// Whether a tick of the current run was in the loaded band: the path carried what we sent
+    /// (as a narrow mobile path does), rather than the floor budget trickling under it.
+    reopen_run_loaded: bool,
+    reopen_view: &'static str,
     /// A media path change waiting to be judged for a re-probe, and how long since the last one went
     /// out. See [`Self::note_path_move`] and [`ReanchorTrigger::PathChange`].
     path_move: Option<PathMove>,
@@ -2504,6 +2624,17 @@ impl QualityController {
             idle_evidence_logged: false,
             since_idle_evidence_log: Duration::MAX,
             informative_from_opening: false,
+            echo_withheld_logged: false,
+            pacer_bound: false,
+            bound_refused_logged: false,
+            session_peak_kbps: 0,
+            stuck_for: Duration::ZERO,
+            stuck_stretch: None,
+            since_reopen: Duration::MAX,
+            reopen_backoff: 0,
+            reopen_best_kbps: 0,
+            reopen_run_loaded: false,
+            reopen_view: "-",
             path_move: None,
             since_path_reprobe: Duration::MAX,
             probe_urgent: false,
@@ -3198,6 +3329,135 @@ impl QualityController {
         }
     }
 
+    /// Whether the budget believes the estimate rather than the evidence, decided once a tick after
+    /// the collapse view ([`Self::collapse_state`]); read by [`Self::unbraked_kbps`].
+    ///
+    /// str0m's pacer drains at 1.1x the estimate with no lever but a re-anchor. While the estimate
+    /// sits under half the evidence and the re-anchor that would lift it is refused (`view` is the
+    /// receiver's reason, or the spacing), a budget priced from the evidence only queues in our own
+    /// pacer, out of the receiver's sight: no round trip rises, so no brake answers it. Recorded
+    /// after a long hold on a path with 2-9% background loss (real loss is on every report there,
+    /// so the refusal never lifts): budget 4-7 Mbps against an estimate of 0.5-0.9 Mbps for 17 s,
+    /// the queue at the breaker's limit five times, retransmissions waiting 0.4-2.9 s behind it.
+    ///
+    /// Begins only within [`RESTART_COLLAPSE_WITHIN`] of a restart of ours (any re-anchor) or
+    /// while a reopening run is on, where the evidence describes the path before str0m was reset
+    /// and nothing of str0m's own will lift its pacer, or with a reopening's own opening
+    /// ([`Self::run_opening`]). A collapse of
+    /// the path's own in mid-session keeps the budget on the evidence, as it always stood there:
+    /// str0m's loss controller returns to its delay-based estimate by itself, and the budget
+    /// follows it up from where it stood. Begins only once our queue says the pacer binds
+    /// ([`QUEUE_GUARD_MS`]), so a still screen or an
+    /// application-limited stream keeps the evidence it stands on. Lasts while the divergence and
+    /// a refusal (or `no-demand`, which is this following the pacer) last, and ends when the
+    /// estimate is back within reach of the evidence (`-`) or the re-anchor is taken (`clean`). A
+    /// silent receiver (`no-report`) and a brake (`brake`) do not begin it: the silence brake and
+    /// the brake already cut the budget on the receiver's word.
+    fn watch_pacer_bound(
+        &mut self,
+        view: &'static str,
+        estimate_kbps: u32,
+        queue_age_ms: u32,
+        anchor_kbps: u32,
+    ) {
+        let refused_and_queued = matches!(view, "rtt" | "loss" | "no-baseline" | "spacing")
+            && queue_age_ms >= QUEUE_GUARD_MS;
+        // The same case as a reopening's ([`StuckStretch`]): our restart just before, or a
+        // reopening run on, whose restarts reset the estimator.
+        let after_restart =
+            self.since_reanchor < RESTART_COLLAPSE_WITHIN || self.reopen_backoff > 0;
+        let begins = refused_and_queued && after_restart;
+        let ends = matches!(view, "-" | "clean");
+        if !self.pacer_bound && refused_and_queued && !after_restart && !self.bound_refused_logged {
+            self.bound_refused_logged = true;
+            tracing::debug!(
+                refused = view,
+                estimate_kbps,
+                anchor_kbps,
+                since_reanchor_ms =
+                    self.since_reanchor.as_millis().min(u128::from(u64::MAX)) as u64,
+                queue_age_ms,
+                budget_kbps = self.unbraked_kbps(),
+                "budget stays on the evidence: the collapse is the path's own, with no restart of \
+                 ours before it, and str0m's recovery is what lifts its pacer"
+            );
+        } else if !refused_and_queued {
+            self.bound_refused_logged = false;
+        }
+        if !self.pacer_bound && begins {
+            let from = self.unbraked_kbps();
+            self.pacer_bound = true;
+            tracing::debug!(
+                refused = view,
+                from_kbps = from,
+                to_kbps = self.unbraked_kbps(),
+                estimate_kbps,
+                anchor_kbps,
+                informative_kbps = self.informative_kbps,
+                capacity_kbps = self.capacity_kbps,
+                queue_age_ms,
+                "budget follows the estimate: str0m's pacer drains at it, our queue says it binds, \
+                 and the re-anchor that would lift it is refused, so a budget from the evidence \
+                 would only queue here"
+            );
+        } else if self.pacer_bound && ends {
+            let from = self.unbraked_kbps();
+            self.pacer_bound = false;
+            tracing::debug!(
+                why = if view == "clean" {
+                    "re-anchored"
+                } else {
+                    "estimate within reach of the evidence"
+                },
+                from_kbps = from,
+                to_kbps = self.unbraked_kbps(),
+                estimate_kbps,
+                anchor_kbps,
+                queue_age_ms,
+                "budget back on the evidence: the pacer no longer binds it below"
+            );
+        }
+    }
+
+    /// Whether str0m's estimate may still be the value it was last restarted at, echoed back:
+    /// within [`CLEAN_COLLAPSE_HOLD`] of a re-anchor (str0m's three-second smoother plus a report,
+    /// the time a restart takes to describe the path). Meanwhile no evidence is raised from the
+    /// estimate or from egress; the informative floor may still follow a link down.
+    ///
+    /// The opening value's rule (`first_estimate`) applied to every restart: str0m publishes the
+    /// restart value through its smoother until its own feedback moves it, and its pacer drains at
+    /// 1.1x that value whatever the path carries, so a keyframe or a probe burst leaving in that
+    /// window agrees with the estimate by construction. Read as the link agreeing under load, it
+    /// became the informative floor and the capacity evidence: a restart at 15142 kbps set both to
+    /// 15142 from the resume keyframe's own burst 200 ms in, before any report on the new path, and
+    /// held the budget at 4-7 Mbps for 17 s while the restarted estimate fell to 607. Delaying a
+    /// rise by the window costs nothing a climb does not already wait for ([`UP_AFTER`]).
+    fn restart_echoing(&self) -> bool {
+        self.since_reanchor < self.policy.clean_collapse_hold()
+    }
+
+    /// Evidence `what` (`informative` or `capacity`) that would have been taken this tick and was
+    /// not, inside a restart's echo window ([`Self::restart_echoing`]). Once per restart.
+    fn note_echo_withheld(&mut self, what: &'static str, estimate_kbps: u32, egress_kbps: u32) {
+        if self.echo_withheld_logged {
+            return;
+        }
+        self.echo_withheld_logged = true;
+        tracing::debug!(
+            evidence = what,
+            estimate_kbps,
+            egress_kbps,
+            since_restart_ms = self.since_reanchor.as_millis() as u64,
+            window_ms = self.policy.clean_collapse_hold().as_millis() as u64,
+            restart_kbps = ?self.last_reanchor.map(|r| r.kbps),
+            informative_kbps = self.informative_kbps,
+            capacity_kbps = self.capacity_kbps,
+            "restart echo: evidence withheld — congestion control was restarted under the window \
+             ago, its estimate may still be the restart value, and what left drained at 1.1x it, \
+             so their agreement is our own number, not the path's"
+        );
+    }
+
     /// The round trip at or past which a fresh report says the path is holding a queue, for
     /// [`Self::receiver_sees_no_queue`]: the brake's inflation line ([`Self::rtt_inflated_at`]),
     /// never above [`PATH_STEP_MAX_MS`]: a baseline learned on a bloated path is itself the queue
@@ -3756,7 +4016,13 @@ impl QualityController {
         } else {
             0
         };
-        let believed_base = u64::from(self.smoothed.max(self.informative_kbps).max(held));
+        // While the pacer binds below the evidence and its re-anchor is refused, the estimate alone
+        // ([`Self::watch_pacer_bound`]).
+        let believed_base = if self.pacer_bound {
+            u64::from(self.smoothed)
+        } else {
+            u64::from(self.smoothed.max(self.informative_kbps).max(held))
+        };
         let trying = self.spend_smoothed >= self.policy.trying_share;
         let believed = if trying {
             // The maximum over the last second, not the last 200 ms window: a gap in the pacer's
@@ -5002,6 +5268,7 @@ impl QualityController {
             self.reanchor_kbps = Some(resume);
             self.last_reanchor = Some(r);
             self.since_reanchor = Duration::ZERO;
+            self.pacer_bound = false;
         } else {
             tracing::debug!(
                 estimate_kbps = self.smoothed,
@@ -5823,13 +6090,27 @@ impl QualityController {
         // estimate and egress into the dead link sat in the band for two seconds. And not under a
         // brake the receiver set: it just said the link is not carrying what the estimate allows.
         let egress_peak = u64::from(self.egress_recent.iter().copied().max().unwrap_or(0));
-        let loaded = live
+        // And not while the estimate may be a restart's value echoed back
+        // ([`Self::restart_echoing`]), above the floor: following a link down is the safe direction
+        // and stays open. The once-a-restart line is armed again on a new restart.
+        if self.since_reanchor.is_zero() {
+            self.echo_withheld_logged = false;
+        }
+        let in_band = live
             && !refused_by_receiver
             && fb.egress_kbps >= self.policy.loaded_floor_kbps
             && u64::from(fb.egress_kbps) * 100
                 >= u64::from(fb.estimate_kbps) * self.policy.loaded_share_pct
             && egress_peak * 100 <= u64::from(fb.estimate_kbps) * self.policy.leading_share_pct;
-        if loaded {
+        // A withheld tick carries no information: the floor neither rises nor decays, and the
+        // streak and the clock stand as they were.
+        let withheld =
+            in_band && self.restart_echoing() && fb.estimate_kbps > self.informative_kbps;
+        let loaded = in_band && !withheld;
+        self.reopen_run_loaded |= in_band && self.reopen_backoff > 0;
+        if withheld {
+            self.note_echo_withheld("informative", fb.estimate_kbps, fb.egress_kbps);
+        } else if loaded {
             self.loaded_streak = self.loaded_streak.saturating_add(dt);
             self.since_loaded = Duration::ZERO;
             if fb.estimate_kbps >= self.informative_kbps
@@ -5848,6 +6129,7 @@ impl QualityController {
                     );
                 }
                 self.informative_kbps = fb.estimate_kbps;
+                self.session_peak_kbps = self.session_peak_kbps.max(fb.estimate_kbps);
                 // Set against an estimate str0m has not moved yet: see the block above that
                 // forgets it when the first measurement lands above it.
                 self.informative_from_opening = !self.estimate_moved;
@@ -6078,9 +6360,17 @@ impl QualityController {
         // the silence ([`Self::feedback_live`]). Egress only once the reports either side call it
         // carried.
         let confirmed = std::mem::take(&mut self.egress_confirmed_kbps);
+        // Nor the estimate while it may be a restart's value echoed back above the evidence
+        // ([`Self::restart_echoing`]); egress the receiver reported carried is still a sample.
+        let echoing = self.restart_echoing()
+            && self
+                .last_reanchor
+                .is_some_and(|r| r.kbps > self.capacity_kbps());
         if self.warm && clean.is_ok() && live {
             let mut sample = confirmed;
-            if self.estimate_moved {
+            if self.estimate_moved && echoing && fb.estimate_kbps > self.capacity_kbps {
+                self.note_echo_withheld("capacity", fb.estimate_kbps, confirmed);
+            } else if self.estimate_moved {
                 sample = sample.max(fb.estimate_kbps);
             }
             if sample > self.capacity_kbps && confirmed > fb.estimate_kbps {
@@ -6143,6 +6433,8 @@ impl QualityController {
 
         // A media path that became more direct comes first: what the old one measured is moot.
         let path_reprobe = self.judge_path_move();
+        // A stream stuck far under what this session carried: the opening again, last.
+        let reopen = self.watch_reopen(&fb, live, demand, dt);
 
         if outage_ready && !outage_resume && !outage_diverged && clean.is_ok() {
             // The receiver is back and clean and the estimate recovered on its own: nothing to
@@ -6202,6 +6494,8 @@ impl QualityController {
         }
         if let Some((on, mv)) = path_reprobe {
             self.reprobe_path(fb.estimate_kbps, on, mv);
+        } else if reopen && !(pause_resume || outage_resume || clean_collapse) {
+            self.reopen(&fb);
         } else if pause_resume || outage_resume || clean_collapse {
             let trigger = if pause_resume {
                 ReanchorTrigger::PauseResume
@@ -6235,6 +6529,7 @@ impl QualityController {
             self.reanchor_kbps = Some(anchor);
             self.last_reanchor = Some(r);
             self.since_reanchor = Duration::ZERO;
+            self.pacer_bound = false;
             self.resume_window = Duration::ZERO;
             // Hold it while the reset lands — only when the receiver has actually called the path
             // clean, which a pause-resume on a still screen may not have had the reports to do.
@@ -6372,6 +6667,7 @@ impl QualityController {
             }
             self.collapse_view = view;
         }
+        self.watch_pacer_bound(view, fb.estimate_kbps, fb.queue_age_ms, anchor);
 
         // ── the startup window ─────────────────────────────────────────────────────────────────
         //
@@ -6490,7 +6786,14 @@ impl QualityController {
         // trip at twice the least, no receiver brake), `growing`, `coarse` and `throttled` bank
         // nothing. `queue_late`, `cpu_bound` and `braking` still act, and a thin link says so at
         // the far end within the window, where the startup decision jumps it in one move.
-        let unmasked = self.collapse.is_none();
+        //
+        // Or a reopening's own opening ([`ReanchorTrigger::Reopen`]): until the restart's window
+        // has passed ([`Self::restart_echoing`]: the opening's probes and a report on them) the
+        // stuck budget is what the opening is replacing, not a verdict on the rung. The rung is kept
+        // while the opening confirms it; `cpu_bound` and `braking` still act.
+        let reopening = self.restart_echoing()
+            && self.last_reanchor.map(|r| r.trigger) == Some(ReanchorTrigger::Reopen);
+        let unmasked = self.collapse.is_none() && !reopening;
         let slow_start =
             self.warm && !self.startup_done && self.fresh_seen && self.startup_evidence.is_none();
         if slow_start != self.slow_start_logged {
@@ -7138,22 +7441,60 @@ impl QualityController {
     /// seen), sent this tick ahead of the re-anchor. See [`ReanchorTrigger::PathChange`].
     fn reprobe_path(&mut self, estimate_kbps: u32, on: &'static str, mv: PathMove) {
         let kbps = estimate_kbps.max(self.policy.reanchor_min_kbps());
+        let o = self.run_opening(kbps, ReanchorTrigger::PathChange, estimate_kbps);
+        let kind = |k: Option<PathKind>| k.map_or("unknown", PathKind::as_str);
+        tracing::debug!(
+            on,
+            from = kind(mv.from),
+            to = kind(mv.to),
+            old_rtt_ms = ?mv.old_rtt_ms,
+            new_rtt_min_ms = ?mv.new_rtt_min_ms,
+            since_change_ms = mv.age.as_millis() as u64,
+            kbps,
+            probe_cap_kbps = o.reach,
+            probe_target_kbps = o.target,
+            probe_target_was_kbps = o.target_before,
+            opening_ms = self.policy.probe_opening().as_millis() as u64,
+            opening_was = o.opening_was,
+            path_ms_was = o.path_ms_was,
+            best_estimate_forgotten_kbps = o.best_forgotten,
+            capacity_forgotten_kbps = o.capacity_forgotten,
+            informative_forgotten_kbps = o.informative_forgotten,
+            collapse_held = o.collapse_held,
+            "re-anchor decided: the media moved to a more direct path; str0m's opening probes run \
+             again on it from the live estimate, and the old path's capacity evidence is forgotten: \
+             the probe target is the ladder's ceiling for the new path's opening (opening_ms), then \
+             twice the restart value until the new path is measured"
+        );
+        self.since_path_reprobe = Duration::ZERO;
+    }
+
+    /// str0m restarted at `kbps` with its opening probes, as on a new session: the probe target
+    /// the ladder's ceiling for [`PROBE_OPENING`] from now, then twice the restart value until the
+    /// path is measured. On a new path ([`ReanchorTrigger::PathChange`]) the old path's capacity
+    /// evidence is forgotten; a reopening on the same path keeps it, since the evidence is what the
+    /// motion after a still screen is budgeted from. The re-anchor is decided here (`trigger`);
+    /// the caller says why.
+    fn run_opening(&mut self, kbps: u32, trigger: ReanchorTrigger, estimate_kbps: u32) -> Opening {
+        let new_path = trigger == ReanchorTrigger::PathChange;
         let capacity_before = self.capacity_kbps();
-        let capacity_forgotten = self.capacity_kbps;
-        let informative_forgotten = self.informative_kbps;
+        let capacity_forgotten = if new_path { self.capacity_kbps } else { 0 };
+        let informative_forgotten = if new_path { self.informative_kbps } else { 0 };
         let best_forgotten = self.probe_best_kbps;
         let target_before = self.probe_target_kbps();
         // The old path's evidence, and everything that would feed it on the next tick.
-        self.capacity_kbps = 0;
-        self.informative_kbps = 0;
-        self.informative_from_opening = false;
-        self.loaded_streak = Duration::ZERO;
-        self.since_loaded = Duration::MAX;
-        self.egress_open_kbps = 0;
-        self.egress_pending_kbps = 0;
-        self.egress_confirmed_kbps = 0;
-        self.evidence_seen = false;
-        self.capacity_peak_kbps = 0;
+        if new_path {
+            self.capacity_kbps = 0;
+            self.informative_kbps = 0;
+            self.informative_from_opening = false;
+            self.loaded_streak = Duration::ZERO;
+            self.since_loaded = Duration::MAX;
+            self.egress_open_kbps = 0;
+            self.egress_pending_kbps = 0;
+            self.egress_confirmed_kbps = 0;
+            self.evidence_seen = false;
+            self.capacity_peak_kbps = 0;
+        }
         // The new path's opening: the ceiling, so str0m's opening probes (3x and 6x the restart,
         // held to twice the target by `queue_probe`) and its exponential probing run as on a new
         // session. str0m's periodic probe waits five seconds after them, so it meets the target
@@ -7169,7 +7510,7 @@ impl QualityController {
         let reach = target.saturating_mul(2);
         let r = Reanchor {
             kbps,
-            trigger: ReanchorTrigger::PathChange,
+            trigger,
             estimate_kbps,
             capacity_kbps: capacity_before,
             rtt_ms: self.last_fresh_rtt,
@@ -7177,39 +7518,304 @@ impl QualityController {
             loss_pct: self.last_fresh_loss.map(|l| l * 100.0),
             probe_cap_kbps: Some(reach),
         };
-        let kind = |k: Option<PathKind>| k.map_or("unknown", PathKind::as_str);
-        tracing::debug!(
-            on,
-            from = kind(mv.from),
-            to = kind(mv.to),
-            old_rtt_ms = ?mv.old_rtt_ms,
-            new_rtt_min_ms = ?mv.new_rtt_min_ms,
-            since_change_ms = mv.age.as_millis() as u64,
-            kbps,
-            probe_cap_kbps = reach,
-            probe_target_kbps = target,
-            probe_target_was_kbps = target_before,
-            opening_ms = self.policy.probe_opening().as_millis() as u64,
-            opening_was,
-            path_ms_was,
-            best_estimate_forgotten_kbps = best_forgotten,
-            capacity_forgotten_kbps = capacity_forgotten,
-            informative_forgotten_kbps = informative_forgotten,
-            collapse_held = self.collapse.is_some(),
-            "re-anchor decided: the media moved to a more direct path; str0m's opening probes run \
-             again on it from the live estimate, and the old path's capacity evidence is forgotten: \
-             the probe target is the ladder's ceiling for the new path's opening (opening_ms), then \
-             twice the restart value until the new path is measured"
-        );
+        let collapse_held = self.collapse.is_some();
         self.reanchor_kbps = Some(kbps);
         self.last_reanchor = Some(r);
         self.since_reanchor = Duration::ZERO;
-        self.since_path_reprobe = Duration::ZERO;
+        // A reopening is a session start: the budget follows the restarted estimate up through
+        // the opening, not the evidence over a pacer at 1.1x the restart value, until B's own exits
+        // ([`Self::watch_pacer_bound`]). A new path's evidence is gone, so nothing to bind against.
+        self.pacer_bound = trigger == ReanchorTrigger::Reopen;
         self.resume_window = Duration::ZERO;
         self.probe_urgent = true;
-        // A hold of the old path's collapse is over, and so is what its failed resets taught.
+        // A held collapse is over; on a new path, so is what its failed resets taught.
         self.collapse = None;
-        self.reanchor_backoff = 0;
+        if trigger == ReanchorTrigger::PathChange {
+            self.reanchor_backoff = 0;
+        }
+        Opening {
+            target_before,
+            target,
+            reach,
+            best_forgotten,
+            capacity_forgotten,
+            informative_forgotten,
+            opening_was,
+            path_ms_was,
+            collapse_held,
+        }
+    }
+
+    /// Whether str0m's opening should run again this tick ([`ReanchorTrigger::Reopen`]), with the
+    /// stuck clock, the back-off, what the reopenings found and the refusal word kept here: the one
+    /// decision point.
+    ///
+    /// Stuck: warm, a session peak at or past [`REANCHOR_MIN_KBPS`] times [`STUCK_DIVISOR`], and
+    /// the estimate under a sixteenth of it (the line) for [`STUCK_FOR`]; once a reopening has gone
+    /// out, under four times the line, the height that ends the run: the reopening reset the
+    /// estimator, so until it is lifted that far it is still ours to lift.
+    ///
+    /// Each stuck stretch is judged when it begins ([`StuckStretch`]): our own restart's if a
+    /// re-anchor went out within [`RESTART_COLLAPSE_WITHIN`] before it or a reopening run is on,
+    /// otherwise the path's. A stretch of the path's is not reopened, however long it lasts
+    /// (`path`): str0m's own recovery is left to run, until a re-anchor of ours inside the stretch
+    /// resets that recovery, and the stretch is judged again from that restart. The judgement is
+    /// dropped with the stretch, when the estimate is back over the line with no run on, or when a
+    /// background hold ends.
+    ///
+    /// Then refused, in this order, while: the page is hidden; drain mode or a held clean collapse
+    /// is acting; a brake is in force (it engages on any fresh report at or past [`BRAKE_LOSS`], so
+    /// loss past that line never reaches the tests below; under it loss is this path's background —
+    /// the recorded path carried 16 Mbps at 2.4-4.4%, and its stuck stretch averaged 3.1%);
+    /// feedback is stale or the last fresh report is older than [`REPORT_FRESH_WITHIN`]; there is
+    /// no round-trip baseline on this path; a report in [`CLEAN_RTT_FOR`] was at or past its queue
+    /// line ([`Self::rtt_queued_at`]: the recorded stretch ran 214-267 ms on 214, one 365); nothing
+    /// is waiting on the pacer (`demand`, the clean collapse's own: the encoder asks for more than
+    /// the pacer drains, or our queue is at the guard; or the budget is at the floor over an
+    /// estimate under it, as in the recorded hole); the stretch is the path's; a re-anchor went out
+    /// within [`REANCHOR_EVERY`]; the back-off has not passed. Our own queue is not a refusal: in a
+    /// stuck stretch it is the floor budget behind a pacer at 1.1x an 11-70 kbps estimate
+    /// (recorded at 0-1100 ms), which the reopening is for.
+    ///
+    /// After [`REOPEN_BACKOFF_MAX`] reopenings in a row that did not lift the estimate, and
+    /// [`REOPEN_EVERY`] after the last, a run the path carried (a tick in the loaded band) has
+    /// answered: the session peak is lowered to the most the estimate reached since the first of
+    /// them, so the stream is no longer stuck against it and the reopenings stop. A later rise
+    /// under load raises it again (`loaded`). A run that never carried a loaded tick keeps
+    /// reopening at the longest spacing.
+    fn watch_reopen(&mut self, fb: &Feedback, live: bool, demand: bool, dt: Duration) -> bool {
+        self.since_reopen = self.since_reopen.saturating_add(dt);
+        if self.reopen_backoff > 0 {
+            self.reopen_best_kbps = self.reopen_best_kbps.max(fb.estimate_kbps);
+        }
+        let line = self.session_peak_kbps / STUCK_DIVISOR;
+        // Lifted to four times the line: the last reopening (or str0m by itself) found the path.
+        if self.reopen_backoff > 0 && u64::from(fb.estimate_kbps) >= u64::from(line) * 4 {
+            tracing::debug!(
+                estimate_kbps = fb.estimate_kbps,
+                stuck_line_kbps = line,
+                backoff = self.reopen_backoff,
+                "reopening back-off cleared: the estimate is back past four times the stuck line"
+            );
+            self.reopen_backoff = 0;
+            self.reopen_best_kbps = 0;
+            self.reopen_run_loaded = false;
+        }
+        // Only a run the path carried teaches: one trickling the floor budget under the estimate
+        // (the recorded hole, 60-260 kbps of egress) is still broken, and keeps its 160 s spacing.
+        if self.reopen_backoff >= REOPEN_BACKOFF_MAX
+            && self.since_reopen >= REOPEN_EVERY
+            && self.reopen_run_loaded
+        {
+            tracing::debug!(
+                from_kbps = self.session_peak_kbps,
+                to_kbps = self.reopen_best_kbps,
+                reopenings = self.reopen_backoff,
+                estimate_kbps = fb.estimate_kbps,
+                "reopening: the path has answered every reopening with less; the session peak is \
+                 lowered to the most they found, and the stream is not stuck against it"
+            );
+            self.session_peak_kbps = self.reopen_best_kbps;
+            self.reopen_backoff = 0;
+            self.reopen_best_kbps = 0;
+            self.reopen_run_loaded = false;
+        }
+        let line = self.session_peak_kbps / STUCK_DIVISOR;
+        // In a run the estimator is the reopening's: stuck until it is past what ends the run.
+        let lifted_at = if self.reopen_backoff > 0 {
+            u64::from(line) * 4
+        } else {
+            u64::from(line)
+        };
+        let stuck = self.warm
+            && line >= self.policy.reanchor_min_kbps()
+            && u64::from(fb.estimate_kbps) < lifted_at;
+        self.stuck_for = if stuck {
+            self.stuck_for.saturating_add(dt)
+        } else {
+            Duration::ZERO
+        };
+        // Judged as the stretch begins: whether congestion control was restarted by us just
+        // before (or a run is on), so that the collapse is the restart's and not the path's. A
+        // re-anchor of any kind inside a stretch of the path's (a path re-probe, a drain's, a
+        // pause's or an outage's resume, a clean collapse, an idle climb) has reset the recovery
+        // it was left for, so the stretch is judged again from that restart. A reopening's own
+        // restart is inside a stretch of ours and changes nothing.
+        if let Some(s) = self
+            .stuck_stretch
+            .filter(|s| stuck && !s.after_restart && self.since_reanchor <= s.age)
+        {
+            tracing::debug!(
+                trigger = ?self.last_reanchor.map(|r| r.trigger.as_str()),
+                since_reanchor_ms = self.since_reanchor.as_millis() as u64,
+                stretch_ms = s.age.as_millis() as u64,
+                estimate_kbps = fb.estimate_kbps,
+                stuck_line_kbps = line,
+                "reopening: a re-anchor inside a stuck stretch of the path's reset str0m's own \
+                 recovery; the stretch is judged again from that restart"
+            );
+            self.stuck_stretch = None;
+        }
+        let stretch = if stuck {
+            let s = self.stuck_stretch.get_or_insert(StuckStretch {
+                after_restart: self.since_reanchor < RESTART_COLLAPSE_WITHIN
+                    || self.reopen_backoff > 0,
+                since_reanchor: self.since_reanchor,
+                age: Duration::ZERO,
+            });
+            s.age = s.age.saturating_add(dt);
+            *s
+        } else {
+            self.stuck_stretch = None;
+            StuckStretch {
+                after_restart: false,
+                since_reanchor: self.since_reanchor,
+                age: Duration::ZERO,
+            }
+        };
+        let spacing = REOPEN_EVERY * (1 << self.reopen_backoff.saturating_sub(1));
+        let budget = self.encoder_target_kbps();
+        // The floor over an estimate under it is demand only while the encoder spends it: a long
+        // still screen decays the floor to 120 with the estimate at the padding rate.
+        let floor_over = budget <= ABSOLUTE_FLOOR_KBPS
+            && fb.estimate_kbps < ABSOLUTE_FLOOR_KBPS
+            && self.spend_smoothed >= self.policy.trying_share;
+        let view = if !stuck {
+            "-"
+        } else if self.stuck_for < STUCK_FOR {
+            "stuck"
+        } else if self.page_hidden {
+            "hidden"
+        } else if self.drain.is_some() || self.collapse.is_some() {
+            "holding"
+        } else if self.brake.is_some() {
+            "brake"
+        } else if !live || self.since_fresh > REPORT_FRESH_WITHIN {
+            "no-report"
+        } else if self.rtt_base_ms().is_none() {
+            "no-baseline"
+        } else if self.since_rtt_queued < self.policy.clean_rtt_for() {
+            "rtt"
+        } else if !(demand || floor_over) {
+            "no-demand"
+        } else if !stretch.after_restart {
+            "path"
+        } else if self.since_reanchor < self.policy.reanchor_every() {
+            "window"
+        } else if self.since_reopen < spacing {
+            "back-off"
+        } else {
+            "due"
+        };
+        if view != self.reopen_view && !matches!(view, "-" | "due") {
+            let ms = |d: Duration| d.as_millis().min(u128::from(u64::MAX)) as u64;
+            // `stuck` and `no-demand` flap with the estimate and the encoder's bursts: trace.
+            macro_rules! view_line {
+                ($lvl:ident) => {
+                    tracing::$lvl!(
+                        view,
+                        was = self.reopen_view,
+                        estimate_kbps = fb.estimate_kbps,
+                        stuck_line_kbps = line,
+                        lifted_at_kbps = lifted_at,
+                        session_peak_kbps = self.session_peak_kbps,
+                        stuck_ms = ms(self.stuck_for),
+                        after_restart = stretch.after_restart,
+                        stretch_since_reanchor_ms = ms(stretch.since_reanchor),
+                        live,
+                        since_fresh_ms = ms(self.since_fresh),
+                        rtt_ms = ?self.last_fresh_rtt,
+                        rtt_base_ms = ?self.rtt_base_ms(),
+                        loss_pct = ?self.last_fresh_loss.map(|l| l * 100.0),
+                        brake = self.brake_state(),
+                        produced_kbps = fb.produced_kbps,
+                        budget_kbps = budget,
+                        spend = format!("{:.2}", self.spend_smoothed),
+                        demand,
+                        queue_age_ms = fb.queue_age_ms,
+                        since_reanchor_ms = ms(self.since_reanchor),
+                        since_reopen_ms = ms(self.since_reopen),
+                        spacing_ms = ms(spacing),
+                        backoff = self.reopen_backoff,
+                        "reopening: the estimate is stuck under what this session carried; not \
+                         yet, or not now (view)"
+                    )
+                };
+            }
+            if matches!(view, "stuck" | "no-demand") {
+                view_line!(trace);
+            } else {
+                view_line!(debug);
+            }
+        }
+        self.reopen_view = view;
+        view == "due"
+    }
+
+    /// Run str0m's opening again on a stuck estimate ([`ReanchorTrigger::Reopen`]), from the
+    /// estimate or str0m's opening value, whichever is more.
+    fn reopen(&mut self, fb: &Feedback) {
+        let kbps = fb.estimate_kbps.max(STR0M_OPENING_KBPS);
+        let line = self.session_peak_kbps / STUCK_DIVISOR;
+        let stuck_ms = self.stuck_for.as_millis() as u64;
+        // Always set here: a reopening is only due inside a stretch of our own restart's.
+        let stretch = self.stuck_stretch;
+        let after_restart = stretch.is_some_and(|s| s.after_restart);
+        let stretch_since_reanchor_ms =
+            stretch.map(|s| s.since_reanchor.as_millis().min(u128::from(u64::MAX)) as u64);
+        let o = self.run_opening(kbps, ReanchorTrigger::Reopen, fb.estimate_kbps);
+        tracing::info!(
+            kbps,
+            estimate_kbps = fb.estimate_kbps,
+            stuck_line_kbps = line,
+            session_peak_kbps = self.session_peak_kbps,
+            stuck_ms,
+            after_restart,
+            stretch_since_reanchor_ms = ?stretch_since_reanchor_ms,
+            since_last_ms = self.since_reopen.as_millis().min(u128::from(u64::MAX)) as u64,
+            attempt = self.reopen_backoff + 1,
+            rtt_ms = ?self.last_fresh_rtt,
+            rtt_base_ms = ?self.rtt_base_ms(),
+            loss_pct = ?self.last_fresh_loss.map(|l| l * 100.0),
+            queue_age_ms = fb.queue_age_ms,
+            produced_kbps = fb.produced_kbps,
+            probe_cap_kbps = o.reach,
+            probe_target_kbps = o.target,
+            capacity_forgotten_kbps = o.capacity_forgotten,
+            informative_forgotten_kbps = o.informative_forgotten,
+            rung = %format!("{}p@{}", self.current().max_h, self.current().fps),
+            "reopening: the estimate has been stuck far under what this session carried since our \
+             own restart while the receiver sees no queue on the path; str0m's opening runs \
+             again, as a new session's \
+             would (restart at kbps, probes at 3x and 6x it up to probe_cap_kbps), the budget \
+             following the estimate through it, the rung kept"
+        );
+        self.since_reopen = Duration::ZERO;
+        self.stuck_for = Duration::ZERO;
+        if self.reopen_backoff == 0 {
+            self.reopen_best_kbps = fb.estimate_kbps;
+        }
+        self.reopen_backoff = (self.reopen_backoff + 1).min(REOPEN_BACKOFF_MAX);
+    }
+
+    /// A re-anchor decided here did not reach congestion control (a calibration sweep owns the
+    /// actuators, or the peer's control channel refused it): a reopening that never went out is
+    /// not an attempt the path answered, so its back-off step and spacing are taken back, and the
+    /// pacer it did not restart binds nothing. The rest of its opening (the restart window, the
+    /// descent mask, the probe target) stands for four seconds: during a sweep the sweep owns the
+    /// rung and the rate, so none of it acts, and the reopening is decided again after the window.
+    pub fn reanchor_not_sent(&mut self) {
+        if self.last_reanchor.map(|r| r.trigger) == Some(ReanchorTrigger::Reopen)
+            && self.since_reopen.is_zero()
+        {
+            self.reopen_backoff = self.reopen_backoff.saturating_sub(1);
+            self.since_reopen = Duration::MAX;
+            self.pacer_bound = false;
+            tracing::debug!(
+                backoff = self.reopen_backoff,
+                "reopening not sent: its back-off step is taken back"
+            );
+        }
     }
 
     /// The re-anchor an idle climb takes with it: congestion control restarted at the evidence the
@@ -7261,6 +7867,7 @@ impl QualityController {
         self.reanchor_kbps = Some(anchor);
         self.last_reanchor = Some(r);
         self.since_reanchor = Duration::ZERO;
+        self.pacer_bound = false;
     }
 
     /// Whether the viewer's page is hidden (its background-hold grace or hold, `crate::bg_hold`):
@@ -7391,6 +7998,8 @@ impl QualityController {
         self.confirm_logged = false;
         self.app_limited_for = Duration::ZERO;
         self.resume_window = Duration::ZERO;
+        self.stuck_for = Duration::ZERO;
+        self.stuck_stretch = None;
         self.stale_run = 0;
         self.drain_silence_counted = false;
         self.climb_held_logged = false;
@@ -7594,6 +8203,7 @@ impl QualityController {
         self.reanchor_kbps = Some(value);
         self.last_reanchor = Some(r);
         self.since_reanchor = Duration::ZERO;
+        self.pacer_bound = false;
         // Held while the reset lands only when it raises a collapsed estimate and the receiver has
         // called the path clean, as for pause-resume; rare after a hold.
         if raises
@@ -15919,5 +16529,1014 @@ mod tests {
                 .any(|(_, _, r)| r.trigger == ReanchorTrigger::PathChange),
             "{fired:?}"
         );
+    }
+
+    // ── a restart's echo, and the budget against the pacer ──────────────────────────────────────
+
+    /// The Wi-Fi setup, then the media moved relay → reflexive (the shape of an ICE restart whose
+    /// first pair is relayed) and the re-probe's restart taken: str0m restarted at the live
+    /// estimate, the old path's evidence forgotten.
+    fn restarted_on_a_more_direct_path() -> QualityController {
+        let mut c = on_wifi_at_1080p60();
+        c.note_path_move(
+            "selected_pair",
+            Some(PathKind::Reflexive),
+            Some(PathKind::Relay),
+        );
+        c.tick(handover(&c, 15_338, 10_400), TICK);
+        c.note_path_move(
+            "selected_pair",
+            Some(PathKind::Relay),
+            Some(PathKind::Reflexive),
+        );
+        c.tick(handover(&c, 15_338, 10_400), TICK);
+        let kbps = c
+            .take_bwe_reanchor()
+            .expect("a more direct path is re-probed");
+        assert_eq!(kbps, 15_338, "restarted at the live estimate");
+        assert_eq!(c.capacity_kbps(), 0, "the old path's evidence is forgotten");
+        c
+    }
+
+    /// Recorded after a nine-minute hold: the resume keyframe and the opening probes left through
+    /// a pacer restarted at 15142, 200 ms in and before any report on the new path, and that tick
+    /// became the informative floor and the capacity evidence at 15142; the restarted estimate fell
+    /// to 607 in three seconds with the budget held at 4-7 Mbps by that echo. A restart's value is
+    /// congestion control's own until its feedback moves it.
+    #[test]
+    fn a_restart_value_echoed_by_its_own_burst_is_not_evidence() {
+        let mut c = restarted_on_a_more_direct_path();
+        // The burst through the restarted pacer: in the loaded band by construction.
+        for _ in 0..4 {
+            c.tick(handover(&c, 15_338, 12_000), TICK);
+        }
+        assert_eq!(c.informative_kbps, 0, "the burst is not the link agreeing");
+        assert_eq!(c.capacity_kbps(), 0);
+        // A report a round trip on, with str0m's smoother still showing the restart value.
+        one_second(&mut c, |c| handover(c, 15_338, 12_000), fresh(131, 0.0, 0));
+        assert_eq!(
+            c.capacity_kbps(),
+            0,
+            "the estimate has not left the restart value"
+        );
+        // The restarted estimator's own word, on a lossy path, with our queue behind it.
+        for estimate in [5_496, 4_287, 3_048, 607] {
+            one_second(
+                &mut c,
+                |c| Feedback {
+                    produced_kbps: 7_000,
+                    queue_age_ms: 600,
+                    ..handover(c, estimate, 7_600)
+                },
+                fresh(228, 3.0, 9),
+            );
+        }
+        assert!(!c.restart_echoing(), "the estimate is a measurement again");
+        assert!(
+            c.capacity_kbps() < 15_338 / 2,
+            "no echo of the restart in the evidence: {}",
+            c.capacity_kbps()
+        );
+        assert!(
+            c.unpushed_kbps() <= 607,
+            "the budget is the measured estimate's: {}",
+            c.unpushed_kbps()
+        );
+    }
+
+    /// The other side: a restart the path does carry raises the floor once the restart's window
+    /// has passed, with the reports and the estimate describing the restarted rate.
+    #[test]
+    fn a_restart_the_path_carries_raises_the_floor_once_measured() {
+        let mut c = restarted_on_a_more_direct_path();
+        for _ in 0..4 {
+            c.tick(handover(&c, 15_338, 12_000), TICK);
+        }
+        for estimate in [18_000, 20_000, 20_000, 20_000] {
+            one_second(
+                &mut c,
+                |c| handover(c, estimate, 16_000),
+                fresh(131, 0.0, 0),
+            );
+        }
+        assert!(!c.restart_echoing());
+        assert!(
+            c.informative_kbps >= 18_000,
+            "the measured estimate is evidence: {}",
+            c.informative_kbps
+        );
+        assert!(c.capacity_kbps() >= 18_000, "{}", c.capacity_kbps());
+    }
+
+    /// An estimate that holds the restart value exactly is a measurement too, once the smoother
+    /// and a report have had their window.
+    #[test]
+    fn a_restart_value_the_estimate_holds_is_believed_after_the_smoother() {
+        let mut c = restarted_on_a_more_direct_path();
+        for _ in 0..6 {
+            one_second(&mut c, |c| handover(c, 15_338, 12_000), fresh(131, 0.0, 0));
+        }
+        assert!(!c.restart_echoing());
+        assert_eq!(c.informative_kbps, 15_338);
+    }
+
+    /// The Wi-Fi setup woken from a minute's hold: the hold's restart at the held estimate and
+    /// three seconds carried at it, so what follows is that restart's collapse.
+    fn woken_on_wifi() -> QualityController {
+        let mut c = on_wifi_at_1080p60();
+        assert!(
+            c.resume_after_hold(Duration::from_secs(60), 15_338)
+                .reanchor_due
+        );
+        assert_eq!(c.reanchor_after_hold(15_338).refused, None);
+        assert!(c.take_bwe_reanchor().is_some());
+        for _ in 0..3 {
+            one_second(&mut c, |c| handover(c, 15_338, 10_400), fresh(131, 0.0, 0));
+        }
+        assert_eq!(c.take_bwe_reanchor(), None);
+        c
+    }
+
+    /// A collapse after our own restart that the controller will not re-anchor (real loss on
+    /// every report: a path with 2-9% background loss), with our own queue saying the pacer
+    /// binds: the budget is the estimate, not the evidence. Recorded with the evidence instead:
+    /// 4-7 Mbps against 0.5-0.9 Mbps for 17 s, the queue at the breaker's limit five times.
+    #[test]
+    fn the_budget_follows_a_collapse_the_controller_will_not_re_anchor() {
+        let mut c = woken_on_wifi();
+        let collapsed = |c: &QualityController| Feedback {
+            produced_kbps: 2_500,
+            queue_age_ms: 300,
+            ..handover(c, 1_500, 2_000)
+        };
+        for _ in 0..3 {
+            one_second(&mut c, collapsed, fresh(131, 4.0, 6));
+        }
+        assert_eq!(c.collapse_state(), "loss");
+        assert!(c.pacer_bound);
+        assert!(
+            c.unpushed_kbps() <= 1_500,
+            "the budget drains through the pacer: {}",
+            c.unpushed_kbps()
+        );
+        assert!(c.capacity_kbps() > 2 * 1_500, "the evidence itself is kept");
+        assert_eq!(
+            c.take_bwe_reanchor(),
+            None,
+            "congestion control is left alone"
+        );
+        assert_eq!(c.brake_kbps(), None, "under the brake's loss line");
+
+        // The estimate recovers within reach of the evidence: the budget is the evidence's again.
+        for _ in 0..2 {
+            one_second(&mut c, |c| handover(c, 12_000, 10_000), fresh(131, 0.0, 0));
+        }
+        assert!(!c.pacer_bound);
+    }
+
+    /// The same collapse in mid-session, with no restart of ours before it: the path's own. The
+    /// budget stays on the evidence, tick for tick what it was before the budget ever followed
+    /// the pacer; str0m's own recovery lifts the pacer.
+    #[test]
+    fn a_collapse_of_the_paths_own_keeps_the_budget_on_the_evidence() {
+        let mut c = on_wifi_at_1080p60();
+        assert!(
+            c.since_reanchor >= RESTART_COLLAPSE_WITHIN,
+            "no restart nearby"
+        );
+        let collapsed = |c: &QualityController| Feedback {
+            produced_kbps: 2_500,
+            queue_age_ms: 300,
+            ..handover(c, 1_500, 2_000)
+        };
+        let mut budgets = Vec::new();
+        for _ in 0..3 {
+            for tick in 0..5 {
+                let f = Feedback {
+                    report: if tick == 0 { fresh(131, 4.0, 6) } else { None },
+                    ..collapsed(&c)
+                };
+                c.tick(f, TICK);
+                budgets.push(c.unpushed_kbps());
+            }
+        }
+        // The budget per tick as the controller priced it before it ever followed the pacer (the
+        // same feed through that code).
+        let mut before = vec![10_306; 9];
+        before.extend([7_288; 6]);
+        assert_eq!(budgets, before);
+        assert_eq!(c.collapse_state(), "loss");
+        assert!(!c.pacer_bound);
+        assert_eq!(c.take_bwe_reanchor(), None);
+    }
+
+    /// A still screen on the same lossy path, right after a hold's restart: nothing queued, so the
+    /// pacer does not bind and the evidence stands. Its motion binds the pacer under the stuck
+    /// line the restart's collapse left, so it goes through a reopening: from then the budget is
+    /// the restarted estimate climbing with the opening, never the evidence over a pacer at 1.1x
+    /// the restart value.
+    #[test]
+    fn a_still_screen_on_a_lossy_path_keeps_the_evidence_for_its_motion() {
+        let mut c = on_wifi_at_1080p60();
+        assert!(
+            c.resume_after_hold(Duration::from_secs(60), 15_338)
+                .reanchor_due
+        );
+        assert_eq!(c.reanchor_after_hold(15_338).refused, None);
+        let _ = c.take_bwe_reanchor();
+        for _ in 0..5 {
+            one_second(&mut c, |c| gone_still(c, 90), fresh(131, 4.0, 1));
+        }
+        assert_eq!(c.collapse_state(), "loss");
+        assert!(!c.pacer_bound, "nothing queued: the pacer does not bind");
+        assert!(c.unpushed_kbps() > 5_000, "{}", c.unpushed_kbps());
+        c.tick(motion_resumes(&c), TICK);
+        let r = c
+            .last_reanchor()
+            .expect("the motion reopens the stuck estimate");
+        assert_eq!(r.trigger, ReanchorTrigger::Reopen);
+        assert!(c.pacer_bound);
+        assert!(
+            c.capacity_kbps() > 5_000,
+            "the evidence is kept as a reference"
+        );
+        assert!(
+            c.unpushed_kbps() <= r.kbps,
+            "the motion is served at the restarted estimate: {}",
+            c.unpushed_kbps()
+        );
+    }
+
+    /// Loss past the brake's line is the brake's, and a clean collapse is re-anchored as before.
+    #[test]
+    fn the_brake_and_the_clean_collapse_are_left_as_they_were() {
+        let collapsed = |c: &QualityController| Feedback {
+            produced_kbps: 2_000,
+            queue_age_ms: 300,
+            ..handover(c, 600, 1_500)
+        };
+        let mut c = on_wifi_at_1080p60();
+        one_second(&mut c, collapsed, fresh(131, 15.0, 20));
+        assert!(c.brake_kbps().is_some(), "the brake answers the loss");
+        assert_eq!(c.collapse_state(), "brake");
+        assert!(!c.pacer_bound);
+
+        let mut c = on_wifi_at_1080p60();
+        one_second(&mut c, collapsed, fresh(131, 0.0, 0));
+        assert_eq!(c.collapse_state(), "clean", "the clean collapse is held");
+        assert!(c.take_bwe_reanchor().is_some(), "and re-anchored");
+        assert!(!c.pacer_bound);
+    }
+
+    /// The recorded second the first reopening is due: the estimate is stuck from the fourth (607
+    /// against a session peak of 15142), [`STUCK_FOR`] passes in the sixth, and the resume's own
+    /// restart at second 0 holds it to [`REANCHOR_EVERY`]: the end of the sixth second (index 5),
+    /// with the ladder one step down at 1080p@30.
+    const REOPEN_DUE_IN_REPLAY_S: usize = 5;
+
+    /// The 95 seconds after a recorded nine-minute hold at 1080p@60 on a path with 2-4% background
+    /// loss and a 220 ms round trip, one row a second from the resume (the estimate stuck at
+    /// 11-444 kbps from the fourth): estimate, egress, produced
+    /// (keyframes included), our queue, the receiver's round trip, loss and NACKs (`None`: no
+    /// report), quantiser and encode time. The estimate, the queue and egress are what the
+    /// recorded controller caused (its budget sat at 4-7 Mbps), so they bound the replay from the
+    /// pessimistic side.
+    #[allow(clippy::type_complexity)]
+    #[rustfmt::skip]
+    const LONG_HOLD_RESUME: &[(u32, u32, u32, u32, Option<u32>, Option<f32>, u32, Option<f32>, f32)] = &[
+        (15142, 344, 2677, 0, None, None, 0, Some(21.8), 5.9),
+        (4287, 7676, 7218, 597, Some(228), Some(0.04), 9, Some(29.0), 6.9),
+        (3048, 4252, 1021, 254, Some(225), Some(1.45), 35, Some(42.4), 3.9),
+        (607, 842, 758, 1058, Some(216), Some(6.04), 44, None, 0.0),
+        (559, 1563, 1667, 715, Some(231), Some(2.05), 20, Some(35.0), 6.4),
+        (559, 1904, 2196, 317, Some(228), Some(0.45), 20, Some(30.5), 5.8),
+        (856, 1192, 542, 23, Some(224), Some(5.86), 42, Some(38.0), 6.2),
+        (856, 2055, 1894, 935, Some(230), Some(3.01), 29, Some(40.0), 6.0),
+        (856, 1964, 2444, 533, Some(225), Some(9.13), 44, None, 0.0),
+        (633, 2548, 1729, 202, Some(224), Some(2.89), 25, Some(30.8), 6.4),
+        (633, 802, 779, 1118, Some(219), Some(3.96), 40, Some(32.0), 5.4),
+        (599, 1725, 683, 532, Some(219), Some(0.0), 22, None, 0.0),
+        (534, 858, 1176, 272, Some(218), Some(7.75), 38, Some(31.0), 4.2),
+        (534, 606, 433, 1049, Some(219), Some(1.38), 13, Some(35.0), 4.7),
+        (507, 1217, 1352, 535, Some(226), Some(3.9), 19, Some(31.0), 5.3),
+        (469, 1924, 948, 180, Some(223), Some(1.48), 28, Some(30.3), 2.9),
+        (469, 540, 260, 1007, Some(221), Some(2.53), 26, Some(37.0), 2.9),
+        (445, 706, 470, 603, Some(217), Some(2.43), 27, Some(35.0), 3.1),
+        (417, 506, 280, 276, Some(214), Some(13.72), 37, Some(43.0), 2.6),
+        (372, 361, 168, 0, Some(221), Some(13.99), 31, Some(46.0), 1.8),
+        (319, 262, 414, 349, Some(219), Some(0.0), 7, Some(46.0), 0.9),
+        (266, 227, 0, 51, Some(214), Some(1.17), 6, None, 0.0),
+        (201, 236, 131, 40, Some(219), Some(0.0), 15, Some(43.3), 1.0),
+        (185, 202, 235, 45, Some(218), Some(2.21), 18, Some(43.0), 1.2),
+        (164, 229, 61, 109, Some(218), Some(3.81), 17, Some(46.0), 1.3),
+        (156, 210, 343, 355, Some(222), Some(1.63), 17, Some(42.2), 0.5),
+        (168, 201, 0, 1012, Some(221), Some(1.18), 18, None, 0.0),
+        (210, 280, 133, 19, Some(216), Some(4.74), 16, Some(38.4), 0.6),
+        (199, 216, 153, 119, Some(226), Some(6.13), 25, Some(39.3), 0.5),
+        (199, 212, 176, 196, Some(218), Some(2.69), 28, Some(41.8), 0.6),
+        (141, 156, 39, 0, Some(222), Some(5.08), 28, Some(43.0), 0.7),
+        (141, 157, 124, 204, Some(220), Some(5.19), 20, Some(39.7), 0.7),
+        (130, 152, 73, 0, Some(228), Some(7.98), 18, None, 0.0),
+        (121, 159, 185, 214, Some(216), Some(5.23), 19, Some(40.5), 0.7),
+        (114, 124, 25, 0, Some(219), Some(2.26), 21, Some(46.0), 0.6),
+        (114, 124, 128, 139, Some(218), Some(0.0), 12, Some(38.3), 0.7),
+        (121, 135, 98, 232, Some(217), Some(1.53), 5, None, 0.0),
+        (143, 162, 131, 8, Some(223), Some(5.53), 17, Some(36.0), 1.0),
+        (151, 163, 193, 119, Some(230), Some(0.0), 18, Some(40.0), 0.9),
+        (143, 194, 41, 0, Some(232), Some(3.03), 19, Some(44.5), 0.6),
+        (143, 159, 103, 0, Some(221), Some(0.0), 12, Some(39.5), 0.8),
+        (130, 114, 131, 0, Some(227), Some(0.0), 0, Some(36.5), 0.8),
+        (151, 145, 120, 0, Some(217), Some(0.0), 0, Some(37.5), 0.9),
+        (151, 181, 93, 0, Some(228), Some(10.33), 12, None, 0.0),
+        (151, 140, 136, 0, Some(217), Some(3.11), 15, Some(37.0), 0.9),
+        (140, 154, 94, 363, Some(224), Some(4.15), 14, None, 0.0),
+        (118, 145, 53, 0, Some(226), Some(4.0), 12, Some(41.0), 0.7),
+        (104, 90, 61, 0, Some(239), Some(4.29), 19, None, 0.0),
+        (88, 89, 115, 376, Some(220), Some(0.0), 15, None, 0.0),
+        (78, 102, 26, 494, Some(217), Some(7.11), 11, None, 0.0),
+        (70, 87, 45, 0, Some(231), Some(0.0), 3, Some(44.5), 0.6),
+        (63, 71, 65, 0, Some(226), Some(0.0), 1, None, 0.0),
+        (59, 91, 79, 120, Some(218), Some(4.49), 9, Some(39.0), 0.8),
+        (59, 80, 45, 248, Some(226), Some(0.0), 9, None, 0.0),
+        (77, 79, 88, 615, Some(267), Some(0.0), 9, None, 0.0),
+        (77, 96, 52, 116, Some(218), Some(8.33), 13, Some(41.5), 0.8),
+        (77, 104, 65, 0, Some(221), Some(9.46), 22, None, 0.0),
+        (73, 96, 115, 611, Some(218), Some(7.93), 20, None, 0.0),
+        (73, 107, 31, 119, Some(216), Some(0.0), 19, Some(43.5), 0.7),
+        (73, 88, 64, 0, Some(266), Some(0.0), 12, Some(39.0), 0.7),
+        (151, 80, 112, 0, Some(251), Some(0.0), 0, Some(37.5), 0.7),
+        (198, 190, 168, 0, Some(289), Some(4.44), 5, Some(36.5), 0.8),
+        (198, 231, 162, 0, Some(365), Some(0.0), 9, Some(38.5), 0.7),
+        (249, 213, 273, 121, Some(241), Some(0.0), 9, Some(36.0), 1.0),
+        (283, 256, 109, 0, Some(219), Some(2.19), 12, Some(36.5), 0.9),
+        (283, 215, 217, 122, Some(255), Some(3.08), 5, Some(31.5), 1.0),
+        (283, 224, 158, 0, Some(222), Some(0.0), 8, Some(33.5), 1.0),
+        (296, 238, 191, 0, Some(219), Some(0.0), 10, Some(33.0), 0.8),
+        (327, 261, 265, 0, Some(219), Some(0.0), 9, Some(36.5), 0.9),
+        (327, 271, 216, 0, Some(217), Some(0.0), 7, Some(34.5), 0.9),
+        (327, 323, 274, 0, Some(216), Some(1.7), 8, Some(31.0), 1.0),
+        (363, 350, 282, 0, Some(241), Some(4.71), 21, Some(34.5), 0.9),
+        (392, 368, 285, 0, Some(279), Some(1.97), 27, Some(36.0), 0.9),
+        (392, 366, 244, 0, Some(216), Some(0.0), 12, Some(33.5), 1.2),
+        (410, 305, 315, 0, Some(219), Some(1.86), 3, Some(33.5), 0.9),
+        (410, 401, 262, 0, Some(229), Some(2.62), 11, Some(31.5), 1.1),
+        (444, 355, 289, 0, Some(221), Some(1.95), 10, None, 0.0),
+        (351, 388, 253, 0, Some(220), Some(8.13), 21, Some(39.0), 1.0),
+        (325, 288, 102, 0, Some(238), Some(3.55), 11, Some(35.5), 0.9),
+        (271, 159, 185, 256, Some(225), Some(4.08), 9, Some(35.5), 0.8),
+        (204, 214, 95, 0, Some(234), Some(5.88), 11, Some(36.0), 1.0),
+        (160, 149, 106, 630, Some(217), Some(0.0), 9, None, 0.0),
+        (133, 151, 55, 0, Some(230), Some(5.24), 11, Some(41.0), 0.7),
+        (112, 116, 102, 252, Some(276), Some(2.99), 20, None, 0.0),
+        (93, 106, 69, 755, Some(222), Some(0.0), 14, None, 0.0),
+        (80, 105, 72, 241, Some(218), Some(7.11), 11, Some(39.5), 0.8),
+        (67, 89, 54, 367, Some(217), Some(4.16), 9, None, 0.0),
+        (60, 69, 72, 133, Some(224), Some(7.05), 17, None, 0.0),
+        (54, 111, 37, 860, Some(220), Some(0.0), 11, Some(45.0), 0.7),
+        (48, 25, 21, 0, None, None, 0, Some(46.0), 0.6),
+        (47, 65, 39, 0, Some(218), Some(7.05), 2, None, 0.0),
+        (47, 83, 42, 77, Some(219), Some(0.0), 9, None, 0.0),
+        (45, 66, 58, 0, Some(216), Some(0.0), 10, None, 0.0),
+        (45, 63, 82, 365, Some(239), Some(12.47), 19, None, 0.0),
+        (45, 73, 19, 100, Some(216), Some(0.0), 18, None, 0.0),
+    ];
+
+    /// 1080p@60 at 10-11 Mbps on the lossy path before the hold: an estimate of ~15 Mbps, round
+    /// trips 216-229, 2-4% loss on every report.
+    fn on_the_lossy_path_at_1080p60() -> QualityController {
+        let mut c = QualityController::new(1920, 1080, Quality::Balanced);
+        for (i, rtt) in [221, 229, 216, 224, 220, 226, 219, 222]
+            .repeat(5)
+            .into_iter()
+            .enumerate()
+        {
+            let loss = [2.6, 3.1, 2.2, 3.6][i % 4];
+            one_second(
+                &mut c,
+                |c| Feedback {
+                    estimate_kbps: 15_142,
+                    drain_kbps: 16_656,
+                    produced_kbps: 10_400,
+                    egress_kbps: 11_500,
+                    avg_qp: Some(22.0),
+                    ..handover(c, 15_142, 11_500)
+                },
+                fresh(rtt, loss, 50),
+            );
+        }
+        assert_eq!(c.current(), LADDER[0], "the setup is 1080p@60");
+        assert!(c.capacity_kbps() >= 15_000, "{}", c.capacity_kbps());
+        let _ = c.take_bwe_reanchor();
+        let _ = c.take_brake_event();
+        c
+    }
+
+    /// The recorded resume replayed: after the hold's restart and, in one variant, the ICE
+    /// restart's relay → reflexive move and its re-probe. From the second the receiver first
+    /// reports, the budget is never past twice the estimate or the re-anchor floor (the recording:
+    /// five to ten times it); the ladder moves no more often than the recording did (seven times); and the stuck
+    /// estimate is reopened at [`REOPEN_DUE_IN_REPLAY_S`], the reopenings
+    /// spaced by the back-off. The recorded estimate does not answer a reopening, so the replay
+    /// shows when it is decided, not what it finds.
+    #[test]
+    fn a_long_hold_resume_on_a_lossy_path_keeps_the_budget_on_the_pacer() {
+        for path_change in [true, false] {
+            let mut c = on_the_lossy_path_at_1080p60();
+            if path_change {
+                c.note_path_move(
+                    "transport",
+                    Some(PathKind::Reflexive),
+                    Some(PathKind::Relay),
+                );
+                c.note_path_move(
+                    "transport",
+                    Some(PathKind::Relay),
+                    Some(PathKind::Reflexive),
+                );
+            }
+            let r = c.resume_after_hold(Duration::from_secs(543), 15_142);
+            assert!(r.reanchor_due);
+            let h = c.reanchor_after_hold(15_142);
+            assert_eq!(h.refused, None, "the hold's restart, at the same rung");
+            let mut moves = 0;
+            let mut reopened = Vec::new();
+            for (second, &(estimate, egress, produced, queue, rtt, loss, nacks, qp, encode)) in
+                LONG_HOLD_RESUME.iter().enumerate()
+            {
+                for tick in 0..5 {
+                    let budget = c.encoder_target_kbps();
+                    let fb = Feedback {
+                        estimate_kbps: estimate,
+                        drain_kbps: estimate * 11 / 10,
+                        produced_kbps: produced,
+                        egress_kbps: egress,
+                        qp_samples: if qp.is_some() { 12 } else { 0 },
+                        queue_age_ms: queue,
+                        avg_qp: qp,
+                        encode_ms: encode,
+                        spend_ratio: produced as f32 / budget.max(1) as f32,
+                        rung_fps_hint: c.current().fps as f32,
+                        qp_ceiling: Some(46.0),
+                        drop_ratio: 0.0,
+                        report: if tick == 0 {
+                            rtt.map(|rtt| ReceiverReport {
+                                rtt_ms: Some(rtt),
+                                loss: loss.map(|l| l / 100.0),
+                                nacks,
+                            })
+                        } else {
+                            None
+                        },
+                    };
+                    if c.tick(fb, TICK).is_some() {
+                        moves += 1;
+                    }
+                    if c.take_bwe_reanchor().is_some()
+                        && c.last_reanchor().map(|r| r.trigger) == Some(ReanchorTrigger::Reopen)
+                    {
+                        reopened.push(second);
+                    }
+                    let _ = c.take_brake_event();
+                    // Never past the divergence at which the evidence would be read as a
+                    // collapse (two to one): the recording held five to ten times it.
+                    if second >= 2 {
+                        let budget = c.unpushed_kbps();
+                        // Under the re-anchor floor nothing is evidence of a collapse (a ratio of
+                        // two small numbers), so the bound is at least that floor.
+                        let bound = u32::try_from(
+                            u64::from(estimate) * c.policy.reanchor_divergence_pct / 100,
+                        )
+                        .unwrap_or(u32::MAX)
+                        .max(c.policy.reanchor_min_kbps());
+                        assert!(
+                            budget <= bound.max(ABSOLUTE_FLOOR_KBPS),
+                            "path_change={path_change} second {second} tick {tick}: budget \
+                             {budget} over {bound} (estimate {estimate})"
+                        );
+                    }
+                }
+                if path_change && second >= 1 {
+                    assert!(
+                        c.capacity_kbps() < 15_142 / 2,
+                        "second {second}: the restart's echo became evidence: {}",
+                        c.capacity_kbps()
+                    );
+                }
+            }
+            assert!(moves <= 7, "path_change={path_change}: {moves} moves");
+            // Stuck from the fourth second (607 against a session peak of 15142): reopened once
+            // the stuck clock and the receiver allow, and spaced after that.
+            let first = *reopened.first().expect("the stuck estimate is reopened");
+            assert_eq!(
+                first, REOPEN_DUE_IN_REPLAY_S,
+                "path_change={path_change}: first reopening at second {first}"
+            );
+            assert!(
+                reopened.windows(2).all(|w| w[1] - w[0] >= 20),
+                "spaced by the back-off: {reopened:?}"
+            );
+        }
+    }
+
+    // ── reopening a stuck estimate ──────────────────────────────────────────────────────────────
+
+    /// A second of the recorded hole: the estimate far under the session's peak, the floor budget
+    /// leaving, the encoder asking for more than the pacer drains, the receiver at its baseline
+    /// with the path's background loss.
+    fn in_the_hole(c: &QualityController, estimate_kbps: u32) -> Feedback {
+        Feedback {
+            produced_kbps: 300,
+            avg_qp: Some(40.0),
+            ..handover(c, estimate_kbps, 260)
+        }
+    }
+
+    /// Seconds of `fb` with `report(second)` on the first tick of each: the re-anchors taken, with
+    /// their second, and every refusal word the reopening rule said.
+    fn reopenings(
+        c: &mut QualityController,
+        secs: usize,
+        fb: impl Fn(&QualityController) -> Feedback,
+        report: impl Fn(usize) -> Option<ReceiverReport>,
+    ) -> (Vec<(usize, Reanchor)>, Vec<&'static str>) {
+        let mut taken = Vec::new();
+        let mut views = Vec::new();
+        for second in 0..secs {
+            for tick in 0..5 {
+                let f = Feedback {
+                    report: if tick == 0 { report(second) } else { None },
+                    ..fb(c)
+                };
+                c.tick(f, TICK);
+                if c.take_bwe_reanchor().is_some() {
+                    taken.push((second, c.last_reanchor().expect("details")));
+                }
+                let _ = c.take_brake_event();
+                if views.last() != Some(&c.reopen_view) {
+                    views.push(c.reopen_view);
+                }
+            }
+        }
+        (taken, views)
+    }
+
+    fn reopened_at(taken: &[(usize, Reanchor)]) -> Vec<usize> {
+        taken
+            .iter()
+            .filter(|(_, r)| r.trigger == ReanchorTrigger::Reopen)
+            .map(|&(s, _)| s)
+            .collect()
+    }
+
+    /// A background hold on the lossy path, its restart at the held estimate, and `secs` seconds
+    /// of the resumed video carried at it: the hole that follows begins that long after our own
+    /// restart.
+    fn woken(mut c: QualityController, secs: usize) -> QualityController {
+        assert!(
+            c.resume_after_hold(Duration::from_secs(60), 15_142)
+                .reanchor_due
+        );
+        assert_eq!(c.reanchor_after_hold(15_142).refused, None);
+        assert!(c.take_bwe_reanchor().is_some(), "the hold's restart");
+        for second in 0..secs {
+            let rtt = [221, 229, 216, 224][second % 4];
+            one_second(&mut c, |c| handover(c, 15_142, 11_500), fresh(rtt, 3.0, 50));
+        }
+        assert_eq!(c.take_bwe_reanchor(), None, "no other restart meanwhile");
+        let _ = c.take_brake_event();
+        c
+    }
+
+    /// The recorded shape: the hold's restart, and the estimate under the stuck line three seconds
+    /// after it.
+    fn restarted_before_the_hole() -> QualityController {
+        woken(on_the_lossy_path_at_1080p60(), 3)
+    }
+
+    /// The recorded hole, as it stood after the hold's restart: an estimate of ~200 kbps on a path
+    /// that carried 15 Mbps, the round trip at its baseline and 3% loss. The opening runs again
+    /// once the estimate has been stuck for [`STUCK_FOR`], from str0m's opening value, with the
+    /// opening's probe cap, and the ladder's network arms hold the rung while it confirms.
+    #[test]
+    fn a_stuck_estimate_on_a_quiet_path_runs_the_opening_again() {
+        let mut c = restarted_before_the_hole();
+        assert!(c.session_peak_kbps >= 15_000, "{}", c.session_peak_kbps);
+        let (taken, _) = reopenings(&mut c, 4, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        let (second, r) = taken[0];
+        assert_eq!(r.trigger, ReanchorTrigger::Reopen);
+        assert_eq!(second, 2, "after STUCK_FOR (its third second), not before");
+        assert_eq!(
+            r.kbps, STR0M_OPENING_KBPS,
+            "from str0m's opening value, not the old peak"
+        );
+        assert!(r.probe_cap_kbps.is_some(), "with the opening's probes");
+        assert!(c.probe_opening(), "the probe target is the opening's");
+        let rung = c.current();
+        let (_, _) = reopenings(&mut c, 3, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(
+            c.current(),
+            rung,
+            "no descent while the opening confirms the rung"
+        );
+    }
+
+    /// Not on a path that holds a queue, under a brake, with the receiver silent, without a
+    /// baseline, inside a re-anchor's window, while a clean collapse is held, on a still screen,
+    /// for light content that never binds the pacer, or while the page is hidden.
+    #[test]
+    fn a_stuck_estimate_is_not_reopened_against_the_receivers_word() {
+        // A round trip past the queue line twice engages the brake as well: either word refuses.
+        type Reports = fn(usize) -> Option<ReceiverReport>;
+        let cases: [(&[&str], Reports); 3] = [
+            (&["rtt", "brake"], |_| fresh(600, 3.0, 9)),
+            (&["brake"], |_| fresh(221, 15.0, 30)),
+            (&["no-report"], |_| None),
+        ];
+        for (why, report) in cases {
+            let mut c = restarted_before_the_hole();
+            let (taken, views) = reopenings(&mut c, 30, |c| in_the_hole(c, 200), report);
+            assert!(reopened_at(&taken).is_empty(), "{why:?}: {taken:?}");
+            assert!(why.contains(&c.reopen_view), "{why:?}: {views:?}");
+        }
+
+        // One report past the queue line: the brake waits for a second one, the rule for two clean
+        // seconds after it.
+        let mut c = restarted_before_the_hole();
+        let (taken, views) = reopenings(
+            &mut c,
+            6,
+            |c| in_the_hole(c, 200),
+            |s| fresh(if s == 1 { 600 } else { 221 }, 3.0, 9),
+        );
+        assert!(views.contains(&"rtt"), "{views:?}");
+        assert_eq!(c.brake_kbps(), None, "one report is no brake");
+        assert!(reopened_at(&taken).iter().all(|&s| s >= 3), "{taken:?}");
+
+        // The media on a less direct pair: the baseline starts over and the first reports set it.
+        let mut c = restarted_before_the_hole();
+        c.note_path_move(
+            "selected_pair",
+            Some(PathKind::Reflexive),
+            Some(PathKind::Relay),
+        );
+        let (taken, views) = reopenings(
+            &mut c,
+            4,
+            |c| in_the_hole(c, 200),
+            |s| (s > 0).then_some(()).and(fresh(221, 3.0, 9)),
+        );
+        assert!(views.contains(&"no-baseline"), "{views:?}");
+        assert!(
+            reopened_at(&taken).iter().all(|&s| s >= 3),
+            "not before three reports have set the baseline: {taken:?}"
+        );
+
+        // A hold's restart: the reopening waits out its window.
+        let mut c = on_the_lossy_path_at_1080p60();
+        let _ = c.resume_after_hold(Duration::from_secs(60), 200);
+        let _ = c.reanchor_after_hold(200);
+        let _ = c.take_bwe_reanchor();
+        let (taken, views) = reopenings(&mut c, 7, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(views.contains(&"window"), "{views:?}");
+        // REANCHOR_EVERY from the restart: its 25th tick, the last of the fifth second.
+        assert_eq!(reopened_at(&taken), vec![4], "{taken:?}");
+
+        // A clean path: the clean collapse takes it and is held; no reopening meanwhile.
+        let mut c = on_the_lossy_path_at_1080p60();
+        for _ in 0..11 {
+            one_second(&mut c, |c| handover(c, 15_142, 11_500), fresh(221, 0.0, 0));
+        }
+        let (taken, views) = reopenings(&mut c, 5, |c| in_the_hole(c, 200), |_| fresh(221, 0.0, 0));
+        assert!(
+            taken
+                .iter()
+                .any(|(_, r)| r.trigger == ReanchorTrigger::CleanCollapse),
+            "{taken:?}"
+        );
+        assert!(views.contains(&"holding"), "{views:?}");
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+
+        let mut c = restarted_before_the_hole();
+        let (taken, _) = reopenings(&mut c, 30, |c| gone_still(c, 200), |_| fresh(221, 3.0, 0));
+        assert!(taken.is_empty(), "a still screen needs nothing: {taken:?}");
+        assert_eq!(c.reopen_view, "no-demand");
+
+        // Light content under the line that spends what it is given without binding the pacer.
+        let mut c = restarted_before_the_hole();
+        let light = |c: &QualityController| Feedback {
+            produced_kbps: 200,
+            ..handover(c, 900, 250)
+        };
+        let (taken, _) = reopenings(&mut c, 60, light, |_| fresh(221, 3.0, 2));
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "no-demand");
+
+        let mut c = restarted_before_the_hole();
+        c.set_page_hidden(true);
+        let (taken, _) = reopenings(&mut c, 30, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "hidden");
+    }
+
+    /// A fast path, then a narrow one after the hold's restart (home Wi-Fi to weak mobile): the
+    /// reopenings go out at 20, 40 and 80 s spacing, none lifts the estimate, and after the fourth
+    /// the session peak learns
+    /// what they found, so the stream is not stuck against it and they stop. A rise under load
+    /// raises the peak again.
+    #[test]
+    fn reopenings_on_a_narrow_path_stop_once_the_peak_learns() {
+        let mut c = restarted_before_the_hole();
+        // The narrow path carries what is sent: egress in the loaded band at 900 kbps.
+        let narrow = |c: &QualityController| Feedback {
+            produced_kbps: 1_000,
+            queue_age_ms: 100,
+            ..handover(c, 900, 800)
+        };
+        let (taken, _) = reopenings(&mut c, 400, narrow, |_| fresh(221, 3.0, 9));
+        let at = reopened_at(&taken);
+        assert_eq!(
+            at,
+            vec![2, 22, 62, 142],
+            "four, spaced 20, 40, 80 s, then none"
+        );
+        assert_eq!(
+            c.session_peak_kbps, 900,
+            "the most the estimate reached since the first"
+        );
+        assert_eq!(
+            c.reopen_view, "-",
+            "not stuck against what the path answered"
+        );
+
+        one_second(&mut c, |c| handover(c, 8_000, 7_000), fresh(221, 3.0, 9));
+        assert!(c.session_peak_kbps >= 8_000, "{}", c.session_peak_kbps);
+    }
+
+    /// A reopening a calibration sweep kept from congestion control is no attempt: its back-off
+    /// step is taken back.
+    #[test]
+    fn a_reopening_that_never_went_out_is_not_counted() {
+        let mut c = restarted_before_the_hole();
+        let (taken, _) = reopenings(&mut c, 3, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(reopened_at(&taken), vec![2]);
+        assert_eq!(c.reopen_backoff, 1);
+        c.reanchor_not_sent();
+        assert_eq!(c.reopen_backoff, 0);
+    }
+
+    /// A reopening decided on a tick the encoder binds the pacer with nothing queued: on the ticks
+    /// after it the budget is the restarted estimate's, not the evidence the reopening kept.
+    #[test]
+    fn a_reopening_with_nothing_queued_prices_the_budget_at_the_restart() {
+        let mut c = restarted_before_the_hole();
+        let (taken, _) = reopenings(&mut c, 3, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        let restart = reopened_at(&taken)
+            .first()
+            .map(|_| taken[0].1.kbps)
+            .expect("reopened");
+        assert!(
+            c.capacity_kbps() > restart,
+            "the evidence is kept as a reference"
+        );
+        for _ in 0..10 {
+            c.tick(in_the_hole(&c, 600), TICK);
+            assert!(
+                c.unpushed_kbps() <= restart,
+                "budget {} over the restart value {restart}",
+                c.unpushed_kbps()
+            );
+        }
+    }
+
+    /// The recorded hole is no narrow path: four reopenings into a stream trickling the floor
+    /// budget under the estimate teach nothing, so the peak stands and they go on at the longest
+    /// spacing, all in the one stretch the hold's restart began.
+    #[test]
+    fn reopenings_in_a_hole_that_never_carried_keep_going() {
+        let mut c = restarted_before_the_hole();
+        let peak = c.session_peak_kbps;
+        let (taken, _) = reopenings(&mut c, 400, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(reopened_at(&taken), vec![2, 22, 62, 142, 302]);
+        assert_eq!(c.session_peak_kbps, peak);
+    }
+
+    /// A long still screen after a high peak: the floor decays to 120 with the estimate at the
+    /// padding rate, and the encoder spends nothing of it — no demand, no reopening.
+    #[test]
+    fn a_long_still_screen_is_not_reopened() {
+        let mut c = restarted_before_the_hole();
+        let (taken, _) = reopenings(&mut c, 180, |c| gone_still(c, 90), |_| fresh(221, 3.0, 0));
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "no-demand");
+    }
+
+    // ── whose collapse it is ────────────────────────────────────────────────────────────────────
+
+    /// The bench's mid-session dip: no restart for a minute, then the path narrows and the
+    /// estimate falls far under the line, with the receiver at its baseline (we send under the
+    /// narrow path). The stretch is the path's: str0m's own recovery is left alone however long
+    /// it lasts, and nothing is reopened once it is over.
+    #[test]
+    fn a_dip_of_the_paths_own_is_never_reopened() {
+        let mut c = on_the_lossy_path_at_1080p60();
+        assert!(
+            c.since_reanchor >= RESTART_COLLAPSE_WITHIN,
+            "no restart nearby"
+        );
+        let (taken, views) =
+            reopenings(&mut c, 120, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path", "{views:?}");
+        assert!(
+            !views.contains(&"due") && !views.contains(&"window"),
+            "{views:?}"
+        );
+        assert_eq!(c.stuck_stretch.map(|s| s.after_restart), Some(false));
+
+        // str0m's recovery: the estimate climbs back by itself, through the band between the line
+        // and four times it, and the stretch ends.
+        let (taken, _) = reopenings(
+            &mut c,
+            30,
+            |c| handover(c, 2_000, 1_800),
+            |_| fresh(221, 3.0, 9),
+        );
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.stuck_stretch, None);
+        let (taken, _) = reopenings(
+            &mut c,
+            60,
+            |c| handover(c, 15_142, 11_500),
+            |_| fresh(221, 3.0, 50),
+        );
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "-");
+    }
+
+    /// A hold's restart ends a stretch of the path's: the same hole after it is the restart's own
+    /// collapse, and is reopened.
+    #[test]
+    fn a_hold_ends_a_stretch_of_the_paths() {
+        let mut c = on_the_lossy_path_at_1080p60();
+        let (taken, _) = reopenings(&mut c, 10, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path");
+        assert!(
+            c.resume_after_hold(Duration::from_secs(60), 200)
+                .reanchor_due
+        );
+        assert_eq!(c.stuck_stretch, None, "the hold ends the stretch");
+        assert_eq!(c.reanchor_after_hold(200).refused, None);
+        let _ = c.take_bwe_reanchor();
+        let (taken, _) = reopenings(&mut c, 7, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(reopened_at(&taken), vec![4], "{taken:?}");
+    }
+
+    /// A Wi-Fi to LTE handover: the estimate falls under the line in the silence with no restart
+    /// near (the path's), then ICE moves relay → reflexive and the re-probe restarts str0m inside
+    /// the stretch, at the low estimate. Its own recovery is gone: the stretch is the restart's
+    /// now, and is reopened.
+    #[test]
+    fn a_path_re_probe_inside_a_stretch_of_the_paths_makes_it_ours() {
+        let mut c = on_the_lossy_path_at_1080p60();
+        let (taken, _) = reopenings(&mut c, 10, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path");
+        c.note_path_move(
+            "transport",
+            Some(PathKind::Reflexive),
+            Some(PathKind::Relay),
+        );
+        c.note_path_move(
+            "transport",
+            Some(PathKind::Relay),
+            Some(PathKind::Reflexive),
+        );
+        let (taken, views) =
+            reopenings(&mut c, 30, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(
+            taken.first().map(|(_, r)| r.trigger),
+            Some(ReanchorTrigger::PathChange),
+            "{taken:?}"
+        );
+        assert!(!reopened_at(&taken).is_empty(), "{taken:?}: {views:?}");
+        assert!(!views.contains(&"path"), "{views:?}");
+        assert_eq!(c.stuck_stretch.map(|s| s.after_restart), Some(true));
+    }
+
+    /// The same for a clean collapse's re-anchor inside a stretch of the path's: the receiver
+    /// stops reporting loss for a while, the collapse is re-anchored and held, and once the loss
+    /// is back the stretch, now the restart's, is reopened.
+    #[test]
+    fn a_clean_collapse_inside_a_stretch_of_the_paths_makes_it_ours() {
+        let mut c = on_the_lossy_path_at_1080p60();
+        let (taken, _) = reopenings(&mut c, 10, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path");
+        let mut collapsed = false;
+        for _ in 0..30 {
+            let (taken, _) = reopenings(&mut c, 1, |c| in_the_hole(c, 200), |_| fresh(221, 0.0, 0));
+            assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+            if taken
+                .iter()
+                .any(|(_, r)| r.trigger == ReanchorTrigger::CleanCollapse)
+            {
+                collapsed = true;
+                break;
+            }
+        }
+        assert!(collapsed, "the clean collapse is re-anchored");
+        let (taken, views) =
+            reopenings(&mut c, 30, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(!reopened_at(&taken).is_empty(), "{taken:?}: {views:?}");
+        assert_eq!(c.stuck_stretch.map(|s| s.after_restart), Some(true));
+    }
+
+    /// A collapse within [`RESTART_COLLAPSE_WITHIN`] of a path change's re-probe is the restart's
+    /// own, as after a hold's (the recorded resume's two restarts): reopened.
+    #[test]
+    fn a_collapse_after_a_path_change_re_probe_is_reopened() {
+        let mut c = on_the_lossy_path_at_1080p60();
+        c.note_path_move(
+            "transport",
+            Some(PathKind::Reflexive),
+            Some(PathKind::Relay),
+        );
+        c.note_path_move(
+            "transport",
+            Some(PathKind::Relay),
+            Some(PathKind::Reflexive),
+        );
+        one_second(&mut c, |c| handover(c, 15_142, 11_500), fresh(221, 3.0, 50));
+        assert_eq!(
+            c.last_reanchor().map(|r| r.trigger),
+            Some(ReanchorTrigger::PathChange)
+        );
+        let _ = c.take_bwe_reanchor();
+        let (taken, _) = reopenings(&mut c, 30, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(!reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.stuck_stretch.map(|s| s.after_restart), Some(true));
+    }
+
+    /// The window's edge: a hole beginning seven seconds after the hold's restart is its collapse
+    /// and is reopened; one beginning eight seconds after it is the path's, and is not.
+    #[test]
+    fn a_collapse_later_than_the_window_after_a_restart_is_the_paths() {
+        let mut c = woken(on_the_lossy_path_at_1080p60(), 7);
+        let (taken, _) = reopenings(&mut c, 30, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(reopened_at(&taken), vec![2, 22], "{taken:?}");
+
+        let mut c = woken(on_the_lossy_path_at_1080p60(), 8);
+        let (taken, views) =
+            reopenings(&mut c, 60, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path", "{views:?}");
+        let s = c.stuck_stretch.expect("stuck");
+        assert!(!s.after_restart);
+        assert!(s.since_reanchor >= RESTART_COLLAPSE_WITHIN, "{s:?}");
+    }
+
+    /// The bench's wake into a path left narrow for 25 s: the first reopening goes into the narrow
+    /// path and fails, the estimate creeps to just over the line, and the run goes on: the second
+    /// attempt at its back-off. Past four times the line the run is over, and a later dip with no
+    /// restart near it is the path's.
+    #[test]
+    fn a_reopening_run_goes_on_until_it_lifts_the_estimate() {
+        let mut c = restarted_before_the_hole();
+        let line = c.session_peak_kbps / STUCK_DIVISOR;
+        let (taken, _) = reopenings(&mut c, 3, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert_eq!(reopened_at(&taken), vec![2]);
+
+        // Over the line and under four times it, the encoder asking for more than the pacer drains.
+        let crept = line * 3 / 2;
+        let creeping = |c: &QualityController| Feedback {
+            produced_kbps: crept * 2,
+            queue_age_ms: 200,
+            ..handover(c, crept, crept * 9 / 10)
+        };
+        let (taken, views) = reopenings(&mut c, 30, creeping, |_| fresh(221, 3.0, 9));
+        assert_eq!(
+            reopened_at(&taken),
+            vec![19],
+            "the second attempt, 20 s after the first: {views:?}"
+        );
+        assert!(views.contains(&"back-off"), "{views:?}");
+        assert_eq!(c.reopen_backoff, 2);
+
+        // Lifted past four times the line: the run is over and the stretch with it.
+        let (taken, _) = reopenings(
+            &mut c,
+            20,
+            |c| handover(c, line * 5, line * 4),
+            |_| fresh(221, 3.0, 50),
+        );
+        assert!(reopened_at(&taken).is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_backoff, 0);
+        assert_eq!(c.stuck_stretch, None);
+
+        let (taken, _) = reopenings(&mut c, 60, |c| in_the_hole(c, 200), |_| fresh(221, 3.0, 9));
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(c.reopen_view, "path");
     }
 }

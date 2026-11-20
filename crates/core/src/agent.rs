@@ -12484,6 +12484,7 @@ fn spawn_media_control(peer: MediaPeerGauges, args: MediaControl) -> tokio::task
                         trigger,
                         "bwe re-anchor not sent: a calibration sweep owns the actuators"
                     );
+                    quality.reanchor_not_sent();
                 } else if let Err(e) = control_tx.try_send(control) {
                     // The controller has already started holding the collapse on the
                     // assumption that this went out; it will see the estimate not come
@@ -12494,6 +12495,7 @@ fn spawn_media_control(peer: MediaPeerGauges, args: MediaControl) -> tokio::task
                         error = %e,
                         "bwe re-anchor dropped: the peer's control channel refused it"
                     );
+                    quality.reanchor_not_sent();
                 } else {
                     tracing::info!(
                         trigger,
@@ -12546,6 +12548,12 @@ fn spawn_media_control(peer: MediaPeerGauges, args: MediaControl) -> tokio::task
                             Some(crate::quality::ReanchorTrigger::PathChange) => {
                                 "bwe re-anchor requested: the media moved to a more direct \
                                  path; str0m's opening probes run again on it from the live \
+                                 estimate, up to twice the probe target (probe_cap_kbps)"
+                            }
+                            Some(crate::quality::ReanchorTrigger::Reopen) => {
+                                "bwe re-anchor requested: the estimate has been stuck far \
+                                 under what this session carried while the receiver sees no \
+                                 queue on the path; str0m's opening runs again from the \
                                  estimate, up to twice the probe target (probe_cap_kbps)"
                             }
                             _ => {

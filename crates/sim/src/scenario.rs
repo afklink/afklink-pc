@@ -35,6 +35,9 @@
 //! wake_before_visible_ms = 800  # it wakes this long before its `vis hidden: false` arrives
 //! asleep_backlog = "buffer" # what reaches it asleep waits for it (a relay over TCP), or "drop"
 //! stale_rtt_ms = 11000      # the round trip its first report after waking carries; 0 for none
+//! path_moves = [[600.2, "relay"], [600.4, "reflexive"]]  # the media pair's kind changes there
+//!                           # (an ICE restart's relay first, then the direct pair), told to the
+//!                           # controller as the transport tells the agent's; the link is unchanged
 //! str0m = "0.23.1"          # the viewer's str0m, "0.23.1" or "0.24.1"; without it
 //!                           # AFKLINK_SIM_VIEWER_STR0M, then the default (`crate::viewer::ViewerStr0m`)
 //!
@@ -142,6 +145,7 @@ struct RawViewer {
     asleep_backlog: Option<String>,
     stale_rtt_ms: Option<f64>,
     str0m: Option<String>,
+    path_moves: Option<Vec<(f64, String)>>,
 }
 
 /// What reaches a sleeping viewer. See [`AsleepViewer`].
@@ -217,6 +221,11 @@ pub struct Scenario {
     pub hidden: Vec<(Duration, Duration)>,
     /// Whether the page sleeps while hidden, and how. See [`AsleepViewer`].
     pub asleep: Option<AsleepViewer>,
+    /// When the media's candidate pair changes kind, as seconds into the session, in order: told
+    /// to the controller as `QualityController::note_path_move` from the pair before (reflexive
+    /// before the first) to this one, as the agent's control task does for the transport's path
+    /// gauge. Only the kind moves; the link stays as configured.
+    pub path_moves: Vec<(Duration, afklink_core::quality::PathKind)>,
     pub sender: SenderConfig,
     /// `0` is the production encoder (`OpenH264Encoder::with_defaults`).
     pub encoder_threads: u16,
@@ -418,6 +427,23 @@ impl Scenario {
             hidden.windows(2).all(|w| w[0].1 <= w[1].0),
             "viewer.hidden windows must be in time order and not overlap"
         );
+        let mut path_moves = Vec::new();
+        for (at, kind) in raw.viewer.path_moves.as_deref().unwrap_or_default() {
+            use afklink_core::quality::PathKind;
+            let kind = match kind.as_str() {
+                "relay" => PathKind::Relay,
+                "reflexive" => PathKind::Reflexive,
+                "host" => PathKind::Host,
+                other => anyhow::bail!(
+                    "viewer.path_moves: a kind is relay, reflexive or host, got {other:?}"
+                ),
+            };
+            path_moves.push((ms(at * 1e3, "viewer.path_moves")?, kind));
+        }
+        anyhow::ensure!(
+            path_moves.windows(2).all(|w| w[0].0 <= w[1].0),
+            "viewer.path_moves must be in time order"
+        );
         let asleep = if raw.viewer.asleep_when_hidden.unwrap_or(false) {
             Some(AsleepViewer {
                 wake_before_visible: ms(
@@ -494,6 +520,7 @@ impl Scenario {
             pin_height: raw.viewer.pin_height,
             hidden,
             asleep,
+            path_moves,
             sender,
             encoder_threads: raw.encoder.threads.unwrap_or(0),
             encode_cost,
