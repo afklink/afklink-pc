@@ -73,6 +73,8 @@ struct FakePc {
     driver_open: bool,
     /// Mouse buttons the paths hold, as their books say.
     buttons: u32,
+    /// Windows whose process was opened for a line (`describe`).
+    described: u32,
 }
 
 impl FakePc {
@@ -93,6 +95,7 @@ impl FakePc {
             }),
             driver_open: true,
             buttons: 0,
+            described: 0,
         }
     }
 }
@@ -120,6 +123,7 @@ impl GuardHost for FakePc {
             window != GAME && window != GAME_DIALOG,
             "the game's own process is never opened"
         );
+        self.described += 1;
         let exe = if window == OVERLAY {
             "overlay.exe"
         } else {
@@ -841,6 +845,193 @@ fn a_press_lands_only_on_a_window_of_the_games_process() {
     );
     // Moves are not presses: they are confined by the planner, not dropped here.
     assert!(r.passes(m(0.99, 0.01)));
+}
+
+/* ── The game in front, but covered where the viewer presses ── */
+
+/// The game has the front, but another program's window lies over it at the press point: the
+/// press is dropped and from then the focus watch says `unfocused` (no release: the game still has
+/// the front), until a press lands on the game.
+#[test]
+fn a_press_dropped_over_another_window_makes_the_watch_say_unfocused_until_one_lands() {
+    let mut r = Rig::new();
+    r.pc.overlay = Some((3000, 47, 3588, 400));
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+
+    r.pc.target = Some((3200, 200));
+    assert!(
+        !r.passes(InputMessage::Down { b: 0 }),
+        "the cover swallows no click"
+    );
+    assert!(r.passes(InputMessage::Up { b: 0 }));
+    r.at(100);
+    assert_eq!(
+        r.watch(&game()),
+        (GameFocus::Unfocused, false),
+        "covered: told unfocused, nothing released (the game still has the front)"
+    );
+    // Moves and keys still go to the game: it has the front.
+    assert!(r.passes(m(0.5, 0.5)));
+    assert!(r.passes(key("KeyQ", true)));
+    assert!(r.passes(key("KeyQ", false)));
+    r.at(200);
+    assert!(!r.passes(InputMessage::Down { b: 0 }), "still covered");
+    assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+
+    // The cover is gone (raised above it, or closed): the next press lands, and the mark goes.
+    r.pc.overlay = None;
+    r.at(300);
+    assert!(r.passes(InputMessage::Down { b: 0 }));
+    assert!(r.passes(InputMessage::Up { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+}
+
+/// Covered is not armed: the game has the front, so a press on the cover asks for no activation
+/// click and no `SetForegroundWindow`, however often it comes.
+#[test]
+fn a_covered_game_never_arms_nor_clicks() {
+    let mut r = Rig::new();
+    r.pc.overlay = Some((3000, 47, 3588, 400));
+    r.admit(m(0.95, 0.05), &game());
+    r.pc.target = Some((3200, 200));
+    for i in 0..10 {
+        r.at(i * 1_500);
+        let admitted = r.admit(InputMessage::Down { b: 0 }, &game());
+        assert_eq!(admitted.event, None, "the cover swallows no click");
+        assert_eq!(admitted.activate, None, "no activation click");
+        assert!(!admitted.release);
+        assert!(r.passes(InputMessage::Up { b: 0 }));
+        assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+    }
+    assert!(
+        r.pc.attempts.is_empty(),
+        "the game is never asked back: it has the front"
+    );
+    assert_eq!(r.guard.armed, None);
+}
+
+/// A press that is dropped for another reason — where it lands unknown, the window there unreadable
+/// — or one that lands on a child window embedded in the game, does not mark the game covered.
+#[test]
+fn only_another_programs_window_at_the_press_marks_the_game_covered() {
+    let mut r = Rig::new();
+    r.pc.target = None;
+    assert!(!r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+    r.pc.target = Some((1800, 1181));
+    r.pc.window_error = true;
+    assert!(!r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+    r.pc.window_error = false;
+    r.pc.embedded = Some((100, 2000, 600, 2300));
+    r.pc.target = Some((300, 2100));
+    assert!(r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+}
+
+/// The mark belongs to the look it was found in: the game losing the front, not being shown, or its
+/// window changing clears it, and the game back in front is `focused` again.
+#[test]
+fn the_covered_mark_goes_when_the_look_changes() {
+    let mut r = Rig::new();
+    r.pc.overlay = Some((3000, 47, 3588, 400));
+    r.pc.target = Some((3200, 200));
+    assert!(!r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+
+    // Another window takes the front, then the game has it again.
+    r.pc.foreground = NOTEPAD;
+    r.at(100);
+    assert_eq!(r.watch(&game()), (GameFocus::Unfocused, true));
+    r.pc.foreground = GAME;
+    r.at(200);
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+
+    // Covered again; the game's window goes (not shown), then comes back.
+    assert!(!r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+    r.at(300);
+    assert_eq!(
+        r.watch(&not_shown(GameWindowState::Minimized)),
+        (GameFocus::NotShown, true)
+    );
+    r.at(400);
+    assert_eq!(r.watch(&game()), (GameFocus::Focused, false));
+
+    // Covered again; the game relaunched: a new window of its in front.
+    assert!(!r.passes(InputMessage::Down { b: 0 }));
+    assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+    let relaunched = InputScope::Game(GameScope {
+        state: GameWindowState::Shown,
+        window: Some(GameInputWindow {
+            hwnd: GAME_DIALOG,
+            pid: GAME_PID,
+            client: client(),
+        }),
+    });
+    r.pc.foreground = GAME_DIALOG;
+    r.at(500);
+    assert_eq!(r.watch(&relaunched), (GameFocus::Focused, false));
+}
+
+/// The mark's setting names the window over the game (its exe), and its clearing says why; a flood
+/// of presses on the cover opens no process past the gated line.
+#[test]
+fn the_covered_mark_is_said_when_set_and_cleared_and_the_flood_stays_cheap() {
+    let mut described = 0;
+    let log = logged(tracing::Level::DEBUG, || {
+        let mut r = Rig::new();
+        r.pc.overlay = Some((3000, 47, 3588, 400));
+        r.pc.target = Some((3200, 200));
+        assert!(!r.passes(InputMessage::Down { b: 0 }));
+        for i in 1..=50 {
+            r.at(i * 10);
+            assert!(!r.passes(InputMessage::Down { b: 0 }));
+            assert!(r.passes(InputMessage::Up { b: 0 }));
+        }
+        described = r.pc.described;
+        // The second's line, while covered.
+        r.at(1_000);
+        assert_eq!(r.watch(&game()), (GameFocus::Unfocused, false));
+        r.pc.overlay = None;
+        r.at(1_100);
+        assert!(r.passes(InputMessage::Down { b: 0 }));
+        r.at(2_200);
+        r.admit(m(0.5, 0.5), &game());
+    });
+    assert_eq!(
+        described, 1,
+        "one process opened for 51 presses on the same cover"
+    );
+    let set = log
+        .lines()
+        .find(|l| l.contains("taken as covered"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no covered line:
+{log}"
+            )
+        });
+    for said in ["overlay.exe", "elevated=false", "game_pid=6888"] {
+        assert!(set.contains(said), "{said:?} missing: {set}");
+    }
+    let cleared = log
+        .lines()
+        .find(|l| l.contains("no longer covered: a press landed"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no clearing line:
+{log}"
+            )
+        });
+    assert!(cleared.contains("was_pid=5151"), "{cleared}");
+    assert!(
+        log.contains("covered=true"),
+        "the second's line says it:
+{log}"
+    );
+    // The look, the mark, the gated burst of drops, two seconds' lines, the clearing.
+    assert!(log.lines().count() <= 14, "{log}");
 }
 
 /* ── Logs ── */

@@ -103,6 +103,7 @@ export const ru = {
   "app.gameHelperConfirm": "Разрешить",
   "app.gameHelperUpdate": "Нужно обновление",
   "app.gameHelperUpdateInstall": "Обновить",
+  "app.gameHelperUpdateHint": "Автозапуск игры: нужно обновление",
   "app.gameHelperFound": "Найден другой файл запуска",
   "app.gameHelperApply": "Заменить",
   "app.gameHelperGaveUp": "Игра не запускается",

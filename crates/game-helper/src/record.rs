@@ -41,9 +41,9 @@ impl RunLevel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub format: u32,
-    /// SHA-256 (lowercase hex) of the helper exe the setup installed with this record: the app
-    /// compares it with the helper it carries, so an update of the app is not a silent downgrade
-    /// or upgrade of the helper.
+    /// SHA-256 (lowercase hex) of the helper exe the setup installed with this record: which exe
+    /// it is, for the logs. It changes with every build (the exe embeds the app's version), so the
+    /// app does not judge the installation by it: [`Record::helper_revision`] does that.
     pub helper_sha256: String,
     /// The owner: the task runs in this account's session only.
     pub sid: String,
@@ -65,6 +65,13 @@ pub struct Record {
     /// skips it, and this one reads an older record without it.
     #[serde(default)]
     pub task_priority: Option<u8>,
+    /// The revision of the helper installed with this record ([`crate::HELPER_REVISION`]): the app
+    /// asks for the setup again («Нужно обновление») while it is not the one the app carries — an
+    /// older or a newer one alike. `None`: a setup from before revisions, taken as 0, so asked
+    /// once. A field with a default, as `task_priority`: an older app or helper skips it, and this
+    /// one reads an older record without it.
+    #[serde(default)]
+    pub helper_revision: Option<u32>,
 }
 
 impl Record {
@@ -338,6 +345,7 @@ pub(crate) mod tests {
             run_level_why: "manifest requireAdministrator; no RUNASADMIN layer".into(),
             written_ms: 1_790_000_000_000,
             task_priority: Some(crate::TASK_PRIORITY),
+            helper_revision: Some(crate::HELPER_REVISION),
         }
     }
 
@@ -355,6 +363,24 @@ pub(crate) mod tests {
                 ..record()
             }
         );
+        // A record from before revisions has none: read all the same, as `None`.
+        let mut old: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("helper_revision");
+        assert_eq!(
+            Record::parse(old.to_string().as_bytes()).unwrap(),
+            Record {
+                helper_revision: None,
+                ..record()
+            }
+        );
+        // A newer setup's record, with a field this build does not know: read all the same (an
+        // app downgraded over a newer helper reads it, and asks for its own setup by revision).
+        let mut newer: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        newer
+            .as_object_mut()
+            .unwrap()
+            .insert("a_later_field".into(), serde_json::json!({ "any": [1, 2] }));
+        assert_eq!(Record::parse(newer.to_string().as_bytes()).unwrap(), r);
         for broken in [
             Record {
                 format: 2,

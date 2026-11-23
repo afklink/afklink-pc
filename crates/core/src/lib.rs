@@ -20,6 +20,7 @@ pub mod game_access;
 pub mod game_input;
 pub mod goodbye;
 pub mod identity;
+mod input_drain;
 mod input_reach;
 mod input_rhythm;
 mod input_session;

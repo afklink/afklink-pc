@@ -645,6 +645,11 @@ fn get_status(
             sessions: sessions.len(),
             refused: refusal.is_some(),
             pairing_request: pending_pair.is_some(),
+            // An atomic the helper's thread keeps (`GameHelper::update_due`): no lock, no read
+            // here on the main thread. Not managed yet (before `setup`): no line.
+            game_helper_update: app
+                .try_state::<game_helper::GameHelper>()
+                .is_some_and(|helper| helper.update_due()),
         },
         journal
             .last()

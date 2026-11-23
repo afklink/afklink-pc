@@ -11,7 +11,10 @@
 //!   config.json across a restart, cleared by an install or a session whose input got through;
 //!   `driver_hint`). No row where the embedded installer does not run (not Windows x64).
 //! - «Только игра» — the mode and the bound game ([`GameRow`]), from config.json. «Только для гостей»
-//!   puts no mark on it: the `on` row shows the game's name alone.
+//!   puts no mark on it: the `on` row shows the game's name alone. Under it, while the game helper
+//!   is on and its installed revision is not this build's, a line asking for its update with
+//!   «Обновить» (`HomeDto::game_helper_update`, `GameHelper::update_due` — the same decision as
+//!   Settings' «Нужно обновление»).
 //! - «Доступ» — the window counts the bindings itself.
 //! - «Журнал» — the newest journal entry (`journal_view`), or «Пока пусто».
 //!
@@ -271,6 +274,8 @@ pub(crate) struct Inputs {
     pub(crate) refused: bool,
     /// A pairing request waits for the owner's answer (`AgentState::pending_pair`), for [`steps`].
     pub(crate) pairing_request: bool,
+    /// The game helper's update is asked for (`GameHelper::update_due`).
+    pub(crate) game_helper_update: bool,
 }
 
 /// The main view's card, as the window draws it.
@@ -280,6 +285,10 @@ pub(crate) struct HomeDto {
     game: GameRow,
     /// The bound game's name (its exe's), for the `on` row; `None` without a game.
     game_name: Option<String>,
+    /// The line under the game-only row: the game helper is on and outdated — another revision
+    /// installed — and «Обновить» beside it runs the update Settings offers (`update_game_helper`).
+    /// Gone once it is updated.
+    game_helper_update: bool,
     /// «Только для гостей», as config.json has it — not for the row, which carries no mark of it
     /// but for Settings' switch, which opens in its place before the section's
     /// own read answers.
@@ -300,6 +309,7 @@ pub(crate) struct HomeDto {
 struct Decided {
     driver: DriverRow,
     game: GameRow,
+    game_helper_update: bool,
     autostart_card: bool,
     zone: Zone,
     steps: Steps,
@@ -333,6 +343,7 @@ impl HomeLog {
             ),
             game: game_row(inputs.game_only, inputs.game.is_some()),
             game_name: inputs.game.clone(),
+            game_helper_update: inputs.game_helper_update,
             game_for_guests: inputs.game_only_for_guests,
             autostart_card,
             zone: zone(zone_inputs),
@@ -342,6 +353,7 @@ impl HomeLog {
         let now = Decided {
             driver: dto.driver,
             game: dto.game,
+            game_helper_update: dto.game_helper_update,
             autostart_card: dto.autostart_card,
             zone: dto.zone,
             steps: dto.steps,
@@ -368,6 +380,21 @@ impl HomeLog {
                 for_guests = inputs.game_only_for_guests,
                 game = inputs.game.as_deref().unwrap_or("-"),
                 "main view: the game-only row"
+            );
+        }
+        if was.map(|w| w.game_helper_update) != Some(now.game_helper_update) {
+            tracing::debug!(
+                shown = now.game_helper_update,
+                game = now.game.as_str(),
+                zone = now.zone.as_str(),
+                "main view: the game helper's update line {}",
+                if now.game_helper_update {
+                    "is shown under the game-only row (the helper is on and outdated), with \
+                     «Обновить»"
+                } else {
+                    "is not shown (the helper is up to date, off, or not installed as the settings \
+                     want)"
+                }
             );
         }
         if was.map(|w| w.autostart_card) != Some(now.autostart_card) {
@@ -591,6 +618,7 @@ mod tests {
             sessions: 0,
             refused: false,
             pairing_request: false,
+            game_helper_update: false,
         };
         let home = log.home(&inputs, None);
         assert_eq!(home.driver, DriverRow::NotInstalled);
@@ -618,6 +646,13 @@ mod tests {
         assert_eq!(home.game, GameRow::On);
         assert_eq!(home.game_name.as_deref(), Some("ScrydeGame.bin"));
         assert!(home.game_for_guests);
+        // The helper outdated: the line under the row, as `update_due` says.
+        assert!(!home.game_helper_update);
+        let outdated = Inputs {
+            game_helper_update: true,
+            ..guests
+        };
+        assert!(log.home(&outdated, None).game_helper_update);
     }
 
     /// The code entered and the request up by the tray, the main screen's steps must not still say
@@ -644,6 +679,7 @@ mod tests {
             sessions: 0,
             refused: false,
             pairing_request: false,
+            game_helper_update: false,
         };
         let home = log.home(&first_run, None);
         assert_eq!((home.zone, home.steps), (Zone::Steps, Steps::Start));

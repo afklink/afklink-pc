@@ -4,7 +4,8 @@
 //!
 //! A network that holds the data channel back and then lets it go shows as a gap followed by a
 //! burst: keys pressed apart on the phone arriving together on the PC, which a game reads as a chord
-//! (or a key held for the length of the gap). A gap of [`INPUT_SILENCE_RELEASE_MS`] or more is the
+//! (or a key held for the length of the gap); `crate::input_drain` keeps such a backlog from being
+//! injected, and its dropped messages still count here as they arrived. A gap of [`INPUT_SILENCE_RELEASE_MS`] or more is the
 //! viewer not sending input at all — the person stopped — and is not counted: past that much silence
 //! the agent releases what is held anyway.
 

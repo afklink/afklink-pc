@@ -9759,6 +9759,9 @@ impl Agent {
                 // Input is the hot path here — a moving mouse is sixty messages a second — so it
                 // is counted, and the count is one debug line every ten seconds while there is any.
                 let mut tally = InputTally::default();
+                // Input the network held back and released at once is not injected
+                // (`crate::input_drain`).
+                let mut drain = crate::input_drain::InputDrain::new(Instant::now());
                 // The viewer's reports on its decoder and screen, and its own keyframe requests.
                 // See `crate::viewer_report`.
                 let mut viewer_log = crate::viewer_report::ViewerReportLog::default();
@@ -9775,6 +9778,7 @@ impl Agent {
                         tracing::debug!(session = %sid, "input event task stopped: session already ended");
                         break transport::PeerEnd::Closed;
                     }
+                    drain.expire(Instant::now(), &sid);
                     tally.flush_if_due(Instant::now(), &sid);
                     // A viewer that is killed mid-drag sends nothing — no up, no `ra`,
                     // no close. Silence is therefore the only signal left, and after it
@@ -9819,7 +9823,25 @@ impl Agent {
                         }
                         PeerEvent::InputData(bytes) => {
                             if let Ok(s) = std::str::from_utf8(&bytes) {
-                                match InputMessage::parse(s) {
+                                let parsed = InputMessage::parse(s);
+                                let now = Instant::now();
+                                let admit = match &parsed {
+                                    Ok(m) => drain.admit(now, m, &sid),
+                                    Err(_) => crate::input_drain::Admit::Pass,
+                                };
+                                match parsed {
+                                    // Part of a backlog the network released at once: counted,
+                                    // not injected, and no evidence of anything (not a trigger of
+                                    // the background hold, not a pointer move the capture should
+                                    // show). A numbered move is acknowledged as one the injector
+                                    // dropped would be, so the viewer's marker lets go of it.
+                                    Ok(ie) if admit == crate::input_drain::Admit::Drop => {
+                                        tally.rhythm.note(now);
+                                        if let InputMessage::Rel { s: Some(s), .. } = ie {
+                                            rel_ack.note(s);
+                                        }
+                                        tally.drained();
+                                    }
                                     // Not an input event: the viewer is saying how much a pixel
                                     // is worth. Handled here rather than passed to the injector,
                                     // which has no business with it.
@@ -10174,6 +10196,7 @@ impl Agent {
                         }
                     }
                 };
+                drain.finish(Instant::now(), &sid);
                 tally.flush(&sid);
                 viewer_log.finish(&sid);
                 // Whatever the peer was holding, it is not going to release it now. On a thread of
@@ -11234,6 +11257,8 @@ struct InputTally {
     text_too_long: u64,
     /// Guest input held back from an AFKLink window (`crate::own_windows`).
     held_back: u64,
+    /// Input dropped as part of a backlog the network released at once (`crate::input_drain`).
+    drained: u64,
     first_failure_logged: bool,
     first_malformed_logged: bool,
     first_oversized_logged: bool,
@@ -11470,6 +11495,13 @@ impl InputTally {
         self.held_back += 1;
     }
 
+    /// Input dropped as part of a backlog: counted here; the drain says its start and end itself
+    /// (`crate::input_drain`).
+    fn drained(&mut self) {
+        self.touch();
+        self.drained += 1;
+    }
+
     /// Write the window's line if it is due. Called on every turn of the event loop, which turns
     /// at least every `afklink_protocol::INPUT_SILENCE_RELEASE_MS`.
     fn flush_if_due(&mut self, now: Instant, sid: &str) {
@@ -11495,6 +11527,7 @@ impl InputTally {
             + self.oversized
             + self.text_too_long
             + self.held_back
+            + self.drained
             > 0
         {
             let k = self.kinds;
@@ -11515,6 +11548,7 @@ impl InputTally {
                 oversized = self.oversized,
                 text_too_long = self.text_too_long,
                 held_back = self.held_back,
+                drained = self.drained,
                 burst_50ms,
                 gap_max_ms,
                 "input"
@@ -11527,6 +11561,7 @@ impl InputTally {
         self.oversized = 0;
         self.text_too_long = 0;
         self.held_back = 0;
+        self.drained = 0;
     }
 }
 

@@ -359,7 +359,7 @@ interface HelperActions {
  *   on, not as installed       «Нужно разрешение» (amber) + «Разрешить»: it does nothing until the
  *                              setup again — another game or file, the task gone, Windows' 740
  *   on, as installed           by what else is true, the first that is:
- *     another build's helper   «Нужно обновление» (amber) + «Обновить», in the file line's place: it
+ *     an outdated helper       «Нужно обновление» (amber) + «Обновить», in the file line's place: it
  *                              works on with the old build meanwhile, but without the new one's
  *                              fixes — updating it is all but a must. The pair is
  *                              built like «Нужно разрешение» + «Разрешить»: what is needed, amber,
@@ -376,10 +376,10 @@ interface HelperActions {
  * When they meet, the update goes first (updating the helper matters more than offering another
  * launch file):
  *
- *   another build's helper + a launcher learned     «Нужно обновление» alone. «Обновить» installs
+ *   an outdated helper + a launcher learned         «Нужно обновление» alone. «Обновить» installs
  *     this build's helper with the launch exe it has; if the found file still differs after it, the
  *     launcher's line comes, «Заменить» a step of its own;
- *   another build's helper + the game won't start   «Нужно обновление», and the red line under it.
+ *   an outdated helper + the game won't start       «Нужно обновление», and the red line under it.
  *     The old build may be what fails, and updating is the cheapest thing to try: one prompt, the
  *     same file, and its setup takes the mark off (a new `state.json`), so this build tries again
  *     at the next session. If it fails too, the file line + «Изменить» come back over the red line,

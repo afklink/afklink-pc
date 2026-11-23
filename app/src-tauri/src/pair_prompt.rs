@@ -5,7 +5,8 @@
 //! so the request does not move as the main window is opened or hidden. The window is shown without
 //! taking focus (`"focus": false` in `tauri.conf.json`), so a key meant for another app never lands
 //! on it. An answer closes it at once ([`Router::answer`]), without waiting for the orchestrator to
-//! clear the request.
+//! clear the request. Once shown it goes to the top of the always-on-top windows ([`top_of_band`]),
+//! so a game made always on top (by the game helper, or by itself) does not hide it.
 //!
 //! This module's thread decides; `get_status` hands the request (and its step) to both windows, and
 //! only the request window draws it. The thread ticks every [`TICK`] and is woken at once by what
@@ -336,6 +337,15 @@ impl Popup {
         self.parked = false;
         self.restepped = None;
         was
+    }
+
+    /// The request the window is up for now — shown, and not closed by hand: kept at the top of the
+    /// always-on-top windows every tick ([`top_of_band`]).
+    pub fn on_screen(&self) -> Option<&str> {
+        self.routed
+            .as_ref()
+            .filter(|_| self.shown && !self.parked)
+            .map(|(id, _)| id.as_str())
     }
 
     /// The window was closed by hand while up: parked. True when a request was routed here.
@@ -1170,7 +1180,7 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
         return;
     }
     let now = Instant::now();
-    let (change, step, page_scale, restep) = {
+    let (change, step, page_scale, restep, on_screen) = {
         let mut inner = afklink_core::lock(&prompt.inner);
         let change = inner
             .router
@@ -1195,7 +1205,8 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
             None => None,
         };
         let step = inner.popup.step(now);
-        (change, step, inner.popup.page_scale(), restep)
+        let on_screen = inner.popup.on_screen().map(str::to_string);
+        (change, step, inner.popup.page_scale(), restep, on_screen)
     };
     if let Some((request_id, at)) = &restep {
         tracing::debug!(
@@ -1212,6 +1223,12 @@ fn tick(app: &AppHandle, locale: Locale, toasted: &mut Option<String>) {
         apply_change(app, change, name, locale, toasted);
     }
     apply_step(app, step, page_scale, pending.as_ref(), locale, toasted);
+    // Every tick while it is up: a window made always on top after it (the game helper's raise
+    // posted to the game's thread before the request came, a game that pins itself again) does not
+    // stay above it longer than a tick.
+    if let Some(request_id) = &on_screen {
+        top_of_band(app, request_id);
+    }
 }
 
 fn apply_change(
@@ -1317,6 +1334,7 @@ fn apply_step(
     let title = title_popup(&w, locale, request_id);
     match w.show() {
         Ok(()) => {
+            top_of_band(app, request_id);
             // What the window is once shown: Windows (or DWM) must not have made it another size.
             if let Some(asked) = asked {
                 check_shown_size(request_id, asked, read_size(&w));
@@ -1350,6 +1368,84 @@ fn apply_step(
                 toasted,
             );
         }
+    }
+}
+
+/// The request window to the top of the always-on-top windows: when it is shown, and again every
+/// tick while it is up ([`Popup::on_screen`]), so it stays above a game the game helper made always
+/// on top or one always on top by itself. A game that makes itself always on top again can sit
+/// above it until the next tick; what an elevated game does with its own place is outside the
+/// agent's control. The decision waits for a person, so it must be seen. A window call, so on the
+/// main thread: posted, never waited on, at most one waiting at a time. Said when its outcome
+/// changes (a refusal as a warning), not every tick.
+fn top_of_band(app: &AppHandle, request_id: &str) {
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    static WAITING: AtomicBool = AtomicBool::new(false);
+    /// The last outcome: 0 none yet, 1 placed, 2 refused, 3 no handle, 4 no window.
+    static LAST: AtomicU8 = AtomicU8::new(0);
+    if WAITING.swap(true, Ordering::SeqCst) {
+        tracing::trace!(%request_id, "request window: a raise to the top waits already");
+        return;
+    }
+    let handle = app.clone();
+    let id = request_id.to_string();
+    let posted = app.run_on_main_thread(move || {
+        WAITING.store(false, Ordering::SeqCst);
+        let changed = |outcome: u8| LAST.swap(outcome, Ordering::SeqCst) != outcome;
+        let Some(w) = handle.get_webview_window(WINDOW) else {
+            if changed(4) {
+                tracing::debug!(request_id = %id, "request window gone before its raise");
+            }
+            return;
+        };
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            };
+            let hwnd = match w.hwnd() {
+                Ok(hwnd) => HWND(hwnd.0 as usize as *mut _),
+                Err(e) => {
+                    if changed(3) {
+                        tracing::warn!(request_id = %id, "request window: handle not read: {e}");
+                    }
+                    return;
+                }
+            };
+            // SAFETY: our own window, on its own (the main) thread: placed at the top of the
+            // always-on-top windows and shown, not activated, not moved or sized.
+            let placed = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            };
+            match placed {
+                Ok(()) if changed(1) => tracing::debug!(
+                    request_id = %id,
+                    "request window put at the top of the always-on-top windows \
+                     (SetWindowPos HWND_TOPMOST: ok; again every tick while it is up)"
+                ),
+                Err(e) if changed(2) => tracing::warn!(
+                    request_id = %id,
+                    "request window not put at the top of the always-on-top windows \
+                     (SetWindowPos HWND_TOPMOST): {e}"
+                ),
+                _ => {}
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = w;
+    });
+    if let Err(e) = posted {
+        WAITING.store(false, Ordering::SeqCst);
+        tracing::warn!(%request_id, "request window: its raise to the top not posted: {e}");
     }
 }
 
@@ -1848,6 +1944,30 @@ mod tests {
             PopupStep::Resize { height: 194 }
         );
         assert_eq!(p.step(t0 + Duration::from_millis(500)), PopupStep::Idle);
+    }
+
+    /// The window is kept on top only while it is up: shown, not closed by hand, not answered.
+    #[test]
+    fn the_request_window_is_on_screen_only_while_it_is_up() {
+        let t0 = Instant::now();
+        let mut p = Popup::default();
+        assert_eq!(p.on_screen(), None);
+        p.route("r1", PairStep::Consent, t0);
+        assert_eq!(p.on_screen(), None, "not shown yet");
+        p.fit("r1", PairStep::Consent, 172, None);
+        assert!(matches!(p.step(t0), PopupStep::Show { .. }));
+        assert_eq!(p.on_screen(), Some("r1"));
+        assert!(p.park());
+        assert_eq!(
+            p.on_screen(),
+            None,
+            "closed by hand: never shown again by the raise"
+        );
+        assert!(p.reveal());
+        assert!(matches!(p.step(t0), PopupStep::Show { .. }));
+        assert_eq!(p.on_screen(), Some("r1"));
+        assert!(p.clear());
+        assert_eq!(p.on_screen(), None, "answered or gone");
     }
 
     #[test]

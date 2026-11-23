@@ -30,6 +30,14 @@
 //! - **A press lands only on the game.** The window under the pixel a button press will land on
 //!   (`WindowFromPoint` at the planner's target), or its top-level window, must belong to the game's
 //!   process — compared by process id, no process opened. An always-on-top window swallows no click.
+//! - **A covered game is not taken as in front.** The game can have the front and still lie under
+//!   another program's window (one always on top, or one the game fell below after a relaunch).
+//!   A press dropped by the press rule while the game has the front marks the game covered: from
+//!   then the focus watch ([`GameGuard::watch`]) reports it unfocused, so the viewer sees that the
+//!   game is not in focus instead of presses vanishing. A press that lands on the game, or any
+//!   change of the look (the game loses the front, is not shown, its window changes), clears the
+//!   mark. The guard only reads: raising the game above the window — made always on top over one
+//!   that is — is the game helper's, which can do it for an elevated game (the agent cannot).
 //! - **No escape keys.** Win (alone or in any combination), Alt+Tab, Alt+Esc, Ctrl+Esc and
 //!   Ctrl+Shift+Esc are dropped before injection, whichever key comes second, as is every `combo`
 //!   (`ctrl_alt_del`). A dropped key-down's release is dropped with it, and a release of a key that
@@ -49,7 +57,9 @@
 //! releases were sent; `held_*` say what was held); each focus attempt and Windows' answer; each
 //! blocked key or combo with its source (`src`); each Alt+F4 let through; each dropped press with
 //! why; every change of the text's route; one `game input` line a second while anything was dropped
-//! or blocked. The arming says the refused attempt; the line of another window in front says
+//! or blocked (`covered` says the mark). The covered mark's setting (with the window over the
+//! game: its exe and elevation), a change of that window, and its clearing (and why) are each a
+//! line. The arming says the refused attempt; the line of another window in front says
 //! `armed`; each press taken while armed says what was decided — the click at `P` and the window
 //! under it, or why not; the game's return after a spell says whether an activation click came
 //! first. `trace`: every event held back. The guard also feeds
@@ -441,6 +451,10 @@ pub(crate) struct GameGuard {
     activation: Option<Activation>,
     /// The viewer's last pointer target (`m`, or `r` with `x`, `y`): where an activation click goes.
     target: Option<(f64, f64)>,
+    /// The game has the front, but a press was dropped because another program's window lies over
+    /// it at the press point: that top-level window and its process. While set, the focus watch
+    /// reports the game unfocused; cleared when a press lands on the game, or the look changes.
+    covered: Option<(usize, u32)>,
 }
 
 impl GameGuard {
@@ -530,6 +544,9 @@ impl GameGuard {
         self.keys.flush_if_due(now);
         let (look, release) = self.look(&InputScope::Game(*game), host, now);
         let focus = match look {
+            // In front, but under another program's window where the viewer presses: the viewer
+            // is told what a game behind another window tells it.
+            Look::Focused { .. } if self.covered.is_some() => GameFocus::Unfocused,
             Look::Focused { .. } => GameFocus::Focused,
             Look::Away { .. } => GameFocus::Unfocused,
             Look::NotShown { .. } => GameFocus::NotShown,
@@ -574,6 +591,17 @@ impl GameGuard {
         let before = self.look.replace(next);
         if before == Some(next) {
             return (next, false);
+        }
+        // A cover found under a press belongs to the look it was found in.
+        if let Some((root, pid)) = self.covered.take() {
+            tracing::debug!(
+                from = before.map_or("-", Look::name),
+                to = next.name(),
+                top_level = %format!("{root:#x}"),
+                pid,
+                "game input: no longer taken as covered: the game's look changed (the focus watch \
+                 reports the look as it is)"
+            );
         }
         // Into or out of game-only mode: the pointer's target was of another picture.
         if matches!(next, Look::Desktop) || matches!(before, Some(Look::Desktop)) {
@@ -1127,19 +1155,50 @@ impl GameGuard {
         match host.window_at(px, py) {
             Ok(at) if on_game(&at, window.pid) => {
                 tracing::trace!(button, px, py, "game input: press onto the game's window");
+                if let Some((root, pid)) = self.covered.take() {
+                    tracing::debug!(
+                        button,
+                        px,
+                        py,
+                        was_top_level = %format!("{root:#x}"),
+                        was_pid = pid,
+                        "game input: no longer covered: a press landed on the game's window \
+                         (the viewer is told `focused` again)"
+                    );
+                }
                 Some(event.clone())
             }
             Ok(at) => {
                 self.stats.since.get_or_insert(now);
                 self.stats.presses_off_game += 1;
-                if !self.lines.admit(now, "press dropped") {
-                    tracing::trace!(
-                        button,
-                        "game input: press dropped: another program's window"
-                    );
+                let cover = (at.root, at.root_pid);
+                if self.covered == Some(cover) {
+                    // The same cover: no process is opened on the hot path, and the line is gated.
+                    if self.lines.admit(now, "press dropped") {
+                        tracing::debug!(
+                            button,
+                            px,
+                            py,
+                            window = %format!("{:#x}", at.hwnd),
+                            top_level = %format!("{:#x}", at.root),
+                            pid = at.root_pid,
+                            game_pid = window.pid,
+                            "game input: press dropped: another program's window is over the game \
+                             there (still covered)"
+                        );
+                    } else {
+                        tracing::trace!(button, "game input: press dropped (still covered)");
+                    }
                     return None;
                 }
+                // Covered, or by another window now: a transition, said every time.
                 let info = host.describe(at.root);
+                let exe = info.exe.unwrap_or_else(|e| format!("unknown ({e})"));
+                let elevated = info
+                    .elevated
+                    .map_or_else(|e| format!("unknown ({e})"), |v| v.to_string());
+                let was = self.covered.replace(cover);
+                let was_top_level = was.map_or("-".to_string(), |(root, _)| format!("{root:#x}"));
                 tracing::debug!(
                     button,
                     px,
@@ -1147,10 +1206,15 @@ impl GameGuard {
                     window = %format!("{:#x}", at.hwnd),
                     top_level = %format!("{:#x}", at.root),
                     pid = at.root_pid,
-                    exe = %info.exe.unwrap_or_else(|e| format!("unknown ({e})")),
+                    %exe,
+                    %elevated,
+                    game = %format!("{:#x}", window.hwnd),
                     game_pid = window.pid,
+                    was_top_level = %was_top_level,
                     "game input: press dropped: another program's window is over the game there \
-                     (an always-on-top window?)"
+                     while the game has the front: taken as covered, so the focus watch tells \
+                     the viewer `unfocused` until a press lands on the game or its look changes \
+                     (the game helper raises the game above it)"
                 );
                 None
             }
@@ -1295,6 +1359,7 @@ impl GameGuard {
             why,
             window_ms = now.saturating_duration_since(since).as_millis() as u64,
             look = self.look.map_or("-", Look::name),
+            covered = self.covered.is_some(),
             moves_dropped = s.moves_dropped,
             presses_dropped = s.presses_dropped,
             presses_off_game = s.presses_off_game,

@@ -105,6 +105,7 @@ export const en: Record<TranslationKey, string> = {
   "app.gameHelperConfirm": "Allow",
   "app.gameHelperUpdate": "Update needed",
   "app.gameHelperUpdateInstall": "Update",
+  "app.gameHelperUpdateHint": "Game auto-launch: update needed",
   "app.gameHelperFound": "Another launcher found",
   "app.gameHelperApply": "Use",
   "app.gameHelperGaveUp": "Game won't start",

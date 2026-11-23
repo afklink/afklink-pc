@@ -1272,6 +1272,10 @@
           "variant": null
         },
         {
+          "file": "rest/admin_shadow_ban_response.json",
+          "variant": null
+        },
+        {
           "file": "rest/admin_person_patch_request.json",
           "variant": null
         },

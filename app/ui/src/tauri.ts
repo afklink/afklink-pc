@@ -497,6 +497,12 @@ export interface HomeDto {
   /** The bound game's name (whether the mode is on or off); null without a game. */
   game_name: string | null;
   /**
+   * The game helper is on and outdated — another revision installed (`game_helper::update_due`,
+   * the same decision as `GameHelperDto.outdated` with the helper on and matching): a line under the
+   * game-only row with «Обновить» (`updateGameHelper`). False once it is updated.
+   */
+  game_helper_update: boolean;
+  /**
    * «Только для гостей», as config.json has it: the mode applies to guests' sessions only. Not shown
    * on the main view (no mark there); Settings' switch opens in its place with it.
    */
@@ -1147,10 +1153,11 @@ export type GameHelperState =
  * `launch_exe`: what the helper launches for the game — the owner's choice, else the launcher
  * learned from the game's parent process, else the `.exe` beside the game's; null: none found, the
  * owner picks one. `mismatch` null: the installation is the one needed. `outdated`: the installed
- * helper is another build's (the app updated itself) — it works on, and `updateGameHelper` installs
- * this build's with the launch exe it has. `found_launch`: the learned launcher's full path, while
+ * helper is of another revision than this build's (the app updated itself over a changed helper),
+ * or its task is at an older priority — it works on, and `updateGameHelper` installs this build's
+ * with the launch exe it has. `found_launch`: the learned launcher's full path, while
  * the helper works on with another launch exe installed — `applyFoundLaunch` installs it (with
- * another build's helper the window offers it only after the update). `state` null: no fresh state
+ * an outdated helper the window offers it only after the update). `state` null: no fresh state
  * from the helper. `failed_launch`: the helper gave up launching the game and it has not run since
  * («Игра не запускается») — kept across sessions and the helper's restarts until the game runs a
  * minute with its window; a setup clears it.
@@ -1204,8 +1211,8 @@ export const setGameHelper = (enabled: boolean) =>
   invoke<GameOnlyDto>("set_game_helper", { enabled });
 
 /**
- * «Обновить» by «Нужно обновление» (`outdated`): this build's game helper in place of another
- * build's, through Windows' confirmation, with the launch exe it is installed with — a learned
+ * «Обновить» by «Нужно обновление» (`outdated`), in Settings and on the main view: this build's game
+ * helper in place of an outdated one, through Windows' confirmation, with the launch exe it is installed with — a learned
  * launcher (`found_launch`) is not applied with it, the window offers it after. With nothing
  * installed that matches it is «Разрешить»: the helper as the settings want it. Rejects as
  * `setGameHelper`; the owner declining resolves, and the installed helper works on as it was.

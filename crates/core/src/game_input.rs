@@ -160,7 +160,8 @@ pub async fn focus_watch_task(
                 match focus {
                     GameFocus::Focused => "has the front",
                     GameFocus::Unfocused =>
-                        "lost the front: input is held back and the viewer is told `unfocused`",
+                        "lost the front or lies under another window: the viewer is told \
+                         `unfocused`",
                     GameFocus::NotShown => "cannot take input (not shown)",
                     GameFocus::Unknown => "focus: the injector cannot tell",
                 }

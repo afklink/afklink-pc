@@ -15,9 +15,14 @@
 //! - **The signal** ([`Watch`]): set only while «Только игра» and the helper are on, the installed
 //!   record matches the bound game and launch exe, and a session that game-only applies to has
 //!   connected. Every change is logged with its reason. It fails closed: with the app gone the
-//!   helper idles. Another build's helper (after the app updated itself) keeps working, because
-//!   what it may do is the record's, which this app reads and checks, not the helper exe's;
-//!   Settings asks for this build's helper instead ([`Ask::Update`]).
+//!   helper idles. An outdated helper keeps working, because what it may do is the record's, which
+//!   this app reads and checks, not the helper exe's.
+//! - **The update** ([`outdated_why`]): the installed helper is outdated when its record names
+//!   another helper revision than the one this app carries (`HELPER_REVISION`, bumped only when
+//!   the helper's behaviour changes — not by every release, whose exe and SHA-256 differ anyway),
+//!   or a task priority other than this build's. Then Settings, and a line on the main view
+//!   (`HomeDto::game_helper_update`, [`GameHelper::update_due`]), ask for this build's helper
+//!   («Обновить», one Windows prompt: [`Ask::Update`]).
 //! - **What the window shows** ([`HelperDto`]): the installation as read from disk and Task
 //!   Scheduler (at start and whenever Settings opens, not while a change runs) and the helper's
 //!   `state.json`, including the failed-launch mark («Игра не запускается», [`failed_launch`]).
@@ -33,6 +38,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -44,7 +50,7 @@ use afklink_core::game_access::HelperSessions;
 use afklink_core::{lock, AgentControl, Config};
 use afklink_game_helper::{
     check_launch_exe, default_launch_exe, file_name, parse_line, same_path, utc_stamp, HelperState,
-    Level, Record, StateFile, LOG_FILE, LOG_OLD_FILE, RECORD_FILE, SETUP_LOG_FILE,
+    Level, Record, StateFile, HELPER_REVISION, LOG_FILE, LOG_OLD_FILE, RECORD_FILE, SETUP_LOG_FILE,
     SETUP_LOG_OLD_FILE, STATE_FILE, STATE_REFRESH, TASK_PRIORITY, USER_DIR,
 };
 use afklink_i18n::{Locale, NativeText};
@@ -58,8 +64,9 @@ mod system;
 /// The helper's exe, built and hashed by `build.rs`: what the setup installs.
 #[cfg(windows)]
 pub(crate) const HELPER: &[u8] = include_bytes!(env!("AFKLINK_GAME_HELPER_EXE"));
-/// Its SHA-256, lowercase hex: the record names it. An installation of another build's helper keeps
-/// working (its record decides what it may do) and Settings offers this one in its place.
+/// Its SHA-256, lowercase hex: the record names it, and the logs say which exe is installed. It
+/// differs with every build, so it does not make an installation outdated: the revision does
+/// ([`outdated_why`]).
 #[cfg(windows)]
 pub(crate) const HELPER_SHA256: &str = env!("AFKLINK_GAME_HELPER_SHA256");
 #[cfg(not(windows))]
@@ -114,8 +121,8 @@ const PLATFORM_CLIENTS: &[&str] = &[
     "riotclientservices.exe",
 ];
 
-/// Why the installation is not the one the owner's settings need: each takes the signal off. Another
-/// build's helper is not one of them ([`outdated`]).
+/// Why the installation is not the one the owner's settings need: each takes the signal off. An
+/// outdated helper is not one of them ([`outdated`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Mismatch {
@@ -153,14 +160,14 @@ pub(crate) struct HelperDto {
     installed: bool,
     /// What makes the installation not the one needed now; `None`: it is.
     mismatch: Option<Mismatch>,
-    /// The installed helper is another build's than the one this app carries, or its task was
+    /// The installed helper is of another revision than the one this app carries, or its task was
     /// registered at an older priority ([`outdated_why`]): it works on (when nothing else differs),
     /// and Settings asks for this build's («Нужно обновление» → «Обновить», [`Ask::Update`]: the
     /// installed launch exe kept) before anything else it offers.
     outdated: bool,
     /// The launcher learned from the game's parent process, when the helper works on with another
     /// launch exe installed: Settings offers it («Заменить», [`Ask::ApplyFound`]) — while the
-    /// helper is another build's, only once «Обновить» has installed this one.
+    /// helper is outdated, only once «Обновить» has installed this build's.
     found_launch: Option<String>,
     /// The helper's own state, from a fresh `state.json`; `None`: none, or too old.
     state: Option<HelperState>,
@@ -199,11 +206,14 @@ impl Installed {
     fn describe(&self) -> String {
         let record = match (&self.record, &self.record_error) {
             (Some(r), _) => format!(
-                "record: launch {}, game window {} class {}, run level {}, helper {}",
+                "record: launch {}, game window {} class {}, run level {}, helper revision {}, \
+                 exe {}",
                 r.launch_exe,
                 r.window_exe,
                 r.window_class,
                 r.run_level.as_str(),
+                r.helper_revision
+                    .map_or_else(|| "- (none: 0)".to_string(), |v| v.to_string()),
                 r.helper_sha256
             ),
             (None, Some(e)) => format!("record unreadable ({e})"),
@@ -296,7 +306,8 @@ fn launch_for(config: &Config) -> Option<String> {
 /// What keeps the installation from being the one needed: no record (this app reads and checks it)
 /// or no task, another game, another launch exe (unless only a learned one differs while the
 /// helper is on: [`Wanted::keeps_installed`]), or the helper asking for the setup again. Which
-/// build's helper is installed is not one of them ([`outdated`]): the record, not the helper exe,
+/// revision of the helper is installed is not one of them ([`outdated`]): the record, not the
+/// helper exe,
 /// says what the helper may launch and which window it may bring to the front.
 fn mismatch(
     installed: &Installed,
@@ -340,8 +351,8 @@ struct Fit {
     mismatch: Option<Mismatch>,
     /// [`found_launch`], only where nothing else differs.
     found: Option<String>,
-    /// [`outdated`]: another build's helper is installed, or its task at an older priority.
-    other_build: bool,
+    /// [`outdated`]: another revision of the helper is installed, or its task at an older priority.
+    outdated: bool,
 }
 
 impl Fit {
@@ -352,13 +363,13 @@ impl Fit {
             None => found_launch(&installed, &wanted),
             Some(_) => None,
         };
-        let other_build = outdated(&installed, HELPER_SHA256);
+        let outdated = outdated(&installed, HELPER_REVISION);
         Self {
             installed,
             wanted,
             mismatch,
             found,
-            other_build,
+            outdated,
         }
     }
 }
@@ -370,7 +381,7 @@ enum Ask {
     /// The switch on, «Разрешить», a file chosen («Выбрать», «Изменить»): the setup only when the
     /// installation does not match ([`mismatch`]), with the launch exe the settings want.
     Switch,
-    /// «Обновить» by «Нужно обновление»: this build's helper in place of another build's, with the
+    /// «Обновить» by «Нужно обновление»: this build's helper in place of an outdated one, with the
     /// launch exe its record names. A learned launcher is not applied with it: Settings offers it
     /// after («Найден другой файл запуска»): the update before the file.
     Update,
@@ -405,7 +416,7 @@ enum Plan {
 /// game, another file chosen, Windows' 740) is set up as the settings want — `wanted`, the launch
 /// exe [`Wanted`] gives — whatever was asked: Settings shows «Нужно разрешение» + «Разрешить» there,
 /// and a button pressed just before is that. Otherwise only a button runs the setup: «Обновить»
-/// while another build's helper is installed, with the launch exe its record names; «Заменить» while
+/// while an outdated helper is installed, with the launch exe its record names; «Заменить» while
 /// a learned launcher differs from it ([`found_launch`]), with that launcher.
 fn plan(ask: Ask, fit: &Fit, wanted: &str) -> Plan {
     if let Some(m) = fit.mismatch {
@@ -416,13 +427,13 @@ fn plan(ask: Ask, fit: &Fit, wanted: &str) -> Plan {
     }
     match ask {
         Ask::Switch => Plan::Ready("the installation already matches"),
-        Ask::Update => match (&fit.installed.record, fit.other_build) {
+        Ask::Update => match (&fit.installed.record, fit.outdated) {
             (Some(record), true) => Plan::Setup {
                 launch: record.launch_exe.clone(),
                 why: format!(
                     "the owner asked for this build's helper (installed: {}); the launch exe its \
                      record names is kept{}",
-                    outdated_why(&fit.installed, HELPER_SHA256)
+                    outdated_why(&fit.installed, HELPER_REVISION)
                         .unwrap_or_else(|| record.helper_sha256.clone()),
                     match &fit.found {
                         Some(found) => format!(
@@ -433,7 +444,9 @@ fn plan(ask: Ask, fit: &Fit, wanted: &str) -> Plan {
                     }
                 ),
             },
-            _ => Plan::Ready("this build's helper is installed already: nothing to update"),
+            _ => Plan::Ready(
+                "the installed helper is of this build's revision already: nothing to update",
+            ),
         },
         Ask::ApplyFound => match &fit.found {
             Some(found) => Plan::Setup {
@@ -540,24 +553,36 @@ fn folder_holds(outer: &str, inner: &str) -> bool {
     outer.len() >= 2 && outer.len() <= inner.len() && inner[..outer.len()] == outer[..]
 }
 
-/// The installation is not this build's, though its record may match the settings: [`outdated_why`].
-fn outdated(installed: &Installed, helper_sha256: &str) -> bool {
-    outdated_why(installed, helper_sha256).is_some()
+/// The installation asks for this build's setup, though its record may match the settings:
+/// [`outdated_why`].
+fn outdated(installed: &Installed, revision: u32) -> bool {
+    outdated_why(installed, revision).is_some()
 }
 
-/// Why the installed record asks for this build's setup, if it does: it names another build's helper
-/// than the one this app carries (`helper_sha256`) — after the app updated itself — or its task was
-/// registered at another priority than [`TASK_PRIORITY`] (an older setup left Task Scheduler's
-/// default, 7: below normal). Either way the helper works on as it is (the signal does not count
-/// this), and Settings asks for the update until the owner installs this build's:
-/// «Нужно обновление» → «Обновить», through Windows' prompt ([`Ask::Update`]) — the setup puts
-/// this build's helper in place and registers its task again, at [`TASK_PRIORITY`].
-fn outdated_why(installed: &Installed, helper_sha256: &str) -> Option<String> {
+/// Why the installed record asks for this build's setup, if it does: it names another helper
+/// revision than the one this app carries (`revision`, `HELPER_REVISION`) — older after the app
+/// updated itself over a changed helper, newer after a downgrade; a record from before revisions
+/// names none and counts as 0 — or its task was registered at another priority than
+/// [`TASK_PRIORITY`] (an older setup left Task Scheduler's default, 7: below normal). The helper
+/// exe's SHA-256 is not a reason: it changes with every build (the exe embeds the app's version),
+/// so a release that leaves the helper as it was asks nothing. Either way the helper works on as it
+/// is (the signal does not count this), and Settings and the main view ask for the update until the
+/// owner installs this build's: «Обновить», through Windows' prompt ([`Ask::Update`]) — the setup
+/// puts this build's helper in place, writes its revision and registers its task again, at
+/// [`TASK_PRIORITY`].
+fn outdated_why(installed: &Installed, revision: u32) -> Option<String> {
     let record = installed.record.as_ref()?;
     let mut why = Vec::new();
-    if !record.helper_sha256.eq_ignore_ascii_case(helper_sha256) {
+    let installed_revision = record.helper_revision.unwrap_or(0);
+    if installed_revision != revision {
         why.push(format!(
-            "another build's helper ({}; this app carries {helper_sha256})",
+            "its helper is of revision {installed_revision}{} (exe {}), this app carries revision \
+             {revision}",
+            if record.helper_revision.is_none() {
+                " (a setup from before revisions)"
+            } else {
+                ""
+            },
             record.helper_sha256
         ));
     }
@@ -939,7 +964,7 @@ impl Platform for Native {
 /// counts (otherwise attempts that never connected would let the helper launch the game). The
 /// sessions are read in one look (`AgentControl::helper_sessions`).
 ///
-/// Another build's helper does not turn it off: the owner is away from the PC, and a helper that
+/// An outdated helper does not turn it off: the owner is away from the PC, and a helper that
 /// stopped until they press a button would fail them. Settings asks for this build's helper
 /// («Нужно обновление» → «Обновить», through Windows' prompt: [`Ask::Update`]) with the launch exe
 /// its record names; a learned launcher is offered after it: the update first, the file then.
@@ -966,7 +991,7 @@ struct Revive {
 /// own launcher. Learning a file never takes a working helper off: with the helper on and no file
 /// chosen, an installation with another launch exe still matches, and Settings offers the learned
 /// one («Найден другой файл запуска» → «Заменить», through the setup: [`Ask::ApplyFound`]); while
-/// another build's helper is installed, only after its update.
+/// an outdated helper is installed, only after its update.
 #[derive(Default)]
 struct Learner {
     /// The window exe watched for.
@@ -1006,6 +1031,8 @@ struct Shared {
     /// Why the installation is outdated while it works on ([`outdated_why`]): logged once per
     /// change.
     version_note: Mutex<Option<String>>,
+    /// The update is asked for ([`GameHelper::update_due`]), as last decided by `note_version`.
+    update_due: AtomicBool,
     /// The learned launcher Settings offers while the helper works on with another: logged once
     /// per change.
     found_note: Mutex<Option<String>>,
@@ -1119,6 +1146,7 @@ impl GameHelper {
                 sessions: Vec::new(),
             }),
             version_note: Mutex::new(None),
+            update_due: AtomicBool::new(false),
             found_note: Mutex::new(None),
             signal,
             mirror: Mutex::new(mirror),
@@ -1135,7 +1163,7 @@ impl GameHelper {
             game_only,
             launch = %fit.wanted.describe(),
             mismatch = fit.mismatch.map_or("none", Mismatch::why),
-            other_build = fit.other_build,
+            outdated = fit.outdated,
             "game helper at the app's start"
         );
         if enabled && fit.mismatch.is_none() {
@@ -1383,7 +1411,8 @@ impl GameHelper {
         let state = lock(&self.0.state).clone();
         tracing::info!(
             dir = %self.0.dir.as_ref().map_or_else(|e| format!("unknown ({e})"), |d| d.display().to_string()),
-            helper = HELPER_SHA256,
+            carried_revision = HELPER_REVISION,
+            carried_exe = HELPER_SHA256,
             state = %state.as_ref().map_or("-".to_string(), |s| format!("{} ({})", s.state.as_str(), s.reason)),
             "game helper installation read ({why}): {}",
             installed.describe()
@@ -1596,11 +1625,11 @@ impl GameHelper {
             (Some(learned), _) => tracing::info!(
                 learned = %learned,
                 installed = %installed.unwrap_or("- (no record)"),
-                other_build = fit.other_build,
+                outdated = fit.outdated,
                 "game helper: the launcher learned from the game's parent is not the installed \
                  launch exe; the helper works on with the installed one, and Settings offers the \
                  learned one{}",
-                if fit.other_build {
+                if fit.outdated {
                     " once this build's helper is installed («Нужно обновление» goes first)"
                 } else {
                     ""
@@ -1617,45 +1646,88 @@ impl GameHelper {
         *last = found;
     }
 
-    /// An outdated installation that works on — its record matches (`mismatch` is `None`), but it is
-    /// another build's helper or its task's priority is not this build's ([`outdated_why`]): one line
-    /// with why when that starts, and one when it ends.
-    fn note_version(&self, fit: &Fit) {
+    /// An outdated installation that works on — its record matches (`mismatch` is `None`), but its
+    /// helper is of another revision or its task's priority is not this build's
+    /// ([`outdated_why`]): one line with why when that starts, and one when it ends. Then whether
+    /// the update is asked for ([`Self::update_due`]: that, with the helper on), one line per
+    /// change.
+    fn note_version(&self, fit: &Fit, enabled: bool) {
         let mismatch = fit.mismatch;
-        let installed = fit
-            .installed
-            .record
-            .as_ref()
-            .map(|r| r.helper_sha256.as_str());
+        let record = fit.installed.record.as_ref();
+        let installed_exe = record.map_or("- (no record)", |r| r.helper_sha256.as_str());
+        let installed_revision = record.map_or_else(
+            || "- (no record)".to_string(),
+            |r| {
+                r.helper_revision
+                    .map_or_else(|| "none (0)".to_string(), |v| v.to_string())
+            },
+        );
         let other = if mismatch.is_none() {
-            outdated_why(&fit.installed, HELPER_SHA256)
+            outdated_why(&fit.installed, HELPER_REVISION)
         } else {
             None
         };
-        let mut last = lock(&self.0.version_note);
-        if *last == other {
-            return;
+        let due = enabled && other.is_some();
+        let was_due = self.0.update_due.swap(due, Ordering::Relaxed);
+        {
+            let mut last = lock(&self.0.version_note);
+            if *last != other {
+                match (&other, last.as_ref()) {
+                    (Some(why), _) => tracing::info!(
+                        installed_revision = %installed_revision,
+                        carried_revision = HELPER_REVISION,
+                        installed_exe = %installed_exe,
+                        carried_exe = HELPER_SHA256,
+                        task_priority = TASK_PRIORITY,
+                        "game helper: the installation is outdated — {why} — and its record \
+                         matches the game and the launch exe: it works on (the signal does not \
+                         count this); Settings and the main view ask for the update while the \
+                         helper is on («Обновить», Windows' prompt)"
+                    ),
+                    (None, Some(was)) => tracing::info!(
+                        was = %was,
+                        installed_revision = %installed_revision,
+                        carried_revision = HELPER_REVISION,
+                        installed_exe = %installed_exe,
+                        carried_exe = HELPER_SHA256,
+                        mismatch = mismatch.map_or("none", Mismatch::why),
+                        "game helper: the installation is outdated no more (updated), or it no \
+                         longer works on"
+                    ),
+                    (None, None) => {}
+                }
+                *last = other;
+            }
         }
-        match (&other, last.as_ref()) {
-            (Some(why), _) => tracing::info!(
-                installed = %installed.unwrap_or("- (no record)"),
-                carried = HELPER_SHA256,
-                task_priority = TASK_PRIORITY,
-                "game helper: the installation is outdated — {why} — and its record matches the \
-                 game and the launch exe: it works on (the signal does not count this); Settings \
-                 asks for the update («Нужно обновление» → «Обновить», Windows' prompt)"
-            ),
-            (None, Some(was)) => tracing::info!(
-                was = %was,
-                installed = %installed.unwrap_or("- (no record)"),
-                carried = HELPER_SHA256,
+        if due != was_due {
+            tracing::debug!(
+                due,
+                enabled,
+                outdated = fit.outdated,
                 mismatch = mismatch.map_or("none", Mismatch::why),
-                "game helper: the installation is outdated no more (updated), or it no longer \
-                 works on"
-            ),
-            (None, None) => {}
+                installed_revision = %installed_revision,
+                carried_revision = HELPER_REVISION,
+                "game helper: the update {} (Settings' «Нужно обновление» and the main view's line)",
+                if due {
+                    "is asked for: the helper is on, its record matches, and it is outdated"
+                } else if !enabled {
+                    "is not asked for: the helper is off"
+                } else if mismatch.is_some() {
+                    "is not asked for: the installation does not match («Нужно разрешение» instead)"
+                } else {
+                    "is not asked for: the installed helper is this build's revision"
+                }
+            );
         }
-        *last = other;
+    }
+
+    /// Whether the update is asked for now — the helper on, its installation matching, and outdated
+    /// ([`outdated_why`]): Settings' «Нужно обновление» and the main view's line
+    /// (`HomeDto::game_helper_update`). As decided at the last [`Self::evaluate`] (twice a second,
+    /// and after every change): no lock, no read — the status asks it on the main thread every
+    /// second.
+    pub(crate) fn update_due(&self) -> bool {
+        self.0.update_due.load(Ordering::Relaxed)
     }
 
     /// Decide the signal now and set it; log a change with its reason (`why`: what asked). Then what
@@ -1675,7 +1747,7 @@ impl GameHelper {
         let helper_state = lock(&self.0.state).clone();
         let (fit, (game_only, enabled)) = self.fit_with(|c| (c.game_only, c.game_helper));
         let decision = decide(&seen, game_only, enabled, fit.mismatch);
-        self.note_version(&fit);
+        self.note_version(&fit, enabled);
         self.note_found(&fit);
         let mut watch = lock(&self.0.watch);
         let new_session = sessions.iter().any(|id| !watch.sessions.contains(id));
@@ -1794,7 +1866,7 @@ impl GameHelper {
             launch_exe: launch,
             installed: fit.installed.complete(),
             mismatch: fit.mismatch,
-            outdated: fit.other_build,
+            outdated: fit.outdated,
             found_launch: fit.found,
             state,
             failed_launch,
@@ -1882,10 +1954,15 @@ impl GameHelper {
         let record = fit.installed.record.as_ref();
         tracing::info!(
             enabled,
-            installed = %record.map_or("- (no record)", |r| r.helper_sha256.as_str()),
+            installed_revision = %record.map_or_else(
+                || "- (no record)".to_string(),
+                |r| r.helper_revision.map_or_else(|| "none (0)".to_string(), |v| v.to_string())
+            ),
+            carried_revision = HELPER_REVISION,
+            installed_exe = %record.map_or("- (no record)", |r| r.helper_sha256.as_str()),
+            carried_exe = HELPER_SHA256,
             installed_launch = %record.map_or("-", |r| r.launch_exe.as_str()),
-            carried = HELPER_SHA256,
-            other_build = fit.other_build,
+            outdated = fit.outdated,
             mismatch = fit.mismatch.map_or("none", Mismatch::why),
             launch = %fit.wanted.describe(),
             found = %fit.found.as_deref().unwrap_or("-"),
@@ -1897,7 +1974,7 @@ impl GameHelper {
 
     /// `Ok(true)`: on; `Ok(false)`: the owner did not confirm. `ask`: what the owner pressed — the
     /// switch runs the setup only when the installation does not match, «Обновить» also when only
-    /// the helper's build differs, «Заменить» also when only a learned launch exe does ([`plan`]).
+    /// the helper's revision (or its task's priority) differs, «Заменить» also when only a learned launch exe does ([`plan`]).
     fn turn_on(&self, owner: Option<usize>, ask: Ask) -> Result<bool, Failure> {
         let (game, launch, lang) = {
             let config = lock(&self.0.control.config);
@@ -1931,7 +2008,7 @@ impl GameHelper {
         tracing::debug!(
             ask = ask.as_str(),
             needed = fit.mismatch.map_or("none", Mismatch::why),
-            other_build = fit.other_build,
+            outdated = fit.outdated,
             installed_launch = %fit
                 .installed
                 .record
@@ -1948,12 +2025,12 @@ impl GameHelper {
                 self.save("the helper's switch", |c| c.game_helper = true);
                 tracing::info!(
                     ask = ask.as_str(),
-                    other_build = fit.other_build,
+                    outdated = fit.outdated,
                     found = %fit.found.as_deref().unwrap_or("-"),
                     "game helper on without a Windows prompt: {why}{}",
-                    match (fit.other_build, &fit.found) {
+                    match (fit.outdated, &fit.found) {
                         (true, _) => {
-                            " (another build's helper: it works on, Settings asks for this build's)"
+                            " (an outdated helper: it works on, Settings asks for this build's)"
                         }
                         (false, Some(_)) => {
                             " (a learned launcher differs from the installed launch exe: Settings \
@@ -2029,12 +2106,13 @@ impl GameHelper {
                 "game helper: after the setup the record names another launch exe than the one \
                  installed"
             );
-        } else if after.other_build {
+        } else if after.outdated {
             tracing::warn!(
                 ask = ask.as_str(),
-                carried = HELPER_SHA256,
+                carried_revision = HELPER_REVISION,
+                carried_exe = HELPER_SHA256,
                 "game helper: after the setup the installation is still outdated: {}",
-                outdated_why(&after.installed, HELPER_SHA256).unwrap_or_default()
+                outdated_why(&after.installed, HELPER_REVISION).unwrap_or_default()
             );
         } else if let Some(found) = &after.found {
             if ask == Ask::Update {
@@ -2340,7 +2418,7 @@ pub(crate) async fn set_game_helper(
     })?
 }
 
-/// «Обновить» by «Нужно обновление»: this build's helper in place of another build's, with the
+/// «Обновить» by «Нужно обновление»: this build's helper in place of an outdated one, with the
 /// launch exe its record names — a learned launcher is not applied with it ([`Ask::Update`]) —
 /// through the setup. Errors as [`set_game_helper`].
 #[tauri::command]
@@ -2448,6 +2526,7 @@ mod tests {
             run_level_why: "manifest requireAdministrator".into(),
             written_ms: 1,
             task_priority: Some(TASK_PRIORITY),
+            helper_revision: Some(HELPER_REVISION),
         }
     }
 
@@ -2661,12 +2740,12 @@ mod tests {
     #[test]
     fn each_button_installs_its_own_launch_exe() {
         let learned = r"D:\Games\Scryde\Launcher.exe";
-        let fit = |installed: Installed, mismatch, found: Option<&str>, other_build| Fit {
+        let fit = |installed: Installed, mismatch, found: Option<&str>, outdated| Fit {
             installed,
             wanted: wanted(Some(learned), LaunchFrom::Learned, true),
             mismatch,
             found: found.map(str::to_string),
-            other_build,
+            outdated,
         };
         let launch = |p: Plan| match p {
             Plan::Setup { launch, .. } => Some(launch),
@@ -2678,7 +2757,7 @@ mod tests {
         };
         let kept = LAUNCH.map(str::to_string);
         let found = Some(learned.to_string());
-        // Another build's helper and a launcher found: the update keeps the installed file.
+        // An outdated helper and a launcher found: the update keeps the installed file.
         assert_eq!(
             run(&fit(installed(), None, Some(learned), true)),
             [None, kept.clone(), found.clone()]
@@ -2843,20 +2922,87 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// After the app updated itself the installed helper is another build's: it is offered for an
-    /// update, and — its record matching — it still gets the signal during a session.
+    fn with_revision(revision: Option<u32>) -> Installed {
+        Installed {
+            record: Some(Record {
+                helper_revision: revision,
+                ..record()
+            }),
+            ..installed()
+        }
+    }
+
+    /// Another build's exe of the same revision — every release, whose exe embeds its version — is
+    /// not outdated: no update is asked for, and the record's hash is only said.
     #[test]
-    fn another_builds_helper_is_offered_an_update_and_works_on() {
+    fn the_same_revision_from_another_build_is_not_outdated() {
+        let another_exe = Installed {
+            record: Some(Record {
+                helper_sha256: "cd".repeat(32),
+                ..record()
+            }),
+            ..installed()
+        };
+        assert_eq!(outdated_why(&another_exe, HELPER_REVISION), None);
+        assert!(!outdated(&another_exe, HELPER_REVISION));
+        // «Обновить» pressed all the same (a status a moment old): no setup.
+        let fit = Fit {
+            installed: another_exe,
+            wanted: guessed(LAUNCH),
+            mismatch: None,
+            found: None,
+            outdated: false,
+        };
+        assert!(matches!(
+            plan(Ask::Update, &fit, LAUNCH.unwrap()),
+            Plan::Ready(_)
+        ));
+    }
+
+    /// Another revision installed — older after the app updated itself over a changed helper,
+    /// none at all from a setup before revisions (0: asked once), newer after a downgrade — is
+    /// outdated and says both revisions; nothing installed is not.
+    #[test]
+    fn another_revision_is_outdated_either_way() {
+        let older = with_revision(Some(HELPER_REVISION - 1));
+        let why = outdated_why(&older, HELPER_REVISION).unwrap();
+        assert!(
+            why.contains(&format!("revision {}", HELPER_REVISION - 1))
+                && why.contains(&format!("carries revision {HELPER_REVISION}"))
+                && why.contains(SHA),
+            "{why}"
+        );
+        let none = with_revision(None);
+        let why = outdated_why(&none, HELPER_REVISION).unwrap();
+        assert!(
+            why.contains("revision 0") && why.contains("before revisions"),
+            "{why}"
+        );
+        assert!(outdated(
+            &with_revision(Some(HELPER_REVISION + 1)),
+            HELPER_REVISION
+        ));
+        assert!(!outdated(
+            &with_revision(Some(HELPER_REVISION)),
+            HELPER_REVISION
+        ));
+        assert!(!outdated(&Installed::default(), HELPER_REVISION));
+        // A record from before revisions is outdated against any revision but 0.
+        assert!(!outdated(&none, 0));
+    }
+
+    /// After the app updated itself over a changed helper the installed one is outdated: it is
+    /// offered for an update, and — its record matching — it still gets the signal during a session.
+    #[test]
+    fn an_outdated_helper_is_offered_an_update_and_works_on() {
         let g = game();
-        let other_build = &"cd".repeat(32);
-        assert!(!outdated(&installed(), SHA));
-        assert!(!outdated(&installed(), &SHA.to_uppercase()));
-        assert!(outdated(&installed(), other_build));
-        assert!(!outdated(&Installed::default(), other_build));
-        let matching = mismatch(&installed(), Some(&g), &guessed(LAUNCH), None);
+        let older = with_revision(Some(HELPER_REVISION - 1));
+        assert!(!outdated(&installed(), HELPER_REVISION));
+        assert!(outdated(&older, HELPER_REVISION));
+        let matching = mismatch(&older, Some(&g), &guessed(LAUNCH), None);
         assert_eq!(matching, None);
         assert_eq!(decide(&connected(1, 1), true, true, matching), Ok(()));
-        // Anything else that differs still takes the signal off, whatever the build.
+        // Anything else that differs still takes the signal off, whatever the revision.
         let other = GameBinding::new(r"C:\Other\game.exe", "Window");
         let differs = mismatch(&installed(), Some(&other), &guessed(LAUNCH), None);
         assert!(decide(&connected(1, 1), true, true, differs).is_err());
@@ -2865,7 +3011,7 @@ mod tests {
     /// An older setup registered the task at Task Scheduler's default priority 7 (below
     /// normal): its record has no priority, and the installation is outdated — Settings asks for
     /// the update («Нужно обновление» → «Обновить», Windows' prompt) while the helper works on, as
-    /// for another build's. So is a record naming another priority. Each says why.
+    /// for another revision. So is a record naming another priority. Each says why.
     #[test]
     fn a_task_registered_below_normal_is_offered_the_update_and_works_on() {
         let old = Installed {
@@ -2875,13 +3021,13 @@ mod tests {
             }),
             ..installed()
         };
-        assert!(outdated(&old, SHA));
-        let why = outdated_why(&old, SHA).unwrap();
+        assert!(outdated(&old, HELPER_REVISION));
+        let why = outdated_why(&old, HELPER_REVISION).unwrap();
         assert!(
             why.contains("an older setup") && why.contains("priority 7"),
             "{why}"
         );
-        assert!(!why.contains("another build's"), "the same build: {why}");
+        assert!(!why.contains("revision"), "the same revision: {why}");
         let other = Installed {
             record: Some(Record {
                 task_priority: Some(7),
@@ -2889,15 +3035,15 @@ mod tests {
             }),
             ..installed()
         };
-        assert!(outdated_why(&other, SHA).is_some_and(|w| w.contains("priority 7")));
+        assert!(outdated_why(&other, HELPER_REVISION).is_some_and(|w| w.contains("priority 7")));
         // Both at once: both said.
-        let both = outdated_why(&old, &"cd".repeat(32)).unwrap();
+        let both = outdated_why(&old, HELPER_REVISION + 1).unwrap();
         assert!(
-            both.contains("another build's") && both.contains("an older setup"),
+            both.contains("carries revision") && both.contains("an older setup"),
             "{both}"
         );
-        // This build's, at this build's priority: up to date.
-        assert_eq!(outdated_why(&installed(), SHA), None);
+        // This build's revision, at this build's priority: up to date.
+        assert_eq!(outdated_why(&installed(), HELPER_REVISION), None);
         // It works on: the signal does not count it.
         let matching = mismatch(&old, Some(&game()), &guessed(LAUNCH), None);
         assert_eq!(matching, None);
@@ -2908,7 +3054,7 @@ mod tests {
             wanted: guessed(LAUNCH),
             mismatch: None,
             found: None,
-            other_build: true,
+            outdated: true,
         };
         assert!(matches!(
             plan(Ask::Update, &fit, LAUNCH.unwrap()),
@@ -3306,6 +3452,7 @@ mod tests {
                             run_level_why: "a stand-in setup".into(),
                             written_ms: 2,
                             task_priority: Some(TASK_PRIORITY),
+                            helper_revision: Some(HELPER_REVISION),
                         };
                         std::fs::write(&path, record.to_json()?).map_err(|e| e.to_string())?;
                         *lock(&self.task) = TaskSeen::Present { running: true };
@@ -3388,11 +3535,12 @@ mod tests {
             }
         }
 
-        /// A record for [`GAME`] with `launch`, of the helper build `sha`.
-        fn record_of(sha: &str, launch: &str) -> Record {
+        /// A record for [`GAME`] with `launch`, of the helper revision `revision` (this build's
+        /// exe: the hash decides nothing).
+        fn record_of(revision: Option<u32>, launch: &str) -> Record {
             Record {
                 format: RECORD_FORMAT,
-                helper_sha256: sha.into(),
+                helper_sha256: HELPER_SHA256.into(),
                 sid: SID.into(),
                 launch_exe: launch.into(),
                 window_exe: GAME.into(),
@@ -3401,11 +3549,13 @@ mod tests {
                 run_level_why: "a test's".into(),
                 written_ms: 1,
                 task_priority: Some(TASK_PRIORITY),
+                helper_revision: revision,
             }
         }
 
-        fn another_build() -> String {
-            "cd".repeat(32)
+        /// The revision before this build's: an installation the app's update left behind.
+        fn older() -> Option<u32> {
+            Some(HELPER_REVISION - 1)
         }
 
         /// `f` on a thread of its own, waited for at most `limit`: a lock that never comes fails the
@@ -3443,7 +3593,7 @@ mod tests {
         #[test]
         fn turning_on_over_a_matching_installation_returns_without_a_prompt() {
             let rig = rig(
-                Some(record_of(HELPER_SHA256, GAME)),
+                Some(record_of(Some(HELPER_REVISION), GAME)),
                 TaskSeen::Present { running: false },
                 |c| c.game_helper = false,
             );
@@ -3483,15 +3633,79 @@ mod tests {
             );
         }
 
-        /// «Нужно обновление» → «Обновить»: another build's helper, its record matching, is
-        /// replaced by this build's through the setup — by `update`, and by `turn_on` asked to.
+        /// Another release's helper of this build's revision — its exe, and so its hash, differs —
+        /// is not outdated: Settings and the main view ask nothing, and «Обновить» pressed all the
+        /// same runs no setup.
         #[test]
-        fn another_builds_helper_is_replaced_through_the_setup() {
+        fn the_same_revision_from_another_release_asks_nothing() {
+            let rig = rig(
+                Some(Record {
+                    helper_sha256: "cd".repeat(32),
+                    ..record_of(Some(HELPER_REVISION), GAME)
+                }),
+                TaskSeen::Present { running: true },
+                |c| c.game_helper = true,
+            );
+            let shown = dto(&rig);
+            assert!(shown.installed && !shown.outdated, "{shown:?}");
+            assert_eq!(shown.mismatch, None);
+            assert!(!rig.helper.update_due());
+            let helper = rig.helper.clone();
+            assert_eq!(
+                within("«Обновить»", LIMIT, move || helper
+                    .update(None, Ask::Update)),
+                Ok(())
+            );
+            assert!(rig.fake.setups().is_empty(), "nothing to update");
+        }
+
+        /// An outdated helper with the helper off: Settings shows no line for it, and the main view
+        /// none either.
+        #[test]
+        fn an_outdated_helper_turned_off_asks_nothing() {
+            let rig = rig(
+                Some(record_of(older(), GAME)),
+                TaskSeen::Present { running: true },
+                |c| c.game_helper = false,
+            );
+            assert!(dto(&rig).outdated);
+            assert!(!rig.helper.update_due());
+        }
+
+        /// An outdated helper whose installation does not match either — another game chosen
+        /// since, or its task gone — is not asked to update: Settings shows «Нужно разрешение» →
+        /// «Разрешить» (which installs this build's anyway), and the main view no line.
+        #[test]
+        fn an_outdated_helper_that_does_not_match_asks_nothing() {
+            let other_game = rig(
+                Some(record_of(older(), GAME)),
+                TaskSeen::Present { running: true },
+                |c| {
+                    c.game_helper = true;
+                    c.game = Some(GameBinding::new(r"D:\Games\Other\other.exe", "OtherWindow"));
+                },
+            );
+            let shown = dto(&other_game);
+            assert_eq!(shown.mismatch, Some(Mismatch::Game), "{shown:?}");
+            assert!(!other_game.helper.update_due());
+            let no_task = rig(Some(record_of(older(), GAME)), TaskSeen::Absent, |c| {
+                c.game_helper = true;
+            });
+            let shown = dto(&no_task);
+            assert_eq!(shown.mismatch, Some(Mismatch::NotInstalled), "{shown:?}");
+            assert!(!no_task.helper.update_due());
+        }
+
+        /// «Нужно обновление» → «Обновить»: an outdated helper, its record matching, is replaced
+        /// by this build's through the setup — by `update`, and by `turn_on` asked to. The main
+        /// view's line is there before and gone after.
+        #[test]
+        fn an_outdated_helper_is_replaced_through_the_setup() {
             for by_update in [true, false] {
                 // The task's description goes in the window's language: the setting's.
                 let lang = if by_update { "ru" } else { "en" };
                 let rig = rig(
-                    Some(record_of(&another_build(), GAME)),
+                    Some(record_of(older(), GAME)),
                     TaskSeen::Present { running: true },
                     |c| {
                         c.game_helper = true;
@@ -3500,6 +3714,7 @@ mod tests {
                 );
                 let shown = dto(&rig);
                 assert!(shown.outdated && shown.mismatch.is_none(), "{shown:?}");
+                assert!(rig.helper.update_due(), "the main view asks for it");
                 let helper = rig.helper.clone();
                 let done = within("update", LIMIT, move || {
                     if by_update {
@@ -3517,17 +3732,18 @@ mod tests {
                 let shown = dto(&rig);
                 assert!(shown.installed && !shown.outdated, "{shown:?}");
                 assert_eq!(shown.mismatch, None);
+                assert!(!rig.helper.update_due(), "the main view's line is gone");
             }
         }
 
         /// «Найден другой файл запуска» → «Заменить»: the launcher learned is installed through the
         /// setup in place of the launch exe the record names — this build's helper with it, when
-        /// another build's was there.
+        /// an outdated one was there.
         #[test]
         fn a_learned_launcher_is_applied_through_the_setup() {
-            for sha in [HELPER_SHA256.to_string(), another_build()] {
+            for revision in [Some(HELPER_REVISION), older()] {
                 let rig = rig(
-                    Some(record_of(&sha, GAME)),
+                    Some(record_of(revision, GAME)),
                     TaskSeen::Present { running: true },
                     |c| {
                         c.game_helper = true;
@@ -3538,7 +3754,7 @@ mod tests {
                 assert_eq!(shown.found_launch.as_deref(), Some(LEARNED));
                 assert_eq!(
                     (shown.mismatch, shown.outdated),
-                    (None, sha != HELPER_SHA256)
+                    (None, revision != Some(HELPER_REVISION))
                 );
                 let helper = rig.helper.clone();
                 assert_eq!(
@@ -3562,7 +3778,7 @@ mod tests {
         #[test]
         fn the_update_keeps_the_installed_launch_exe_and_the_found_one_is_offered_after() {
             let rig = rig(
-                Some(record_of(&another_build(), GAME)),
+                Some(record_of(older(), GAME)),
                 TaskSeen::Present { running: true },
                 |c| {
                     c.game_helper = true;
@@ -3661,7 +3877,7 @@ mod tests {
         fn the_watch_settings_and_changes_at_once_never_wait_on_each_other() {
             const ROUNDS: u64 = 40;
             let rig = rig(
-                Some(record_of(&another_build(), GAME)),
+                Some(record_of(older(), GAME)),
                 TaskSeen::Present { running: false },
                 |c| {
                     c.game_helper = true;

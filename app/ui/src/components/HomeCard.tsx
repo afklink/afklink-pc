@@ -15,6 +15,7 @@ import {
   setGameOnly,
   setGameWindow,
   type TrustedDto,
+  updateGameHelper,
 } from "../tauri";
 import { MaintenanceDialog, useDriverMaintenance } from "./DriverMaintenance";
 import { WindowPicker } from "./GamePicker";
@@ -35,7 +36,9 @@ export type HomeRow = "driver" | "game" | "access" | "journal";
  *   «Показывать только игру»  the «Только игра» mode, named here by what its switch does (Settings
  *                         keeps the mode's name): «Выбрать игру» opens «Окно игры» (`WindowPicker`),
  *                         and the choice turns the mode on at once; with a game chosen, the switch —
- *                         at once, for every session, a live one too;
+ *                         at once, for every session, a live one too. Under it, while the game
+ *                         helper is on and outdated, «Автозапуск игры: нужно обновление» and
+ *                         «Обновить» (`HelperUpdateLine`);
  *   «Доступ»              how many people have access › the «Доступ» screen;
  *   «Журнал»              the newest entry › the «Журнал» screen.
  *
@@ -81,6 +84,7 @@ export function HomeCard({
       <GameRowView
         row={home.game}
         gameName={home.game_name}
+        helperUpdate={home.game_helper_update}
         onOpen={() => onOpen("game")}
         onChanged={onChanged}
         buttonRef={(el) => rowRef("game", el)}
@@ -253,16 +257,21 @@ function DriverRowView({
  *
  * «Только для гостей» (Settings only) leaves no mark here: the `on` row shows the game's name alone,
  * whether the mode is for everyone or for guests only.
+ *
+ * `helperUpdate` (`HomeDto.game_helper_update`): the game helper is on and outdated — the line under
+ * the row (`HelperUpdateLine`), whatever the row shows; the row's switch and name stay.
  */
 function GameRowView({
   row,
   gameName,
+  helperUpdate,
   onOpen,
   onChanged,
   buttonRef,
 }: {
   row: GameRow;
   gameName: string | null;
+  helperUpdate: boolean;
   onOpen: () => void;
   onChanged: () => void;
   buttonRef: Ref<HTMLButtonElement>;
@@ -321,6 +330,7 @@ function GameRowView({
         danger={row === "no_game"}
         onOpen={onOpen}
         buttonRef={buttonRef}
+        note={helperUpdate ? <HelperUpdateLine onChanged={onChanged} /> : undefined}
         control={
           choosing ? (
             <Button size="sm" onClick={() => setPicking(true)}>
@@ -343,12 +353,129 @@ function GameRowView({
   );
 }
 
+/** How the main view's «Обновить» last failed: «Файл не найден», or «Не удалось применить». */
+type UpdateError = "not_found" | "failed" | null;
+
+/**
+ * After an update that went through, how long «Ждём Windows…» waits for the status to take the line
+ * away before it gives the words and «Обновить» back. Rust decides the line before the command
+ * answers (`update_due`), so the next status read, at once, takes it; this is only a floor against
+ * a line that would otherwise wait for ever.
+ */
+const DONE_HOLD_MS = 5000;
+
+/**
+ * «Автозапуск игры: нужно обновление» + «Обновить», under «Показывать только игру» while the game
+ * helper is on and outdated (`HomeDto.game_helper_update`, decided in Rust). The same update as
+ * Settings' «Нужно обновление» → «Обновить» (`updateGameHelper`: Windows' prompt, then the setup,
+ * the installed launch exe kept); the line goes once Rust reads the new installation. Built like
+ * Settings' status lines: 11 px amber words, the compact `xs` button, 24 px tall — quiet next to the
+ * row's own controls. While the change runs — the prompt, the setup — the line is a muted «Ждём
+ * Windows…» with no button, and it stays so after an update that went through, until the status
+ * read again takes the line away (no flash of the amber words and «Обновить» in between; a status
+ * that still asks after `DONE_HOLD_MS` gets them back). A failure is the red words Settings uses,
+ * «Обновить» there to try again; declining the prompt leaves the line as it was. The words wrap rather than lose their end
+ * (they are what to do: ui-rules §5): the Russian takes two lines in the 340 px window (about
+ * 175 px beside the button there), one at 400. The row grows by the line (28 px, 36 wrapped): the
+ * hero above moves up by half of it; in a short window the hero gives up its air for it
+ * (`StatusHero`), so the 340×480 minimum does not scroll.
+ */
+function HelperUpdateLine({ onChanged }: { onChanged: () => void }) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<UpdateError>(null);
+  const hold = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (hold.current !== null) clearTimeout(hold.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    // biome-ignore lint/suspicious/noConsole: once per showing of the line (Rust logs why)
+    console.debug("[home] the game helper's update line shown under the game-only row");
+    return () => {
+      // biome-ignore lint/suspicious/noConsole: once per hiding of the line
+      console.debug("[home] the game helper's update line gone (updated, or no longer asked for)");
+    };
+  }, []);
+
+  const update = () => {
+    if (busy) return;
+    // biome-ignore lint/suspicious/noConsole: the owner's press, once per press
+    console.info("[home] «Обновить» pressed by the game helper's update line");
+    setBusy(true);
+    setError(null);
+    updateGameHelper().then(
+      (next) => {
+        const h = next.helper;
+        // Still asked for — declined, or the setup left it outdated: the line as it was.
+        const stillDue = h.enabled && h.mismatch === null && h.outdated;
+        // biome-ignore lint/suspicious/noConsole: once per press
+        console.debug(
+          `[home] update_game_helper answered: ${stillDue ? "still outdated (declined, or not updated) — the line back" : "updated — «Ждём Windows…» until the status takes the line away"}`,
+        );
+        if (stillDue) {
+          setBusy(false);
+        } else {
+          hold.current = setTimeout(() => {
+            console.warn(
+              `[home] the update went through, but the status still shows its line after ${DONE_HOLD_MS} ms: the words and «Обновить» back`,
+            );
+            setBusy(false);
+          }, DONE_HOLD_MS);
+        }
+        onChanged();
+      },
+      (e: unknown) => {
+        console.warn(`[ipc] update_game_helper (main view) failed: ${String(e)}`);
+        setError(String(e) === "not_found" ? "not_found" : "failed");
+        setBusy(false);
+        onChanged();
+      },
+    );
+  };
+
+  const text = busy
+    ? t("app.gameHelperWaiting")
+    : error === "not_found"
+      ? t("app.gameHelperNotFound")
+      : error === "failed"
+        ? t("app.gameHelperFailed")
+        : t("app.gameHelperUpdateHint");
+  const tone = busy ? "text-muted" : error !== null ? "text-danger" : "text-attention";
+
+  return (
+    <div className="flex min-h-6 basis-full items-center justify-between gap-3">
+      <span className={cn("min-w-0 text-balance font-small text-hint", tone)} aria-live="polite">
+        {text}
+      </span>
+      {busy ? null : (
+        // Above the row's cover; its press zone 32 px tall (the window's floor with a mouse), the
+        // 24 px look of Settings' status lines kept: 6 px over and under it are the button's too.
+        <Button
+          size="xs"
+          className="relative z-10 shrink-0 after:absolute after:inset-x-0 after:-inset-y-1.5 after:content-['']"
+          onClick={update}
+        >
+          {t("app.gameHelperUpdateInstall")}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /**
  * One of the card's rows. The row's own button covers the whole row (its `::after`), so a press
  * anywhere on it opens what is behind it; the action on the right (`control`) sits above that and
  * takes its own presses. Read-only things on the right (`trailing`: a count, the arrow) are part of
  * the button, so a screen reader hears «Доступ 2». The name's tooltip (`about`) is the name's own,
  * above the button's cover, so it shows on the name and not over the whole row.
+ *
+ * `note`: a line under the row's name and action, across the row (the row wraps to take it, 4 px
+ * under them): a press on its words opens what the row opens, its own button sits above the cover.
+ * Without one the row is exactly as before.
  */
 function CardRow({
   title,
@@ -359,6 +486,7 @@ function CardRow({
   danger = false,
   control,
   trailing,
+  note,
   onOpen,
   buttonRef,
 }: {
@@ -375,11 +503,17 @@ function CardRow({
   danger?: boolean;
   control?: ReactNode;
   trailing?: ReactNode;
+  note?: ReactNode;
   onOpen: () => void;
   buttonRef?: Ref<HTMLButtonElement>;
 }) {
   return (
-    <div className="relative flex min-h-13 items-center gap-3 border-t border-line py-2 pr-3 pl-4 transition-colors first:border-t-0 hover:bg-white/4">
+    <div
+      className={cn(
+        "relative flex min-h-13 items-center gap-3 border-t border-line py-2 pr-3 pl-4 transition-colors first:border-t-0 hover:bg-white/4",
+        note ? "flex-wrap gap-y-1" : null,
+      )}
+    >
       <button
         ref={buttonRef}
         type="button"
@@ -419,6 +553,7 @@ function CardRow({
         ) : null}
       </button>
       {control ? <div className="relative z-10 flex shrink-0 items-center">{control}</div> : null}
+      {note}
     </div>
   );
 }

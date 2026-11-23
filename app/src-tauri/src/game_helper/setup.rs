@@ -206,7 +206,7 @@ mod steps {
 
     use afklink_game_helper::{
         manifest_execution_level, run_level_for, unix_ms, HelperLog, Level, Log, Record, RunLevel,
-        EXE_NAME, RECORD_FILE, RECORD_FORMAT, STATE_FILE, TASK_PRIORITY, USER_DIR,
+        EXE_NAME, HELPER_REVISION, RECORD_FILE, RECORD_FORMAT, STATE_FILE, TASK_PRIORITY, USER_DIR,
     };
     use afklink_i18n::NativeText;
 
@@ -375,9 +375,10 @@ mod steps {
         log.line(
             Level::Info,
             &format!(
-                "installed and started: task {:?}, run level {}, helper {}",
+                "installed and started: task {:?}, run level {}, helper revision {}, exe {}",
                 system::task_name(&install.sid).to_string(),
                 run_level.as_str(),
+                HELPER_REVISION,
                 HELPER_SHA256
             ),
         );
@@ -414,6 +415,9 @@ mod steps {
             // What `register_task` below sets: the app reads it back to tell this setup's task
             // from an older one, left below normal.
             task_priority: Some(TASK_PRIORITY),
+            // What the app compares with the revision it carries to tell whether to ask for this
+            // setup again (`outdated_why`); the hash above only names the exe.
+            helper_revision: Some(HELPER_REVISION),
         };
         record.validate().map_err(|e| {
             log.line(Level::Error, &format!("the record would not be valid: {e}"));

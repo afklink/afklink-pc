@@ -10,11 +10,13 @@ use std::time::{Duration, Instant, SystemTime};
 use windows::core::{BOOL, HSTRING, PWSTR};
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_ELEVATION_REQUIRED,
-    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0,
-    WAIT_TIMEOUT, WPARAM,
+    CloseHandle, SetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_ELEVATION_REQUIRED,
+    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, RECT, WAIT_OBJECT_0,
+    WAIT_TIMEOUT, WIN32_ERROR, WPARAM,
 };
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, TokenElevation,
     TokenIntegrityLevel, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
@@ -43,19 +45,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
-    GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
-    SetForegroundWindow, ShowWindowAsync, GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE,
-    GUI_SYSTEMMENUMODE, SW_RESTORE, WM_CLOSE,
+    EnumWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowLongW,
+    GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+    PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindowAsync, GUITHREADINFO,
+    GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE, GWL_EXSTYLE, GW_HWNDPREV,
+    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SW_RESTORE, WM_CLOSE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 
 use crate::log::{unix_ms, HelperLog, Level, Log};
 use crate::record::{file_name, same_path, Record, RunLevel};
 use crate::supervisor::{
-    all_suspended, focus_ladder, front_allows, slow_tick, Answer, CloseRequest, ClosedWindow,
-    Desktop, FocusOutcome, FocusSteps, Foreground, FrontProcess, GameProcess, GameWindow,
-    HelperState, LaunchError, Observation, ShownWindow, Signal, StateFile, Supervisor,
-    TerminateOutcome, POLL, STATE_FORMAT, TERMINATE_EXIT_CODE, UNASSIGNED_VK,
+    all_suspended, focus_ladder, front_allows, is_afklink, over_game, slow_tick, Above, Answer,
+    CloseRequest, ClosedWindow, Cover, Covering, Desktop, FocusOutcome, FocusSteps, Foreground,
+    FrontProcess, GameProcess, GameWindow, HelperState, LaunchError, Lift, NotUndone, Observation,
+    Rect, ShownWindow, Signal, StateFile, Supervisor, TerminateOutcome, POLL, STATE_FORMAT,
+    TERMINATE_EXIT_CODE, UNASSIGNED_VK,
 };
 use crate::{RECORD_FILE, SIGNAL_NAME, STATE_FILE, STATE_REFRESH, USER_DIR};
 
@@ -372,13 +377,6 @@ fn pid_of(hwnd: HWND) -> (u32, u32) {
     // SAFETY: a read-only query with a live output.
     let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     (pid, thread)
-}
-
-/// AFKLink's own processes: `afklink-app.exe`, the portable `AFKLink-<version>….exe`, the
-/// `AFKLink.exe` the bot sends.
-fn is_afklink(exe: &str) -> bool {
-    let name = file_name(exe).to_ascii_lowercase();
-    name.starts_with("afklink") && name.ends_with(".exe")
 }
 
 struct Search<'a> {
@@ -884,25 +882,11 @@ impl Desktop for WindowsDesktop {
             method: None,
             detail,
         };
-        let hwnd = HWND(window.id as *mut _);
-        // Handles are reused: check it is still the game's window right before acting.
-        // SAFETY: read-only queries.
-        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            return refused("the game's window closed before the try".into());
-        }
-        let (pid, _) = pid_of(hwnd);
-        if pid != window.pid {
-            return refused(format!(
-                "the window is another process's now (pid {pid}, the game's {})",
-                window.pid
-            ));
-        }
-        let still_game = session_of(pid).is_ok_and(|s| s == self.session)
-            && process_path(pid).is_ok_and(|p| record.is_game_exe(&p))
-            && record.class_matches(&class_of(hwnd));
-        if !still_game {
-            return refused("the window is not the game's any more".into());
-        }
+        let hwnd = match self.still_game(record, window) {
+            Ok(hwnd) => hwnd,
+            Err(why) => return refused(why),
+        };
+        let pid = window.pid;
         // The window in front is still one focus is asked from — the game's own process only to
         // restore its minimized window.
         if let Err(why) = front_allows(&self.foreground(&[pid]), window.minimized) {
@@ -923,7 +907,215 @@ impl Desktop for WindowsDesktop {
     fn describe_front(&mut self, window: usize) -> String {
         describe_window(HWND(window as *mut _))
     }
+
+    fn covering(&mut self, window: GameWindow, game_pids: &[u32]) -> Result<Covering, String> {
+        let game = HWND(window.id as *mut _);
+        let frame = frame_of(game)?;
+        let mut covering = Covering {
+            game_topmost: topmost(game),
+            game_area: frame.area(),
+            ..Covering::default()
+        };
+        // The game's window's own process too, should the list of its processes lag.
+        let mut pids = game_pids.to_vec();
+        pids.push(window.pid);
+        let mut at = game;
+        for _ in 0..ABOVE_MAX {
+            // SAFETY: clears this thread's last error, so the end of the list tells itself from a
+            // failure.
+            unsafe { SetLastError(WIN32_ERROR(0)) };
+            // SAFETY: read-only queries, none of which waits on a window's thread; a window gone
+            // meanwhile answers no, or nothing.
+            at = match unsafe { GetWindow(at, GW_HWNDPREV) } {
+                Ok(next) => next,
+                Err(e) if e.code().is_ok() => return Ok(covering),
+                Err(e) => {
+                    covering.stopped = Some(format!("GetWindow: {e}"));
+                    return Ok(covering);
+                }
+            };
+            // SAFETY: as above.
+            if !unsafe { IsWindowVisible(at) }.as_bool() {
+                continue;
+            }
+            let style = ex_style(at);
+            let click_through = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+            let above = Above {
+                pid: pid_of(at).0,
+                visible: true,
+                // Not read: taken as shown, as a window not under DWM is.
+                cloaked: cloaked(at).is_ok_and(|v| v != 0),
+                click_through: style & click_through == click_through,
+                // Not read: not over the game.
+                overlap: frame_of(at).map_or(0, |r| frame.overlap(r)),
+            };
+            if !over_game(&above, &pids) {
+                continue;
+            }
+            let exe = process_path(above.pid);
+            let topmost = style & WS_EX_TOPMOST.0 != 0;
+            if topmost && exe.as_ref().is_ok_and(|p| is_afklink(p)) {
+                covering.ours_on_top = true;
+                continue;
+            }
+            covering.covers.push(Cover {
+                window: at.0 as usize,
+                pid: above.pid,
+                exe: exe.map_or_else(
+                    |e| format!("an exe not read ({e})"),
+                    |p| file_name(&p).to_string(),
+                ),
+                class: class_of(at),
+                topmost,
+                overlap: above.overlap,
+            });
+        }
+        covering.stopped = Some(format!("more than {ABOVE_MAX} windows above the game"));
+        Ok(covering)
+    }
+
+    fn raise(&mut self, record: &Record, window: GameWindow, lift: Lift) -> Result<(), String> {
+        let after = match lift {
+            Lift::Top => HWND_TOP,
+            Lift::Topmost => HWND_TOPMOST,
+        };
+        self.place(record, window, after, lift.call())
+    }
+
+    fn unpin(&mut self, record: &Record, window: GameWindow) -> Result<String, NotUndone> {
+        self.still_game(record, window).map_err(NotUndone::Gone)?;
+        let notopmost = "SetWindowPos HWND_NOTOPMOST";
+        // SAFETY: a read-only query.
+        let front = unsafe { GetForegroundWindow() };
+        let (front_pid, _) = pid_of(front);
+        // Another program's window in front, not always on top and not the desktop or the shell:
+        // the person may have just brought it forward, and HWND_NOTOPMOST would put the game above
+        // it. Right below it instead (placed after a window not always on top, the game stops
+        // being always on top).
+        let class = class_of(front);
+        if front_pid == 0
+            || front_pid == window.pid
+            || topmost(front)
+            || SHELL_CLASSES.contains(&class.as_str())
+        {
+            return self
+                .place(record, window, HWND_NOTOPMOST, notopmost)
+                .map(|()| notopmost.to_string())
+                .map_err(NotUndone::Refused);
+        }
+        let below = format!(
+            "SetWindowPos right below the window in front ({:#x}, pid {front_pid}, \
+             class {class:?})",
+            front.0 as usize
+        );
+        match self.place(record, window, front, &below) {
+            Ok(()) => Ok(below),
+            Err(refused) => self
+                .place(record, window, HWND_NOTOPMOST, notopmost)
+                .map(|()| format!("{notopmost}, as {refused}"))
+                .map_err(NotUndone::Refused),
+        }
+    }
 }
+
+impl WindowsDesktop {
+    /// The game's window, checked first to be the game's still, put after `after` in the z-order
+    /// (`HWND_TOP`, `HWND_TOPMOST`, `HWND_NOTOPMOST`) — its place only: no move, no size, no
+    /// activation. Asynchronous: the request is posted to the game's thread, so a hung game cannot
+    /// hold the helper. No other window is touched.
+    fn place(
+        &self,
+        record: &Record,
+        window: GameWindow,
+        after: HWND,
+        call: &str,
+    ) -> Result<(), String> {
+        let hwnd = self.still_game(record, window)?;
+        // SAFETY: the game's own, just checked, window; flags as above.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            )
+        }
+        .map_err(|e| format!("{call} refused: {e} (code {:#x})", e.code().0))
+    }
+
+    /// Handles are reused: the game's window checked to be still the game's right before an action
+    /// on it — the same process, in this session, one of the record's exes, the bound class.
+    fn still_game(&self, record: &Record, window: GameWindow) -> Result<HWND, String> {
+        let hwnd = HWND(window.id as *mut _);
+        // SAFETY: read-only queries.
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return Err("the game's window closed before the try".into());
+        }
+        let (pid, _) = pid_of(hwnd);
+        if pid != window.pid {
+            return Err(format!(
+                "the window is another process's now (pid {pid}, the game's {})",
+                window.pid
+            ));
+        }
+        let still_game = session_of(pid).is_ok_and(|s| s == self.session)
+            && process_path(pid).is_ok_and(|p| record.is_game_exe(&p))
+            && record.class_matches(&class_of(hwnd));
+        if !still_game {
+            return Err("the window is not the game's any more".into());
+        }
+        Ok(hwnd)
+    }
+}
+
+/// The most windows walked above the game's ([`Desktop::covering`]): a bound on a z-order that
+/// keeps changing under the walk.
+const ABOVE_MAX: u32 = 1024;
+
+/// A window's extended style (`GWL_EXSTYLE`): read without a message to the window.
+fn ex_style(hwnd: HWND) -> u32 {
+    // SAFETY: a read-only query; 0 for a gone window.
+    unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 }
+}
+
+/// A window's frame on screen as it is drawn (`DWMWA_EXTENDED_FRAME_BOUNDS`: without the invisible
+/// resize borders). Not read: the window is taken as over nothing.
+fn frame_of(hwnd: HWND) -> Result<Rect, String> {
+    let mut rect = RECT::default();
+    // SAFETY: a RECT output of the size given.
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut rect as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        )
+    }
+    .map_err(|e| format!("frame not read ({e})"))?;
+    Ok(Rect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
+}
+
+/// `WS_EX_TOPMOST`: always on top.
+fn topmost(hwnd: HWND) -> bool {
+    ex_style(hwnd) & WS_EX_TOPMOST.0 != 0
+}
+
+/// The desktop and the shell's taskbars: a window in front of these is not one the person brought
+/// forward over the game.
+const SHELL_CLASSES: [&str; 4] = [
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+];
 
 /// The focus ladder's steps on the game's window, checked by the caller right before
 /// ([`WindowsDesktop::focus`]). Each step is one call and a wait of at most 250 ms.
@@ -1315,9 +1507,10 @@ pub(crate) fn run() -> i32 {
     log.line(
         Level::Info,
         &format!(
-            "started: pid {}, version {}, elevated {}, exe dir {}, writes in {}",
+            "started: pid {}, version {}, revision {}, elevated {}, exe dir {}, writes in {}",
             std::process::id(),
             env!("CARGO_PKG_VERSION"),
+            crate::HELPER_REVISION,
             match &token {
                 Ok(elevated) => elevated.to_string(),
                 Err(_) => format!("unknown (taken as {elevated})"),
@@ -1494,6 +1687,7 @@ mod tests {
             run_level_why: "test".into(),
             written_ms: 0,
             task_priority: Some(crate::TASK_PRIORITY),
+            helper_revision: Some(crate::HELPER_REVISION),
         };
         let seen = desktop.observe(&record).unwrap();
         assert!(seen.game_pids.contains(&std::process::id()));

@@ -45,6 +45,10 @@ import { MiddleEllipsis } from "./ui/middle-ellipsis";
  * moves: marks of other sizes for first run or beside the autostart card would make the window jump
  * at every turn. The hero keeps 12 px of air: the toast floats over the mark's top
  * in a window at its smallest, and over nothing at the default size, where the hero has the room.
+ * In a short window (`short:`, under 560 px tall) it gives up its own air — none above and below,
+ * 8 px rather than 16 between the mark and the caption — so the card's game helper line
+ * («Автозапуск игры: нужно обновление», up to 36 px wrapped) fits at the 340×480 minimum without a
+ * scroll; the mark and the caption keep their size. Taller windows are as they were.
  *
  * The caption about people is always one line: one person's name is cut
  * to fit it — «Константин Константино… управляет» — and the verb never is; two or more are their
@@ -97,8 +101,8 @@ export function StatusHero({
 
   return (
     // 12px each way: the zone under it fits in the 340×480 minimum without a scroll; at the default
-    // size the hero centres in the room it has.
-    <section className="relative flex flex-1 flex-col items-center justify-center px-1 py-3">
+    // size the hero centres in the room it has. None in a short window: the card may be a line taller.
+    <section className="relative flex flex-1 flex-col items-center justify-center px-1 py-3 short:py-0">
       {notice}
       <ScreenGlyph
         state={state}
@@ -106,7 +110,7 @@ export function StatusHero({
         width={GLYPH_WIDTH}
         className="shrink-0"
       />
-      <div aria-live="polite" aria-atomic="true" className="mt-4 w-full text-center">
+      <div aria-live="polite" aria-atomic="true" className="mt-4 w-full text-center short:mt-2">
         {name ? (
           // One line: the name gives way (its own ellipsis), the words around it never do.
           <h1

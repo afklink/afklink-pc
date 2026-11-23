@@ -446,6 +446,15 @@ the game guard before either path sees the event:
   will land on (the planner's: where the move just sent puts the cursor, else the cursor) must be a
   window of the game's process, or its top-level window must be — pids compared, no process opened.
   An always-on-top window over the game swallows no click.
+- **A covered game is not in front.** The game can have the front and still lie under another
+  program's window there (one always on top, or one it fell below after a relaunch). A press
+  dropped so while the game has the front marks it covered: the focus watch then reports it
+  `unfocused` (the viewer's "game not in focus"; nothing is released — the game still has the front)
+  until a press lands on the game or the look changes (the game loses the front, is not shown, or
+  its window changes). The guard makes no Windows call for it. Raising the game above the cover —
+  making it always on top, for the session, over a cover that is — is the game helper's
+  (`crates/game-helper`), which can do it for an elevated game; the agent cannot
+  (`ERROR_ACCESS_DENIED` across integrity levels).
 - **Escape keys.** Win (either, alone or with anything), Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc
   and every `combo` (`ctrl_alt_del`) are dropped before either path, whichever key of a combination
   comes second; a dropped key's release is dropped with it (and a lone Win release with no press of
@@ -471,7 +480,9 @@ answer, each blocked key or combo with its combination and `src`, each Alt+F4 le
 start and on each change (at most one line a second), the typing worker's queue gate on each change,
 and a `game input` line a second while anything was dropped, blocked or attempted (`moves_dropped`,
 `presses_dropped`, `presses_off_game`, `keys_dropped`, `keys_blocked`, `other_dropped`,
-`focus_attempts`, `focus_won`, `releases`). `trace` — every event held back. The session's side logs
+`focus_attempts`, `focus_won`, `releases`, and `covered`), the covered mark's setting (the
+cover's exe and elevation), its change of window and its clearing with why. `trace` — every event
+held back. The session's side logs
 its focus watch's changes and the cursor report's space.
 
 Which keys (`src/key_log.rs`, kept by the guard, in every mode): a key is named only when the viewer

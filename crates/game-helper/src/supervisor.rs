@@ -84,6 +84,29 @@
 //! the game's processes show instead of its window: the class and title of each of their visible
 //! top-level windows.
 //!
+//! # A game in front, under another window
+//!
+//! The front is not the top: a game can have the front while another program's window lies over
+//! it — in practice one always on top that got there while the game's window was gone — and a
+//! press there reaches that window. While the game has the front and is not minimized, each tick
+//! walks up the z-order from its window ([`Desktop::covering`]) for windows that take clicks over
+//! it ([`over_game`]). One decision ([`Covering::lift`]): covers not always on top (or the game
+//! always on top itself), and the game's window goes to the top of its band ([`Lift::Top`]); a
+//! cover always on top while the game is not, and the game is made always on top
+//! ([`Lift::Topmost`]). Both without activating it, asynchronously. The helper undoes exactly its
+//! own always on top ([`Desktop::unpin`]) once the signal goes off, the game leaves the front, its
+//! window changes or goes, or an always-on-top window of AFKLink's own comes over it — right below
+//! the window in front when that is another program's and not always on top, so a window the
+//! person just brought forward stays over the game. A game always on top by itself is never
+//! changed. AFKLink's always-on-top windows (its pair request waits for a person) are never
+//! covers, and the game is never put above one; AFKLink's main window is an ordinary cover. No
+//! other window is ever touched. Raises in a row wait [`focus_delay`] of their count (1 s,
+//! doubling, at most 10 s); a look with nothing to lift the game above starts it over. Only the
+//! helper can do this for an elevated game (the agent's `SetWindowPos` on it is refused). A helper
+//! ended by its task while the game is made always on top cannot undo it: the game stays so until
+//! its window closes. Independently, the agent's input guard tells the viewer the game is not in
+//! focus while presses land on a cover.
+//!
 //! # «Игра не запускается»: the failed-launch mark
 //!
 //! Giving up ends the launches of one session only. The mark the app shows lives longer
@@ -590,6 +613,206 @@ pub struct FocusOutcome {
     pub detail: String,
 }
 
+/// Another program's window above the game's in z-order that takes clicks over part of it
+/// ([`over_game`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cover {
+    pub window: usize,
+    pub pid: u32,
+    /// Its exe's file name, or why it was not read.
+    pub exe: String,
+    pub class: String,
+    /// `WS_EX_TOPMOST`: always on top. `HWND_TOP` does not put the game above such a window
+    /// unless the game is always on top too.
+    pub topmost: bool,
+    /// The pixels of the game's frame it covers.
+    pub overlap: i64,
+}
+
+/// A rectangle on screen, right and bottom exclusive (as Windows' `RECT`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl Rect {
+    /// Its pixels: 0 when it is empty or inverted.
+    pub fn area(self) -> i64 {
+        let w = i64::from(self.right) - i64::from(self.left);
+        let h = i64::from(self.bottom) - i64::from(self.top);
+        if w <= 0 || h <= 0 {
+            0
+        } else {
+            w.saturating_mul(h)
+        }
+    }
+
+    /// The pixels it shares with `other`.
+    pub fn overlap(self, other: Rect) -> i64 {
+        Rect {
+            left: self.left.max(other.left),
+            top: self.top.max(other.top),
+            right: self.right.min(other.right),
+            bottom: self.bottom.min(other.bottom),
+        }
+        .area()
+    }
+}
+
+/// What the walk up from the game's window reads of one window above it ([`over_game`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Above {
+    pub pid: u32,
+    pub visible: bool,
+    /// `DWMWA_CLOAKED` is not 0: on another virtual desktop, or hidden by the shell.
+    pub cloaked: bool,
+    /// `WS_EX_LAYERED` with `WS_EX_TRANSPARENT`: clicks go through it (an overlay).
+    pub click_through: bool,
+    /// The pixels of the game's frame it covers (0 when its frame cannot be read; a minimized
+    /// window lies off the screen).
+    pub overlap: i64,
+}
+
+/// The one rule of a window over the game: visible, not cloaked, not click-through, not of the
+/// game's processes, and over the game's frame.
+pub fn over_game(above: &Above, game_pids: &[u32]) -> bool {
+    above.visible
+        && !above.cloaked
+        && !above.click_through
+        && !game_pids.contains(&above.pid)
+        && above.overlap > 0
+}
+
+/// AFKLink's own processes: `afklink-app.exe`, the portable `AFKLink-<version>….exe`, the
+/// `AFKLink.exe` the bot sends.
+pub fn is_afklink(exe: &str) -> bool {
+    let name = file_name(exe).to_ascii_lowercase();
+    name.starts_with("afklink") && name.ends_with(".exe")
+}
+
+/// How the game's window is put above the windows over it ([`Desktop::raise`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lift {
+    /// `HWND_TOP`: the top of its band — above every cover not always on top, or above every
+    /// cover when the game is always on top itself.
+    Top,
+    /// `HWND_TOPMOST`: the game made always on top, above a cover always on top. The helper
+    /// remembers it did, and undoes it ([`Desktop::unpin`]).
+    Topmost,
+}
+
+impl Lift {
+    pub fn call(self) -> &'static str {
+        match self {
+            Self::Top => "SetWindowPos HWND_TOP",
+            Self::Topmost => "SetWindowPos HWND_TOPMOST",
+        }
+    }
+}
+
+/// Why [`Desktop::unpin`] did not undo the game's always on top.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotUndone {
+    /// The window is gone, or not the game's any more: nothing to undo on it.
+    Gone(String),
+    /// Windows refused the call on the game's window.
+    Refused(String),
+}
+
+/// The game's window the helper made always on top ([`Lift::Topmost`]), to be undone.
+#[derive(Clone, Copy, Debug)]
+struct Pinned {
+    window: GameWindow,
+    at: Instant,
+    /// An undo was refused: the next refusal is said at debug.
+    refused: bool,
+}
+
+/// What lies above the game's window ([`Desktop::covering`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Covering {
+    /// The game's own window is always on top (`WS_EX_TOPMOST`).
+    pub game_topmost: bool,
+    /// The game's frame, in pixels.
+    pub game_area: i64,
+    /// Windows over it, AFKLink's always-on-top ones aside.
+    pub covers: Vec<Cover>,
+    /// A window of AFKLink's own that is always on top lies over the game: its pair request, which
+    /// waits for a person. The game is never put above it.
+    pub ours_on_top: bool,
+    /// The walk up the z-order stopped early, and why: the covers found are the ones below that.
+    pub stopped: Option<String>,
+}
+
+impl Covering {
+    /// The one decision of raising the game: nothing over it, `None`; a cover always on top while
+    /// the game is not, [`Lift::Topmost`] — `HWND_TOP` would leave the game below it; any other
+    /// cover, [`Lift::Top`]. With AFKLink's always-on-top window over the game, the game is never
+    /// put above it: only `HWND_TOP` while the game is not always on top, over covers that are not.
+    pub fn lift(&self) -> Option<Lift> {
+        let topmost_cover = self.covers.iter().any(|c| c.topmost);
+        if self.ours_on_top {
+            (!self.game_topmost && self.covers.iter().any(|c| !c.topmost)).then_some(Lift::Top)
+        } else if self.covers.is_empty() {
+            None
+        } else if !self.game_topmost && topmost_cover {
+            Some(Lift::Topmost)
+        } else {
+            Some(Lift::Top)
+        }
+    }
+
+    /// What decides [`Self::lift`], to say a change once.
+    fn key(&self) -> (Option<Lift>, Vec<usize>, bool) {
+        (
+            self.lift(),
+            self.covers.iter().map(|c| c.window).collect(),
+            self.ours_on_top,
+        )
+    }
+
+    /// The covers, for the log (never a title).
+    pub fn describe(&self) -> String {
+        let each: Vec<String> = self
+            .covers
+            .iter()
+            .map(|c| {
+                format!(
+                    "window {:#x} of {} (pid {}, class {:?}), {}always on top, over {} px ({}% of \
+                     the game)",
+                    c.window,
+                    c.exe,
+                    c.pid,
+                    c.class,
+                    if c.topmost { "" } else { "not " },
+                    c.overlap,
+                    c.overlap.saturating_mul(100) / self.game_area.max(1)
+                )
+            })
+            .collect();
+        format!(
+            "{}; the game {}always on top{}{}",
+            if each.is_empty() {
+                "nothing over the game".to_string()
+            } else {
+                each.join("; ")
+            },
+            if self.game_topmost { "" } else { "not " },
+            if self.ours_on_top {
+                "; an always-on-top window of AFKLink's own is over it"
+            } else {
+                ""
+            },
+            self.stopped.as_ref().map_or(String::new(), |why| format!(
+                "; the walk stopped early: {why}"
+            ))
+        )
+    }
+}
+
 /// One of the game's processes as the helper is about to close it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameProcess {
@@ -658,6 +881,21 @@ pub trait Desktop {
     /// The window in front, for the log: its class, whether it is visible, its `DWMWA_CLOAKED`,
     /// whether its process is suspended. Read only when a line about it is written.
     fn describe_front(&mut self, window: usize) -> String;
+    /// What lies above the game's window in z-order and over it ([`Covering`]), walking up from
+    /// it. Reads only. `Err`: the game's window, or its frame, could not be read.
+    fn covering(&mut self, window: GameWindow, game_pids: &[u32]) -> Result<Covering, String>;
+    /// Raise the game's window — checked first to be the game's still — without activating it:
+    /// `SetWindowPos` with `HWND_TOP` or `HWND_TOPMOST` ([`Lift`]) and `SWP_NOMOVE`, `SWP_NOSIZE`,
+    /// `SWP_NOACTIVATE`, `SWP_ASYNCWINDOWPOS` (posted to the game's thread: a hung game cannot hold
+    /// the helper). No other window is touched. `Err`: why not, or what Windows answered.
+    fn raise(&mut self, record: &Record, window: GameWindow, lift: Lift) -> Result<(), String>;
+    /// Undo [`Lift::Topmost`] on the game's window, checked first to be the game's still (a window
+    /// gone, or another's now, is not touched: [`NotUndone::Gone`]). With another program's window
+    /// in front that is not always on top, nor the desktop or the shell — one the person may have
+    /// just brought forward — the game goes right below it (`SetWindowPos` after it, which also
+    /// drops always on top; refused, `HWND_NOTOPMOST`); otherwise `HWND_NOTOPMOST`. The same flags
+    /// as [`Self::raise`]. `Ok`: which call was made.
+    fn unpin(&mut self, record: &Record, window: GameWindow) -> Result<String, NotUndone>;
     /// Post `WM_CLOSE` to every visible top-level window of these processes, each process first
     /// checked to be the game's: in this Windows session, its full path one of the record's two
     /// exes. Posted, not sent: a hung window cannot hold the helper.
@@ -722,6 +960,7 @@ struct Period {
     launches: u32,
     waiting_noted: bool,
     focus: FocusRetry,
+    raise: RaiseRetry,
     /// The game's processes run with no window, and it is counted against them.
     blind: Option<Blind>,
     /// The last look a loader that is starting the game was running.
@@ -901,6 +1140,23 @@ struct Totals {
     focus_key: u32,
     focus_uia: u32,
     focus_refused: u32,
+    /// The game raised above the windows over it ([`Desktop::raise`]), and raises refused.
+    raised: u32,
+    raise_refused: u32,
+    /// The game made always on top ([`Lift::Topmost`]).
+    pinned: u32,
+}
+
+/// Raising the game above the windows over it, while it has the front ([`Supervisor::uncover`]).
+#[derive(Debug, Default)]
+struct RaiseRetry {
+    /// Raises in a row: the next waits [`focus_delay`] of it. Starts over on the first look with
+    /// nothing to lift the game above, and when the game leaves the front.
+    raises: u32,
+    next_at: Option<Instant>,
+    /// What decided the last look ([`Covering::key`]), or the last failed read's text: a line when
+    /// it changes.
+    said: Option<String>,
 }
 
 pub struct Supervisor {
@@ -944,6 +1200,9 @@ pub struct Supervisor {
     /// The failed-launch mark (the module's «Игра не запускается»): kept across sessions, and
     /// across the helper's restarts through [`Self::carry_over`].
     failed_launch: Option<MarkSince>,
+    /// The game's window the helper made always on top: undone ([`Self::unpin`]) when the signal
+    /// goes off, the game leaves the front, or its window changes — kept across ticks until then.
+    pinned: Option<Pinned>,
 }
 
 impl Supervisor {
@@ -971,6 +1230,7 @@ impl Supervisor {
             launch_pending: false,
             pending_relaunch: false,
             failed_launch: None,
+            pinned: None,
         }
     }
 
@@ -1430,11 +1690,12 @@ impl Supervisor {
     ) {
         self.note_signal(now, signal, log);
         if let Some(why) = self.needs_setup.clone() {
+            self.unpin(now, "the helper needs its setup again", desktop, log);
             self.set_state(now, HelperState::NeedsSetup, why, log);
             return;
         }
         if !self.allowed {
-            self.idle(now, log);
+            self.idle(now, desktop, log);
             return;
         }
         let obs = match desktop.observe(&self.record) {
@@ -1487,7 +1748,7 @@ impl Supervisor {
         }
         // The signal went off during this tick, seen right before an action: nothing more on it.
         if !self.allowed {
-            self.idle(now, log);
+            self.idle(now, desktop, log);
             return;
         }
         let (state, reason) = self.state_now(running, &obs);
@@ -1495,15 +1756,21 @@ impl Supervisor {
         if self.needs_setup.is_none() {
             self.focus(now, &obs, desktop, log);
             if !self.allowed {
-                self.idle(now, log);
+                self.idle(now, desktop, log);
                 return;
             }
         }
         self.summary(now, &obs, log);
     }
 
-    /// Not allowed: nothing is done.
-    fn idle(&mut self, now: Instant, log: &mut impl Log) {
+    /// Not allowed: nothing is done — but the helper's own always-on-top of the game is undone.
+    fn idle(&mut self, now: Instant, desktop: &mut impl Desktop, log: &mut impl Log) {
+        self.unpin(
+            now,
+            "the app's signal is off: the session is over",
+            desktop,
+            log,
+        );
         self.set_state(
             now,
             HelperState::Idle,
@@ -2882,6 +3149,21 @@ impl Supervisor {
         desktop: &mut impl Desktop,
         log: &mut impl Log,
     ) {
+        if let Some(pinned) = &self.pinned {
+            let why = match obs.window {
+                None => Some("the game's window is gone"),
+                Some(w) if w.id != pinned.window.id => Some("the game's window changed"),
+                Some(_) if obs.foreground != Foreground::Game => Some("the game left the front"),
+                Some(_) => None,
+            };
+            if let Some(why) = why {
+                self.unpin(now, why, desktop, log);
+            }
+        }
+        if !(obs.window.is_some_and(|w| !w.minimized) && obs.foreground == Foreground::Game) {
+            // Raising starts over when the game is in front again.
+            self.period.raise = RaiseRetry::default();
+        }
         let Some(window) = obs.window else {
             self.left_alone(Some("no game window to bring forward".to_string()), log);
             return;
@@ -2900,6 +3182,8 @@ impl Supervisor {
                 }
                 *retry = FocusRetry::default();
                 self.left_alone(None, log);
+                // In front, and maybe still under another window: raised above it.
+                self.uncover(now, obs, window, desktop, log);
                 return;
             }
             // Its own window minimized while one of its others is in front: restore it.
@@ -3008,6 +3292,184 @@ impl Supervisor {
         }
     }
 
+    /// The game has the front and is not minimized, yet another program's window may lie over it
+    /// — a press there reaches that window, not the game. The one decision is
+    /// [`Covering::lift`]; never activated, and no other window is ever touched. Lifts in a row
+    /// wait [`focus_delay`] of their count; the first look with nothing to lift the game above
+    /// starts it over. An always-on-top window of AFKLink's own over the game undoes the helper's
+    /// pin at once.
+    fn uncover(
+        &mut self,
+        now: Instant,
+        obs: &Observation,
+        window: GameWindow,
+        desktop: &mut impl Desktop,
+        log: &mut impl Log,
+    ) {
+        let covering = match desktop.covering(window, &obs.game_pids) {
+            Ok(covering) => covering,
+            Err(e) => {
+                let said = format!("what lies over the game's window not read: {e}");
+                if self.period.raise.said.as_ref() != Some(&said) {
+                    log.line(Level::Debug, &said);
+                    self.period.raise.said = Some(said);
+                }
+                return;
+            }
+        };
+        let key = format!("{:?}", covering.key());
+        if self.period.raise.said.as_ref() != Some(&key) {
+            log.line(
+                Level::Debug,
+                &format!(
+                    "over the game's window now: {}; {}",
+                    covering.describe(),
+                    match covering.lift() {
+                        None => "nothing to do",
+                        Some(Lift::Top) => "it goes to the top of its band (HWND_TOP)",
+                        Some(Lift::Topmost) => "it is made always on top (HWND_TOPMOST)",
+                    }
+                ),
+            );
+            self.period.raise.said = Some(key);
+        }
+        if covering.ours_on_top {
+            self.unpin(
+                now,
+                "an always-on-top window of AFKLink's own is over the game",
+                desktop,
+                log,
+            );
+        }
+        let r = &mut self.period.raise;
+        let Some(lift) = covering.lift() else {
+            if r.raises > 0 {
+                log.line(
+                    Level::Info,
+                    &format!(
+                        "the game is on top again after {} raise(s) above the windows over it",
+                        r.raises
+                    ),
+                );
+            }
+            r.raises = 0;
+            r.next_at = None;
+            return;
+        };
+        if r.next_at.is_some_and(|at| now < at) {
+            return;
+        }
+        if !self.act_allowed(now, "raising the game's window", desktop, log) {
+            return;
+        }
+        let raised = desktop.raise(&self.record, window, lift);
+        let r = &mut self.period.raise;
+        r.raises += 1;
+        let next = focus_delay(r.raises);
+        r.next_at = Some(now + next);
+        let raises = r.raises;
+        let described = covering.describe();
+        match (raised, lift) {
+            (Ok(()), Lift::Top) => {
+                self.totals.raised += 1;
+                log.line(
+                    Level::Debug,
+                    &format!(
+                        "the game's window raised above the windows over it (raise {raises} in a \
+                         row; SetWindowPos HWND_TOP without activating it, asynchronously: ok): \
+                         {described}; the next raise not before {}",
+                        secs(next)
+                    ),
+                );
+            }
+            (Ok(()), Lift::Topmost) => {
+                self.totals.pinned += 1;
+                self.pinned = Some(Pinned {
+                    window,
+                    at: now,
+                    refused: false,
+                });
+                log.line(
+                    Level::Info,
+                    &format!(
+                        "the game's window made always on top: a window always on top lies over \
+                         it (raise {raises} in a row; SetWindowPos HWND_TOPMOST without \
+                         activating it, asynchronously: ok): {described}; undone when the session \
+                         ends, the game leaves the front, its window changes, or an always-on-top \
+                         window of AFKLink's own comes over it"
+                    ),
+                );
+            }
+            (Err(e), lift) => {
+                self.totals.raise_refused += 1;
+                log.line(
+                    if raises == 1 {
+                        Level::Warn
+                    } else {
+                        Level::Debug
+                    },
+                    &format!(
+                        "raising the game's window ({}) failed (raise {raises} in a row): {e}; \
+                         {described}; next try in {}",
+                        lift.call(),
+                        secs(next)
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Undo the helper's own always-on-top of the game's window ([`Lift::Topmost`]), if it made
+    /// one (`why`: the session is over, the game left the front, its window changed, AFKLink's own
+    /// window came over it). A game always on top by itself was never made so by the helper, and is
+    /// left as it is. A refused undo is kept and tried again; a window that is not the game's now
+    /// is not touched.
+    fn unpin(&mut self, now: Instant, why: &str, desktop: &mut impl Desktop, log: &mut impl Log) {
+        let Some(pinned) = self.pinned else {
+            return;
+        };
+        let held = secs(now.saturating_duration_since(pinned.at));
+        let undone = desktop.unpin(&self.record, pinned.window);
+        // Refused: kept, and tried again on the next tick that calls for it (said once).
+        let refused_before = pinned.refused;
+        match &undone {
+            Err(NotUndone::Refused(_)) => {
+                self.pinned = Some(Pinned {
+                    refused: true,
+                    ..pinned
+                })
+            }
+            _ => self.pinned = None,
+        }
+        match undone {
+            Ok(call) => log.line(
+                Level::Info,
+                &format!(
+                    "the game's window is not always on top any more ({why}; {call}, without \
+                     activating it, asynchronously: ok); the helper had made it so {held} before"
+                ),
+            ),
+            Err(NotUndone::Gone(e)) => log.line(
+                Level::Debug,
+                &format!(
+                    "the game's window made always on top {held} before: nothing to undo ({why}): \
+                     {e}"
+                ),
+            ),
+            Err(NotUndone::Refused(e)) => log.line(
+                if refused_before {
+                    Level::Debug
+                } else {
+                    Level::Warn
+                },
+                &format!(
+                    "the game's window made always on top {held} before not undone ({why}): {e}; \
+                     tried again on the next tick"
+                ),
+            ),
+        }
+    }
+
     fn summary(&mut self, now: Instant, obs: &Observation, log: &mut impl Log) {
         if now.saturating_duration_since(self.last_summary) < SUMMARY_EVERY {
             return;
@@ -3019,7 +3481,8 @@ impl Supervisor {
                 "summary: {} for {}; game pids {:?}{}; this session {} launch(es), {} failed \
                  start(s) in a row; failed-launch mark {}; focus returned {} time(s) via \
                  SetForegroundWindow, {} via an unassigned key and SetForegroundWindow, {} via UI \
-                 Automation, refused {} (since the helper started)",
+                 Automation, refused {}; the game raised above windows over it {} time(s), \
+                 made always on top {} time(s), refused {} (since the helper started)",
                 self.state.as_str(),
                 secs(now.saturating_duration_since(self.since)),
                 obs.game_pids,
@@ -3038,7 +3501,10 @@ impl Supervisor {
                 self.totals.focus_set_foreground,
                 self.totals.focus_key,
                 self.totals.focus_uia,
-                self.totals.focus_refused
+                self.totals.focus_refused,
+                self.totals.raised,
+                self.totals.pinned,
+                self.totals.raise_refused
             ),
         );
     }
@@ -3100,6 +3566,16 @@ mod tests {
         rereads: std::collections::VecDeque<Signal>,
         /// Reads made before actions.
         reread: u32,
+        /// The windows above the game, with their exe and whether always on top — run through the
+        /// real rule ([`over_game`]); `covering_error` answers instead when set.
+        above: Vec<(Above, &'static str, bool)>,
+        game_topmost: bool,
+        covering_error: Option<String>,
+        coverings: u32,
+        raises: Vec<(GameWindow, Lift)>,
+        raise_error: Option<String>,
+        unpins: Vec<GameWindow>,
+        unpin_refused: bool,
     }
 
     impl Desktop for Fake {
@@ -3176,6 +3652,57 @@ mod tests {
             self.terminate_reply
                 .clone()
                 .unwrap_or(TerminateOutcome::Ended(Some(TERMINATE_EXIT_CODE)))
+        }
+        fn covering(&mut self, window: GameWindow, game_pids: &[u32]) -> Result<Covering, String> {
+            self.coverings += 1;
+            if let Some(e) = &self.covering_error {
+                return Err(e.clone());
+            }
+            let mut pids = game_pids.to_vec();
+            pids.push(window.pid);
+            let mut covering = Covering {
+                game_topmost: self.game_topmost,
+                game_area: 1920 * 1080,
+                ..Covering::default()
+            };
+            // As the walk: the same rule, and AFKLink's always-on-top windows aside.
+            for (i, (above, exe, topmost)) in self.above.iter().enumerate() {
+                if !over_game(above, &pids) {
+                    continue;
+                }
+                if *topmost && is_afklink(exe) {
+                    covering.ours_on_top = true;
+                    continue;
+                }
+                covering.covers.push(Cover {
+                    window: 0x900 + i,
+                    pid: above.pid,
+                    exe: (*exe).to_string(),
+                    class: "Qt51517QWindowIcon".into(),
+                    topmost: *topmost,
+                    overlap: above.overlap,
+                });
+            }
+            Ok(covering)
+        }
+        fn raise(&mut self, _: &Record, window: GameWindow, lift: Lift) -> Result<(), String> {
+            self.raises.push((window, lift));
+            if let Some(e) = &self.raise_error {
+                return Err(e.clone());
+            }
+            // As Windows does: the game is always on top from then.
+            if lift == Lift::Topmost {
+                self.game_topmost = true;
+            }
+            Ok(())
+        }
+        fn unpin(&mut self, _: &Record, window: GameWindow) -> Result<String, NotUndone> {
+            self.unpins.push(window);
+            if self.unpin_refused {
+                return Err(NotUndone::Refused("SetWindowPos refused: denied".into()));
+            }
+            self.game_topmost = false;
+            Ok("SetWindowPos HWND_NOTOPMOST".into())
         }
     }
 
@@ -4012,6 +4539,431 @@ mod tests {
         };
         run.on(1.0);
         assert_eq!(run.fake.described, vec![5], "not on a left-alone line");
+    }
+
+    /// A visible window of another program over half the game's frame.
+    fn over(pid: u32) -> Above {
+        Above {
+            pid,
+            visible: true,
+            cloaked: false,
+            click_through: false,
+            overlap: 1920 * 1080 / 2,
+        }
+    }
+
+    /// A game in front, its window 77 of pid 10.
+    fn in_front() -> Run {
+        let mut run = Run::new();
+        run.game(&[10], true);
+        run.fake.obs.foreground = Foreground::Game;
+        run
+    }
+
+    /// The game in front, under a window of another program that is not always on top: raised at
+    /// once, never activated; the next look with nothing over it says it is on top again.
+    #[test]
+    fn a_game_in_front_under_another_window_is_raised_above_it() {
+        let mut run = in_front();
+        run.on(0.0);
+        assert_eq!(run.fake.coverings, 1);
+        assert!(run.fake.raises.is_empty(), "nothing over it");
+        run.fake.above = vec![(over(40), "Telegram.exe", false)];
+        run.on(0.5);
+        assert_eq!(run.fake.raises.len(), 1);
+        assert_eq!(run.fake.raises[0].0.id, 77);
+        assert_eq!(run.fake.raises[0].1, Lift::Top);
+        assert!(run.fake.focuses.is_empty(), "the game has the front");
+        assert_eq!(run.sup.totals.raised, 1);
+        let said = run
+            .log
+            .0
+            .iter()
+            .find(|(_, l)| l.contains("raised above the windows over it"))
+            .map(|(level, l)| (*level, l.clone()))
+            .unwrap();
+        assert_eq!(said.0, Level::Debug);
+        for part in [
+            "window 0x900 of Telegram.exe (pid 40, class \"Qt51517QWindowIcon\")",
+            "not always on top, over 1036800 px (50% of the game)",
+            "the game not always on top",
+        ] {
+            assert!(said.1.contains(part), "{part:?} missing: {}", said.1);
+        }
+        assert_eq!(
+            run.log.count("it goes to the top of its band (HWND_TOP)"),
+            1
+        );
+        run.fake.above.clear();
+        run.on(1.0);
+        run.on(1.5);
+        assert_eq!(
+            run.log
+                .count_at(Level::Info, "the game is on top again after 1 raise(s)"),
+            1
+        );
+        assert_eq!(run.fake.raises.len(), 1);
+        run.on(301.0);
+        assert_eq!(
+            run.log.count(
+                "raised above windows over it 1 time(s), made always on top 0 time(s), refused 0"
+            ),
+            1
+        );
+    }
+
+    /// A cover always on top while the game is not: the game is made always on top, said at info;
+    /// from then any cover is above it in the same band, so HWND_TOP.
+    #[test]
+    fn a_cover_always_on_top_makes_the_game_always_on_top() {
+        let mut run = in_front();
+        run.fake.above = vec![
+            (over(40), "overlay.exe", true),
+            (over(41), "Telegram.exe", false),
+        ];
+        run.on(0.0);
+        assert_eq!(run.fake.raises.len(), 1);
+        assert_eq!(run.fake.raises[0].1, Lift::Topmost);
+        assert_eq!(run.sup.totals.pinned, 1);
+        assert_eq!(
+            run.log.count_at(
+                Level::Info,
+                "made always on top: a window always on top lies over it"
+            ),
+            1
+        );
+        run.on(0.5);
+        run.on(1.0);
+        assert_eq!(run.fake.raises.len(), 2);
+        assert_eq!(run.fake.raises[1].1, Lift::Top);
+        assert!(
+            run.fake.unpins.is_empty(),
+            "kept while the game is in front"
+        );
+    }
+
+    /// The helper's always-on-top is undone when the session ends (the signal off), once.
+    #[test]
+    fn the_games_always_on_top_is_undone_when_the_signal_goes_off() {
+        let mut run = in_front();
+        run.fake.above = vec![(over(40), "overlay.exe", true)];
+        run.on(0.0);
+        assert_eq!(run.sup.totals.pinned, 1);
+        run.fake.above.clear();
+        run.on(5.0);
+        assert!(
+            run.fake.unpins.is_empty(),
+            "uncovered is not a reason to undo"
+        );
+        run.at(5.5, Signal::NotSet);
+        assert_eq!(run.fake.unpins.len(), 1);
+        assert_eq!(run.fake.unpins[0].id, 77);
+        assert!(!run.fake.game_topmost);
+        assert_eq!(
+            run.log.count_at(
+                Level::Info,
+                "is not always on top any more (the app's signal is off"
+            ),
+            1
+        );
+        assert_eq!(run.log.count("made it so 5.5 s before"), 1);
+        run.at(6.0, Signal::Absent);
+        assert_eq!(run.fake.unpins.len(), 1, "undone once");
+    }
+
+    /// An undo Windows refuses is kept and tried again on the next tick (a warning once), until it
+    /// takes.
+    #[test]
+    fn a_refused_undo_is_tried_again() {
+        let mut run = in_front();
+        run.fake.above = vec![(over(40), "overlay.exe", true)];
+        run.on(0.0);
+        assert_eq!(run.sup.totals.pinned, 1);
+        run.fake.unpin_refused = true;
+        run.at(0.5, Signal::NotSet);
+        run.at(1.0, Signal::NotSet);
+        assert_eq!(run.fake.unpins.len(), 2, "tried again");
+        assert!(run.fake.game_topmost);
+        assert_eq!(run.log.count_at(Level::Warn, "not undone"), 1);
+        assert_eq!(run.log.count_at(Level::Debug, "not undone"), 1);
+        run.fake.unpin_refused = false;
+        run.at(1.5, Signal::NotSet);
+        assert_eq!(run.fake.unpins.len(), 3);
+        assert!(!run.fake.game_topmost);
+        run.at(2.0, Signal::NotSet);
+        assert_eq!(run.fake.unpins.len(), 3, "done: not again");
+    }
+
+    /// The game leaving the front, or its window changing or gone: undone, on the window it made
+    /// so.
+    #[test]
+    fn the_games_always_on_top_is_undone_when_it_leaves_the_front_or_its_window_changes() {
+        for (case, change) in [
+            ("the game left the front", 0),
+            ("the game's window changed", 1),
+            ("the game's window is gone", 2),
+        ] {
+            let mut run = in_front();
+            run.fake.above = vec![(over(40), "overlay.exe", true)];
+            run.on(0.0);
+            assert_eq!(run.sup.totals.pinned, 1, "{case}");
+            match change {
+                0 => {
+                    run.fake.obs.foreground = Foreground::Other {
+                        window: 5,
+                        exe: "notepad.exe".into(),
+                    }
+                }
+                1 => run.fake.obs.window.as_mut().unwrap().id = 78,
+                _ => run.fake.obs.window = None,
+            }
+            run.on(0.5);
+            assert_eq!(run.fake.unpins.len(), 1, "{case}");
+            assert_eq!(run.fake.unpins[0].id, 77, "{case}: the window it made so");
+            assert_eq!(run.log.count(&format!("any more ({case}")), 1, "{case}");
+            run.on(1.0);
+            assert_eq!(run.fake.unpins.len(), 1, "{case}: once");
+        }
+    }
+
+    /// A game always on top by itself is never made so, nor undone: HWND_TOP raises it among the
+    /// windows always on top.
+    #[test]
+    fn a_game_always_on_top_by_itself_is_never_undone() {
+        let mut run = in_front();
+        run.fake.game_topmost = true;
+        run.fake.above = vec![(over(40), "overlay.exe", true)];
+        run.on(0.0);
+        assert_eq!(run.fake.raises.len(), 1);
+        assert_eq!(run.fake.raises[0].1, Lift::Top);
+        run.fake.obs.foreground = Foreground::Other {
+            window: 5,
+            exe: "notepad.exe".into(),
+        };
+        run.on(0.5);
+        run.at(1.0, Signal::NotSet);
+        assert!(run.fake.unpins.is_empty());
+        assert!(run.fake.game_topmost);
+        assert_eq!(run.sup.totals.pinned, 0);
+    }
+
+    /// Windows above the game that take no click there are not covers: hidden, cloaked,
+    /// click-through, the game's own, or beside it.
+    #[test]
+    fn windows_that_take_no_click_over_the_game_are_not_covers() {
+        let mut run = in_front();
+        run.game(&[10, 11], true);
+        let passed = [
+            Above {
+                visible: false,
+                ..over(40)
+            },
+            Above {
+                cloaked: true,
+                ..over(42)
+            },
+            Above {
+                click_through: true,
+                ..over(43)
+            },
+            over(10),
+            over(11),
+            Above {
+                overlap: 0,
+                ..over(44)
+            },
+        ];
+        for above in &passed {
+            assert!(!over_game(above, &[10, 11]), "{above:?}");
+        }
+        assert!(over_game(&over(45), &[10, 11]));
+        run.fake.above = passed.iter().map(|a| (*a, "x.exe", false)).collect();
+        run.on_through(0.0, 2.0);
+        assert!(run.fake.raises.is_empty());
+    }
+
+    /// While not allowed, nothing is looked at or raised; nor while the game is not in front; nor
+    /// when the signal read again right before the raise is off.
+    #[test]
+    fn nothing_is_raised_while_not_allowed_or_not_in_front() {
+        let mut run = in_front();
+        run.fake.above = vec![(over(40), "Telegram.exe", false)];
+        run.at(0.0, Signal::NotSet);
+        run.at(0.5, Signal::Absent);
+        assert_eq!(run.fake.coverings, 0);
+        run.fake.obs.foreground = Foreground::Other {
+            window: 5,
+            exe: "notepad.exe".into(),
+        };
+        run.on(1.0);
+        assert_eq!(run.fake.coverings, 0);
+        run.fake.obs.foreground = Foreground::Game;
+        run.fake.obs.window.as_mut().unwrap().minimized = true;
+        run.on(2.0);
+        assert_eq!(run.fake.coverings, 0);
+        run.fake.obs.window.as_mut().unwrap().minimized = false;
+        run.fake.rereads.push_back(Signal::NotSet);
+        run.on(3.0);
+        assert_eq!(run.fake.coverings, 1);
+        assert!(run.fake.raises.is_empty());
+    }
+
+    /// A cover that stays is not fought every tick: raises 1 s apart, doubling, at most 10 s. A
+    /// look with nothing over the game starts the count over; the cover back, it is raised at once.
+    #[test]
+    fn raises_back_off_while_the_cover_stays() {
+        let mut run = in_front();
+        run.fake.above = vec![(over(40), "Telegram.exe", false)];
+        run.on_through(0.0, 25.0);
+        assert_eq!(run.fake.raises.len(), 6, "at 0, 1, 3, 7, 15 and 25 s");
+        run.fake.above.clear();
+        run.on(25.5);
+        run.fake.above = vec![(over(40), "Telegram.exe", false)];
+        run.on(26.0);
+        assert_eq!(run.fake.raises.len(), 7);
+        // The game out of the front starts it over too.
+        run.fake.obs.foreground = Foreground::Other {
+            window: 5,
+            exe: "notepad.exe".into(),
+        };
+        run.on(26.5);
+        run.fake.obs.foreground = Foreground::Game;
+        run.on(27.0);
+        assert_eq!(run.fake.raises.len(), 8);
+    }
+
+    /// A raise Windows refuses is a warning once, then debug; a failed read of what lies above is
+    /// said once until it changes.
+    #[test]
+    fn a_refused_raise_and_an_unread_z_order_are_said() {
+        let mut run = in_front();
+        run.fake.above = vec![(over(40), "Telegram.exe", false)];
+        run.fake.raise_error =
+            Some("SetWindowPos refused: Access is denied. (code 0x80070005)".into());
+        run.on_through(0.0, 3.0);
+        assert_eq!(run.fake.raises.len(), 3);
+        assert_eq!(run.sup.totals.raise_refused, 3);
+        assert_eq!(
+            run.log.count_at(Level::Warn, "failed (raise 1 in a row)"),
+            1
+        );
+        assert_eq!(
+            run.log.count_at(Level::Debug, "failed (raise 2 in a row)"),
+            1
+        );
+        run.fake.covering_error = Some("the game's window is gone".into());
+        run.on_through(3.5, 5.0);
+        assert_eq!(
+            run.log.count("what lies over the game's window not read"),
+            1
+        );
+    }
+
+    /// AFKLink's always-on-top window over the game — its pair request, waiting for a person — is
+    /// never a cover and never buried: the game is not made always on top over it, a pin is undone
+    /// as it comes, and only HWND_TOP over covers not always on top remains. AFKLink's main window
+    /// (not always on top) is an ordinary cover.
+    #[test]
+    fn afklinks_always_on_top_window_is_never_buried() {
+        let mut run = in_front();
+        let pair_request = (over(50), "AFKLink.exe", true);
+        run.fake.above = vec![pair_request];
+        run.on_through(0.0, 2.0);
+        assert!(run.fake.raises.is_empty());
+        assert_eq!(
+            run.log
+                .count("an always-on-top window of AFKLink's own is over it; nothing to do"),
+            1,
+            "said once"
+        );
+        run.fake.above.push((over(40), "overlay.exe", true));
+        run.on_through(2.5, 5.0);
+        assert!(
+            run.fake.raises.is_empty(),
+            "never made always on top over it"
+        );
+        run.fake.above.push((over(41), "Telegram.exe", false));
+        run.on(5.5);
+        assert_eq!(run.fake.raises, vec![(run.fake.raises[0].0, Lift::Top)]);
+        // The pair request answered: the game is made always on top over the other one.
+        run.fake.above = vec![(over(40), "overlay.exe", true)];
+        run.on(7.0);
+        assert_eq!(run.sup.totals.pinned, 1);
+        // It comes up again: the pin is undone at once, and nothing is raised over it.
+        run.fake.above = vec![pair_request, (over(40), "overlay.exe", true)];
+        run.on(7.5);
+        assert_eq!(run.fake.unpins.len(), 1);
+        assert!(!run.fake.game_topmost);
+        assert_eq!(
+            run.log
+                .count("any more (an always-on-top window of AFKLink's own is over the game"),
+            1
+        );
+        run.on_through(8.0, 20.0);
+        assert_eq!(
+            run.fake.raises.len(),
+            2,
+            "nothing raised over the pair request"
+        );
+        // AFKLink's main window, not always on top, is an ordinary cover.
+        let mut run = in_front();
+        run.fake.above = vec![(over(50), "AFKLink.exe", false)];
+        run.on(0.0);
+        assert_eq!(run.fake.raises.len(), 1);
+        assert_eq!(run.fake.raises[0].1, Lift::Top);
+    }
+
+    /// The overlap of two frames: shared pixels; none for frames apart, touching edges, or an
+    /// empty or inverted frame.
+    #[test]
+    fn frames_overlap_by_their_shared_pixels() {
+        let game = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert_eq!(game.area(), 1920 * 1080);
+        assert_eq!(game.overlap(game), 1920 * 1080);
+        let corner = Rect {
+            left: 1820,
+            top: 980,
+            right: 2020,
+            bottom: 1180,
+        };
+        assert_eq!(game.overlap(corner), 100 * 100, "partly over it");
+        assert_eq!(corner.overlap(game), 100 * 100);
+        let beside = Rect {
+            left: 1920,
+            top: 0,
+            right: 2400,
+            bottom: 1080,
+        };
+        assert_eq!(game.overlap(beside), 0, "touching is not over");
+        let empty = Rect {
+            left: 100,
+            top: 100,
+            right: 100,
+            bottom: 500,
+        };
+        assert_eq!(empty.area(), 0);
+        assert_eq!(game.overlap(empty), 0);
+        let inverted = Rect {
+            left: 500,
+            top: 500,
+            right: 100,
+            bottom: 100,
+        };
+        assert_eq!(inverted.area(), 0);
+        assert_eq!(game.overlap(inverted), 0);
+        let far = Rect {
+            left: i32::MIN,
+            top: i32::MIN,
+            right: i32::MAX,
+            bottom: i32::MAX,
+        };
+        assert_eq!(game.overlap(far), 1920 * 1080, "no overflow");
+        assert!(far.area() > 0);
     }
 
     /// The key-assisted rung counts on its own in the summary, and with SetForegroundWindow in the
